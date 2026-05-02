@@ -173,11 +173,21 @@ bash scripts/lattice-regenerate.sh --claude-md ./CLAUDE.md
 
 This rewrites the block between `<!-- lattice:checklist:start -->` and `<!-- lattice:checklist:end -->` in CLAUDE.md. Anything outside the markers is preserved (manual triage notes go in a sibling `## Triage notes` section).
 
-If `$ARGUMENTS` contains `auto`, also commit:
+**Always commit findings (v0.6.1, both standard and auto modes):**
 ```
-git add .lattice/findings/ CLAUDE.md
-git commit -m "chore(lattice): sweep <sweep-date> — <n> findings opened, <n> closed"
+git add .lattice/findings/
+git commit -m "chore(lattice): sweep <sweep-date> — persist YAML findings"
 ```
+
+This commit captures the YAML truth on disk so findings cannot disappear (the v0.5 friction point that motivated v0.6). It runs in **both standard and auto modes**.
+
+**Additional commit only if `$ARGUMENTS` contains `auto`:**
+```
+git add CLAUDE.md
+git commit -m "docs(lattice): regenerate checklist for sweep <sweep-date>"
+```
+
+This second commit captures the regenerated CLAUDE.md checklist. In standard mode, the regenerator still runs and writes CLAUDE.md, but committing it is left to the user (so they can review the diff before staging).
 
 CRITICAL/BLOCKER findings are still NEVER auto-resolved — the checklist marks them open and the user must explicitly close them via `bash scripts/lattice-close.sh <finding-id> --commit <sha> --pr <num>` after fixing.
 

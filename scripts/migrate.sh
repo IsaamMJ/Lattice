@@ -20,12 +20,36 @@
 set -euo pipefail
 
 PROJECT="$(pwd)"
-if [ "${1:-}" = "--project" ] && [ -n "${2:-}" ]; then
-  PROJECT="$2"
-fi
+FROM_V05=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project)    PROJECT="$2"; shift 2 ;;
+    --from-v0.5)  FROM_V05=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
 
 LEGACY="${PROJECT}/.cc-reef/audits"
 TARGET="${PROJECT}/.lattice/findings"
+
+# v0.5 → v0.6 migration: archive old multi-finding markdown files so they
+# don't pollute the new YAML-per-finding layout.
+if [ "${FROM_V05}" = "1" ]; then
+  V05_ARCHIVE="${PROJECT}/.lattice/archive/v0.5"
+  echo "[migrate] v0.5 → v0.6 archive mode"
+  mkdir -p "${V05_ARCHIVE}"
+  shopt -s nullglob
+  v05_count=0
+  for f in "${PROJECT}/.lattice/findings/"*.md; do
+    [ -e "${f}" ] || continue
+    base=$(basename "${f}")
+    mv "${f}" "${V05_ARCHIVE}/${base}"
+    v05_count=$((v05_count + 1))
+  done
+  echo "[migrate] archived ${v05_count} v0.5 markdown finding(s) to ${V05_ARCHIVE}"
+  echo "[migrate] new v0.6 sweeps will write to ${PROJECT}/.lattice/findings/open/<date>/"
+fi
 
 note() { printf "[migrate] %s\n" "$*"; }
 
