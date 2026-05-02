@@ -145,6 +145,19 @@ else
   warn "docs/finding-schema.md does not declare 'one YAML file per finding' (v0.6 contract)"
 fi
 
+# --- 9. Functional lifecycle test suite (v0.6.2 protection layer) -----
+note "running lifecycle test suite"
+if [ -f "${ROOT}/scripts/test-lifecycle.sh" ]; then
+  if bash "${ROOT}/scripts/test-lifecycle.sh" > /tmp/lattice-test-output.log 2>&1; then
+    ok "test-lifecycle.sh"
+  else
+    warn "test-lifecycle.sh failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-test-output.log >&2 || true
+  fi
+else
+  warn "missing scripts/test-lifecycle.sh (lifecycle protection layer)"
+fi
+
 # --- Result ------------------------------------------------------------
 if [ "${fail}" -ne 0 ]; then
   printf "[validate] FAILED\n" >&2
