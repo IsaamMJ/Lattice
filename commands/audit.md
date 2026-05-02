@@ -117,7 +117,7 @@ Per claim:
 **Hard rule**: `INTENTIONAL` without a commit hash or CLAUDE.md citation is downgraded to `UNVERIFIABLE`. This prevents lazy "probably intentional" verdicts.
 
 ### Step 8 — Write findings file
-Write to `.cc-reef/audits/<doc-basename>-<YYYYMMDD-HHMMSS>.md` using exactly this schema:
+Write to `.lattice/findings/<doc-basename>-<YYYYMMDD-HHMMSS>.md` using exactly this schema:
 
 ```markdown
 # Audit: <doc-path>
@@ -171,7 +171,7 @@ status: ACTIVE | DEPRECATED | IN_PROGRESS
 Output the unified diff between the original doc and the proposed rewrite. **Do not write the file.** Tell the user:
 
 ```
-Audit complete. Findings: .cc-reef/audits/<file>
+Audit complete. Findings: .lattice/findings/<file>
 Proposed rewrite diff above.
 
 Review and reply 'apply' to overwrite <doc-path>, or 'edit' to discuss changes first.
@@ -193,7 +193,7 @@ Wait for explicit approval before any `Write` call against the doc.
 
 - **Read / Grep / Glob**: claim verification (never Bash for search)
 - **Bash**: only for `git log` / `git show` / `git diff`
-- **Write**: only for the findings file in `.cc-reef/audits/` — never for the target doc until approved
+- **Write**: only for the findings file in `.lattice/findings/` — never for the target doc until approved
 - **Task (subagent dispatch)**: only for `oh-my-claudecode:tracer` in Step 6, only when evidence is genuinely ambiguous
 
 ## Output discipline

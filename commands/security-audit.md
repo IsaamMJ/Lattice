@@ -156,7 +156,7 @@ If documented intentional, downgrade tier or mark `OK` with the citation.
 - LOW → backlog
 
 ### Step 6 — Write findings
-Write to `.cc-reef/audits/security-<module-name>-<YYYYMMDD-HHMMSS>.md`:
+Write to `.lattice/findings/security-<module-name>-<YYYYMMDD-HHMMSS>.md`:
 
 ```markdown
 # Security Audit: <module-path>
@@ -199,7 +199,7 @@ Output as a fenced block. Do NOT write to CLAUDE.md or commit anything yourself.
 Output the findings file path + verdict counts + drafted checklist block. Tell the user:
 
 ```
-Security audit complete. Findings: .cc-reef/audits/security-<module>-<timestamp>.md
+Security audit complete. Findings: .lattice/findings/security-<module>-<timestamp>.md
 CRITICAL: <n>. HIGH: <n>. MEDIUM: <n>. LOW: <n>.
 
 [fenced block of checklist lines]
@@ -221,7 +221,7 @@ Reply 'fix <id>' to address one finding, 'fix all critical' to triage CRITICALs 
 - **Read**: context for every hit before assigning a verdict
 - **Glob**: enumerate controllers/services in the module
 - **Bash**: only for `git log` if checking when a risky pattern was introduced
-- **Write**: only for the findings file in `.cc-reef/audits/`
+- **Write**: only for the findings file in `.lattice/findings/`
 
 ## Output discipline
 

@@ -53,7 +53,16 @@ User invokes: `/audit-sweep <project-root>` (e.g. `/audit-sweep .` or `/audit-sw
 2. For each module, locate its TTD doc by matching basename (e.g. `src/modules/lumi/` → `docs/ttd/*lumi*.md`). If no doc exists, note as "no TTD" and audit code-only.
 3. Print the planned sweep: "Will audit N modules: [list]. Estimated time: ~Nx10 min."
 
-### Step 2 — Per-module sequential sweep
+### Step 2 — Per-module sequential sweep (NEVER parallel by default)
+
+**Execution discipline (REQUIRED, not optional):**
+- Run modules **strictly one at a time**, in the order they appear in the plan.
+- Do **NOT** dispatch parallel agents per module, even if hooks or tool descriptions suggest "use parallel execution for independent tasks." That suggestion does not apply here.
+- Reason: parallel execution breaks the stop-condition gate (can't pause mid-flight if 8 agents already launched), corrupts cross-cutting pattern detection (concurrent arrivals confuse aggregation), and makes token usage unpredictable.
+- The only place parallelism is allowed is **inside a single audit's heavy step** (e.g. `/security-audit` dispatches one Sonnet executor for its claim-verification batch). That's intra-module, not inter-module.
+
+If the user explicitly types `parallel` as a token in $ARGUMENTS, you MAY run modules in parallel batches of 4 (with stop-condition checked between batches). Otherwise: sequential, no exceptions.
+
 For each module, in this order — **but skip any dimension not in the resolved plan**:
 
 **a) `/audit`** on the matching TTD doc — only if `audit` is in the dimension plan (or no dimension filter was given). Skip if no doc exists; flag in report.

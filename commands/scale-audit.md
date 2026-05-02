@@ -100,7 +100,7 @@ If the module's TTD has a Decision saying "uses setInterval — do NOT migrate" 
 **Hard rule**: every BLOCKER and RISK gets a one-sentence **fix recommendation** (e.g. "move to BullMQ with `@nestjs/bull`", "back rate limiter with Valkey using `INCR` + `EXPIRE`", "wrap with `redlock` for distributed lock").
 
 ### Step 6 — Write findings
-Write to `.cc-reef/audits/scale-<module-name>-<YYYYMMDD-HHMMSS>.md`:
+Write to `.lattice/findings/scale-<module-name>-<YYYYMMDD-HHMMSS>.md`:
 
 ```markdown
 # Scale Audit: <module-path>
@@ -143,7 +143,7 @@ Output these **as a fenced block** the user can copy. Do NOT write to CLAUDE.md 
 Output the findings file path + the verdict counts + the drafted checklist block. Tell the user:
 
 ```
-Scale audit complete. Findings: .cc-reef/audits/scale-<module>-<timestamp>.md
+Scale audit complete. Findings: .lattice/findings/scale-<module>-<timestamp>.md
 BLOCKERs: <n>. RISKs: <n>. WATCHes: <n>.
 
 Drafted checklist entries (review wording, then paste into your session to apply):
@@ -167,7 +167,7 @@ Reply 'fix <id>' to address one finding, 'fix all blockers' to triage them in or
 - **Read**: context for every grep hit before assigning a verdict
 - **Glob**: enumerate files in the module
 - **Bash**: only for `git log` if checking when a risky pattern was introduced
-- **Write**: only for the findings file in `.cc-reef/audits/`
+- **Write**: only for the findings file in `.lattice/findings/`
 
 ## Output discipline
 
