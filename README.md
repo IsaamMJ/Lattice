@@ -9,9 +9,32 @@ Lattice ships four slash commands for Claude Code:
 | `/audit <doc-path>` | Doc-vs-code drift; rewrites docs in contract format |
 | `/scale-audit <module-path>` | Horizontal-scaling killers (in-memory state, `setInterval` crons, in-process rate limiters) |
 | `/security-audit <module-path>` | Auth gaps, signature bypass, secret leaks, IDOR, OWASP Top 10 |
-| `/audit-sweep <project-root>` | Runs all three across every module; aggregates into one report |
+| `/audit-sweep <project-root>` | Runs all three across every module via one dispatch per module; aggregates into one report |
 
 Every finding cites a file and line. Every verdict requires evidence. Audits stop at human-approval gates — Lattice never auto-applies fixes or auto-commits.
+
+---
+
+## 30-second quickstart
+
+```bash
+# 1. Install
+curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/install.sh | bash
+
+# 2. cd into the project you want to audit, then in Claude Code:
+/audit-sweep .
+
+# 3. Findings land in .lattice/findings/sweep-<timestamp>.md
+```
+
+Expected output:
+```
+[SWEEP] Module 1/5 starting: src/modules/payments (dimensions: audit, scale, security)
+[SWEEP] Module 1/5 complete: src/modules/payments — audit=12OK/3DRIFT scale=0B/2R security=1C/4H
+[SWEEP] Module 2/5 starting: src/modules/admin ...
+...
+Lattice sweep complete. Findings: .lattice/findings/sweep-20260502-060500.md
+```
 
 ---
 
@@ -55,37 +78,30 @@ Commands appear namespaced: `/lattice:audit`, `/lattice:scale-audit`, etc.
 curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/update.sh | bash
 ```
 
+### Migrate from pre-v0.5 (legacy `.cc-reef/audits/`)
+
+```bash
+bash scripts/migrate.sh   # moves legacy findings to .lattice/findings/
+```
+
 ---
 
-## 5-minute quickstart
+## Architecture (v0.5)
 
-Pick one module in your project and run all three audits:
+`/audit-sweep` dispatches **one Sonnet sub-agent per module**, not per dimension. A 5-module sweep = 5 dispatches (not 15). Each module-scoped agent runs all in-scope dimensions inline, returns combined findings. Anthropic's prompt caching reuses the methodology library across module dispatches at ~90% discount.
 
-```
-/audit docs/ttd/<your-module>.md
-/scale-audit src/modules/<your-module>
-/security-audit src/modules/<your-module>
-```
+Standalone mode: works without `oh-my-claudecode` — same methodology, same verdict quality, slightly more tokens.
 
-Or do it in one shot:
-
-```
-/audit-sweep .
-```
-
-Findings land in `.lattice/findings/<audit-type>-<module>-<timestamp>.md`. Each finding has:
-
-- A verdict (DRIFT / OK / INTENTIONAL / UNVERIFIABLE for `/audit`; BLOCKER / RISK / WATCH / OK for `/scale-audit`; CRITICAL / HIGH / MEDIUM / LOW for `/security-audit`)
-- Evidence (`file:line` or commit hash)
-- A recommended action (PATCH_DOC, NO_ACTION, NEEDS_HUMAN, or a fix snippet)
-
-Then triage: fix CRITICALs/BLOCKERs immediately, defer the rest into a `Pre-deploy checklist` section in your `CLAUDE.md`.
+See `docs/finding-schema.md` for the output contract every skill conforms to.
 
 ---
 
 ## Methodology
 
-Read `docs/methodology.md` for the full living-truth-first methodology and the four-verdict model. Read `docs/contract-format.md` for the doc rewrite spec (`Module / Context / Contracts / Decisions / Constraints / Unresolved`). Read `docs/postmortem-reef.md` for the failure that motivated this.
+- `docs/methodology.md` — full living-truth-first methodology and the four-verdict model
+- `docs/contract-format.md` — doc rewrite spec (Module / Context / Contracts / Decisions / Constraints / Unresolved)
+- `docs/finding-schema.md` — output schema all skills conform to
+- `docs/postmortem-reef.md` — the failure that motivated this
 
 ---
 
@@ -95,15 +111,19 @@ Read `docs/methodology.md` for the full living-truth-first methodology and the f
 - Not an auto-fixer (every change is human-approved)
 - Not a code reviewer (use `oh-my-claudecode:code-reviewer` or your team for that)
 - Not a multi-language linter (NestJS/TypeScript-tuned out of the box; patterns generalize)
+- Not yet recommended for public adoption — currently being hardened on real projects
 
 ---
 
 ## Roadmap
 
-- **v0.2** — `update.sh` + better fallback when `oh-my-claudecode:executor` isn't installed
-- **v0.3** — `/mock-sweep` (find stubs/TODOs about to ship), `/reliability-audit` (error handling, retries, idempotency)
-- **v0.4** — `/perf-audit` (N+1 queries, blocking I/O, missing indexes)
-- **v1.0** — when 5+ skills + 3 real users + Claude Code marketplace listing
+- **v0.5** (current) — module-scoped dispatch, prompt-cache-aware, output schema contract, sequential echo-back guard, validate.sh cross-skill checks
+- **v0.6** — `/checklist-sweep` (CLAUDE.md hygiene, auto-mark-done)
+- **v0.7** — `/audit-diff` (incremental, per-module memory via Anthropic Memory tool)
+- **v0.8** — `/mock-sweep` (3rd dimension: stubs, NODE_ENV bypass, mockLink-class fallbacks)
+- **v1.0** — spec written after v0.8, based on what real usage on real projects validates
+
+See `CHANGELOG.md` for full version history.
 
 ---
 

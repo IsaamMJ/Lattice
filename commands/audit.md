@@ -21,6 +21,12 @@ The fix is the same in both cases: **no verdict without an artifact** (file:line
 
 User invokes: `/audit <doc-path>` (e.g. `/audit docs/ttd/08-module-lumi.md`)
 
+## OMC fallback (works without oh-my-claudecode installed)
+
+Lattice prefers to dispatch its heaviest step (claim verification) to a Sonnet sub-agent for cost. If `oh-my-claudecode:executor` is installed, it's used. If not, the same step runs inline in the main session — **same methodology, same verdict quality, just slightly more tokens**. No degraded mode, no missing features. Lattice works standalone.
+
+Detection: at Step 4, attempt the dispatch. On dispatch failure (OMC not present), continue inline with the same prompt body.
+
 ## Methodology (execute in this exact order)
 
 ### Step 1 — Load living truth FIRST

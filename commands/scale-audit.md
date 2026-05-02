@@ -19,6 +19,12 @@ This skill finds those patterns *before* the scale-up, with file:line evidence p
 
 User invokes: `/scale-audit <module-path>` (e.g. `/scale-audit src/modules/lumi`)
 
+## OMC fallback (works without oh-my-claudecode installed)
+
+Lattice prefers to dispatch its heaviest step (pattern hunting + context reads) to a Sonnet sub-agent for cost. If `oh-my-claudecode:executor` is installed, it's used. If not, the same step runs inline in the main session — **same methodology, same verdict quality, just slightly more tokens**. No degraded mode, no missing features.
+
+Detection: at Step 3, attempt the dispatch. On dispatch failure, continue inline with the same prompt body.
+
 ## Risk patterns to hunt
 
 For each, the evidence is concrete: a `file:line` showing the pattern.

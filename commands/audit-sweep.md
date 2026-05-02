@@ -1,5 +1,5 @@
 ---
-description: Run /audit + /scale-audit + /security-audit on every module (or a subset), aggregate into one master findings file with cross-cutting pattern detection. Supports dimension and module filtering.
+description: Run audit + scale + security across every module via one dispatch per module (module-scoped agents), aggregate into one master findings file with cross-cutting pattern detection.
 argument-hint: <project-root> [audit|scale|security] [auto] [<module-paths...>]
 ---
 
@@ -11,76 +11,128 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 
 | Token | Means |
 |---|---|
-| `audit` | run only `/audit` (skip scale + security) |
-| `scale` | run only `/scale-audit` |
-| `security` | run only `/security-audit` |
+| `audit` | run only the audit dimension |
+| `scale` | run only the scale dimension |
+| `security` | run only the security dimension |
 | `auto` | auto-apply drafted checklist entries to CLAUDE.md and commit at end |
 | Path starting with `src/modules/` or absolute path | explicit module to audit (overrides auto-discovery) |
 | `.` or any other path | project root (defaults to `.` if none given) |
 
-**Dimension filtering**: If ANY of `audit` / `scale` / `security` are present, run ONLY those. If NONE are present, run all three. Multiple dimensions allowed: `security scale` runs both, skips doc audit.
+**Dimension filtering**: If ANY of `audit` / `scale` / `security` are present, run ONLY those. If NONE are present, run all three.
 
 **Module filtering**: If one or more `src/modules/X` paths are given, audit ONLY those modules. If none given, auto-discover via `Glob src/modules/*/`.
 
-**Examples**:
-- `/audit-sweep .` → all 3 dimensions, all modules, manual triage
-- `/audit-sweep . auto` → all 3, all modules, auto-apply checklist
-- `/audit-sweep . security` → security only, all modules
-- `/audit-sweep . security auto` → security only, all modules, auto-apply
-- `/audit-sweep . security src/modules/payments src/modules/admin` → security only, those 2 modules
-- `/audit-sweep . security auto src/modules/payments` → security only, payments only, auto-apply
+Print the resolved plan upfront: `Sweep plan: dimensions=[...], modules=[...], auto=true|false`.
 
-Print the resolved plan upfront before running anything: "Sweep plan: dimensions=[...], modules=[...], auto=true|false".
-
-**Auto-mode caveat**: CRITICAL/BLOCKER fixes are NEVER auto-applied regardless of mode — those always require human approval.
+**Auto-mode caveat**: CRITICAL/BLOCKER fixes are NEVER auto-applied — those always require human approval.
 
 # audit-sweep
 
-You are running a full Lattice audit pass: doc-vs-code drift, scale risks, and security exposures across every module in the project. You produce one aggregated findings file and a single triage prompt at the end.
+You are running a full Lattice audit pass across every module in the project. You produce one aggregated findings file and a single triage prompt at the end.
 
 ## Why this exists
 
-Per-module per-skill invocation is 27 commands for a 9-module project. This skill is the orchestrator: one invocation, full coverage, one master report. Keeps cross-cutting patterns (same defect class across modules) visible — those are bundle-PR candidates.
+A 9-module project = 27 skill invocations under the old per-skill model. v0.5 collapses this to **one dispatch per module** — each module gets a single Sonnet sub-agent that runs all in-scope dimensions inline, then returns combined findings. Cuts cold-start tax 3×, preserves cross-cutting analysis within a module, lets Anthropic prompt caching reuse the methodology library across all module dispatches.
 
 ## Trigger
 
-User invokes: `/audit-sweep <project-root>` (e.g. `/audit-sweep .` or `/audit-sweep jiive-backend`)
+User invokes: `/audit-sweep <project-root>` (e.g. `/audit-sweep .` or `/audit-sweep . security`)
 
 ## Methodology
 
 ### Step 1 — Enumerate modules
 1. Glob `<project-root>/src/modules/*/` to enumerate module directories.
 2. For each module, locate its TTD doc by matching basename (e.g. `src/modules/lumi/` → `docs/ttd/*lumi*.md`). If no doc exists, note as "no TTD" and audit code-only.
-3. Print the planned sweep: "Will audit N modules: [list]. Estimated time: ~Nx10 min."
+3. Print the planned sweep: `Will audit N modules: [list]. Mode: SEQUENTIAL (one module at a time).`
 
-### Step 2 — Per-module sequential sweep (NEVER parallel by default)
+### Step 2 — Per-module sequential dispatch (NEVER parallel by default)
 
 **Execution discipline (REQUIRED, not optional):**
-- Run modules **strictly one at a time**, in the order they appear in the plan.
-- Do **NOT** dispatch parallel agents per module, even if hooks or tool descriptions suggest "use parallel execution for independent tasks." That suggestion does not apply here.
-- Reason: parallel execution breaks the stop-condition gate (can't pause mid-flight if 8 agents already launched), corrupts cross-cutting pattern detection (concurrent arrivals confuse aggregation), and makes token usage unpredictable.
-- The only place parallelism is allowed is **inside a single audit's heavy step** (e.g. `/security-audit` dispatches one Sonnet executor for its claim-verification batch). That's intra-module, not inter-module.
 
-If the user explicitly types `parallel` as a token in $ARGUMENTS, you MAY run modules in parallel batches of 4 (with stop-condition checked between batches). Otherwise: sequential, no exceptions.
+You MUST follow this echo-back protocol for every module — these echoes are the audit trail that prevents the v0.4 parallel-drift bug from recurring:
 
-For each module, in this order — **but skip any dimension not in the resolved plan**:
+1. **Before dispatching** module K of N, output exactly this line:
+   ```
+   [SWEEP] Module K/N starting: <module-path> (dimensions: <list>)
+   ```
+2. **Dispatch one Sonnet sub-agent** for that module (see prompt template below). Wait for it to return.
+3. **After it returns**, output exactly this line:
+   ```
+   [SWEEP] Module K/N complete: <module-path> — audit=<n>OK/<n>DRIFT scale=<n>B/<n>R security=<n>C/<n>H
+   ```
+4. **Only then** may you proceed to module K+1.
 
-**a) `/audit`** on the matching TTD doc — only if `audit` is in the dimension plan (or no dimension filter was given). Skip if no doc exists; flag in report.
-**b) `/scale-audit`** on the module path — only if `scale` is in the dimension plan (or no filter).
-**c) `/security-audit`** on the module path — only if `security` is in the dimension plan (or no filter).
+If any of these echo lines is missing or out of order, you have drifted. Stop, report the drift, and ask the user how to recover.
 
-After each module's three audits complete, append a one-line status to the running summary: `<module>: audit=N OK/N DRIFT, scale=N BLOCKER/N RISK, security=N CRIT/N HIGH`.
+**No parallel batches** unless the user explicitly typed `parallel` as a token in $ARGUMENTS. Reason: parallel breaks the stop-condition gate, corrupts cross-cutting detection, and makes token usage unpredictable.
 
-**Stop-condition gate**: if any single module produces > 5 CRITICAL or > 2 BLOCKER findings, **pause the sweep**, print the partial summary, and ask the user whether to continue, fix, or abort. This prevents blindly burning tokens on a module that's genuinely broken.
+**Module-scoped dispatch prompt template** (use this for each module — keep the methodology block IDENTICAL across all dispatches so Anthropic prompt caching hits the cache after the first module):
+
+```
+[METHODOLOGY LIBRARY — keep this block byte-identical across every module dispatch in this sweep so the prompt cache hits]
+
+You are a Lattice module-scoped auditor. You run up to three audit dimensions on a single module and return combined findings. You never spawn further sub-agents.
+
+Read these living-truth sources first (in order):
+1. CLAUDE.md (project root)
+2. AGENTS.md (if present)
+3. Any drift log or ADR directory referenced by CLAUDE.md
+4. The module's TTD doc (if one exists)
+
+For each dimension in scope, follow the methodology referenced in:
+- Audit dimension: see commands/audit.md Steps 1-7 (skip Step 4 dispatch — execute the verification inline; skip Steps 9-10 contract rewrite — only the orchestrator does that on demand)
+- Scale dimension: see commands/scale-audit.md Steps 1-5 (skip Step 3 executor dispatch — execute the pattern hunt inline)
+- Security dimension: see commands/security-audit.md Steps 1-5 (skip Step 3 executor dispatch — execute the pattern hunt inline)
+
+Verdict tiers:
+- Audit: OK | DRIFT | INTENTIONAL | UNVERIFIABLE (every INTENTIONAL needs commit hash or CLAUDE.md citation)
+- Scale: BLOCKER | RISK | WATCH | OK
+- Security: CRITICAL | HIGH | MEDIUM | LOW | OK
+
+Hard rules across all dimensions:
+- No verdict without file:line evidence
+- No CRITICAL/BLOCKER without an attack scenario or failure mode
+- Mark false_positive=true for test files (*.spec.ts, *.test.ts), CLI scripts, files inside guards/ directory
+- Never auto-apply fixes
+- Use Grep, Read, Glob — never Bash grep (Windows path issues)
+
+Write findings to .lattice/findings/ using the schema in docs/finding-schema.md:
+- audit-<module>-<ts>.md
+- scale-<module>-<ts>.md
+- security-<module>-<ts>.md
+
+Return a JSON summary to the orchestrator:
+{
+  "module": "<path>",
+  "audit": { "OK": n, "DRIFT": n, "INTENTIONAL": n, "UNVERIFIABLE": n, "files": ["..."] },
+  "scale": { "BLOCKER": n, "RISK": n, "WATCH": n, "OK": n, "files": ["..."] },
+  "security": { "CRITICAL": n, "HIGH": n, "MEDIUM": n, "LOW": n, "OK": n, "files": ["..."] },
+  "cross_cutting_candidates": ["<one-line pattern>", ...]
+}
+
+[END METHODOLOGY LIBRARY]
+
+[MODULE-SPECIFIC ARGS — these vary per dispatch and come AFTER the cached methodology block]
+
+Module to audit: <module-path>
+TTD doc (if any): <doc-path or "none">
+Dimensions in scope: <comma-separated subset of audit,scale,security>
+Project root: <root>
+```
+
+**Stop-condition gate**: if any single module returns > 5 CRITICAL or > 2 BLOCKER findings, **pause the sweep**, print the partial summary, and ask the user whether to continue, fix, or abort.
+
+**OMC fallback**: dispatch via `oh-my-claudecode:executor` (sonnet) if available. If OMC is not installed, run the module-scoped audit directly in the main session using the same methodology block above.
 
 ### Step 3 — Aggregate
-Write ONE master findings file at `.lattice/findings/sweep-<YYYYMMDD-HHMMSS>.md` containing:
+After all module dispatches complete, write ONE master findings file at `.lattice/findings/sweep-<YYYYMMDD-HHMMSS>.md`:
 
 ```markdown
 # Lattice Sweep: <project-root>
 date: <ISO timestamp>
 modules audited: <count>
 duration: <Nm>
+mode: SEQUENTIAL (module-scoped dispatch, v0.5)
 
 ## Per-module summary table
 | Module | Doc audit (OK/DRIFT/INT/UNV) | Scale (B/R/W/OK) | Security (C/H/M/L/OK) |
@@ -88,65 +140,52 @@ duration: <Nm>
 | lumi | 14/5/0/0 | 0/3/2/5 | ... |
 
 ## Critical / Blocker findings (need attention now)
-[every CRITICAL from /security-audit + every BLOCKER from /scale-audit, inline with file:line + fix]
+[every CRITICAL from security + every BLOCKER from scale, inline with file:line + fix]
 
 ## High / Risk findings (need triage)
-[every HIGH from /security-audit + every RISK from /scale-audit, inline]
+[every HIGH from security + every RISK from scale, inline]
 
 ## Drift findings (doc rewrites needed)
-[every DRIFT from /audit, summarized — full details in per-doc findings files]
+[every DRIFT from audit, summarized — full details in per-doc findings files]
 
 ## Cross-cutting patterns (bundle-PR candidates)
 [auto-detected: same defect class appearing in 2+ modules]
-- e.g. "No env-guard at boot — found in 3 modules (rag, results, payments). Bundle as single PR."
-- e.g. "OpenAI default 10-min timeout — found in 3 files across 2 modules. Bundle."
 
-## Deferred (in CLAUDE.md "Pre-deploy checklist" candidates)
+## Deferred (CLAUDE.md "Pre-deploy checklist" candidates)
 - MEDIUM/LOW security findings: <count>
 - WATCH scale findings: <count>
 
 ## Per-module findings files
-- .lattice/findings/audit-08-module-lumi-<ts>.md
-- .lattice/findings/scale-lumi-<ts>.md
-- .lattice/findings/security-lumi-<ts>.md
-- ... (one block per module)
+[one block per module with all 3 dimension files]
 ```
 
 ### Step 4 — Cross-cutting pattern detection
-Scan all findings across all modules for repeated defect classes. Heuristic: any pattern (e.g. "missing env-guard at boot", "OpenAI default timeout", "race-prone read-then-update") appearing in 2+ modules gets flagged as a bundle-PR candidate.
-
-For each cross-cutting pattern, suggest:
-- Single PR title (e.g. "Env-guard sweep — fail-fast on missing prod credentials")
-- List of files to modify
-- Estimated effort
+Scan all findings across all modules for repeated defect classes. Any pattern appearing in 2+ modules = bundle-PR candidate. For each, suggest single PR title + files to modify + estimated effort.
 
 ### Step 5 — Auto-apply checklist (only if `auto` flag present)
 If `$ARGUMENTS` contains `auto`:
-1. Append all drafted HIGH/MEDIUM/RISK/WATCH checklist entries to `CLAUDE.md` under a new dated sub-heading: `## Pre-deploy checklist — sweep <YYYY-MM-DD>`.
-2. Commit the change with: `docs: append sweep <YYYY-MM-DD> findings to pre-deploy checklist`.
+1. Append all drafted HIGH/MEDIUM/RISK/WATCH checklist entries to `CLAUDE.md` under `## Pre-deploy checklist — sweep <YYYY-MM-DD>`.
+2. Commit: `docs: append sweep <YYYY-MM-DD> findings to pre-deploy checklist`.
 3. Report what was applied.
 
-If `auto` is NOT present, skip this step and proceed to Step 6.
-
-CRITICAL/BLOCKER findings are NEVER auto-applied. They always wait for explicit `fix <id>` or `fix all critical` from the user.
+CRITICAL/BLOCKER findings are NEVER auto-applied.
 
 ### Step 6 — Stop with one prompt
-Output the master findings file path + headline counts + one prompt.
 
 If `auto` mode applied checklist:
 ```
 Lattice sweep complete. Findings: .lattice/findings/sweep-<ts>.md
 - Modules: <n>
 - CRITICAL/BLOCKER: <n> (need attention today — NOT auto-applied)
-- HIGH/RISK: <n> (auto-applied to CLAUDE.md pre-deploy checklist, commit <hash>)
+- HIGH/RISK: <n> (auto-applied to CLAUDE.md, commit <hash>)
 - MEDIUM/WATCH: <n> (auto-applied)
 - LOW: <n> (auto-applied)
 - Cross-cutting bundles suggested: <n>
 
-Reply 'fix all critical' to triage CRITICAL/BLOCKERs in order, 'show bundles' to drill into cross-cutting PR candidates, or 'discuss' to review tradeoffs first.
+Reply 'fix all critical' to triage, 'show bundles' to drill into PR candidates, or 'discuss'.
 ```
 
-If NOT in auto mode (default):
+Otherwise:
 ```
 Lattice sweep complete. Findings: .lattice/findings/sweep-<ts>.md
 - Modules: <n>
@@ -154,26 +193,29 @@ Lattice sweep complete. Findings: .lattice/findings/sweep-<ts>.md
 - HIGH/RISK: <n> (need triage this week)
 - Cross-cutting bundles suggested: <n>
 
-Reply 'fix all critical' to triage CRITICAL/BLOCKERs in order, 'apply checklist' to add HIGH/MEDIUM/RISK/WATCH items to CLAUDE.md, 'show bundles' to drill into the cross-cutting PR candidates, or 'discuss' to review tradeoffs first.
+Reply 'fix all critical', 'apply checklist', 'show bundles', or 'discuss'.
 ```
 
 ## Anti-patterns (refuse)
 
-- ❌ Auto-applying any rewrite or fix during the sweep
-- ❌ Auto-committing anything
-- ❌ Skipping the stop-condition gate even if the sweep is "almost done"
-- ❌ Aggregating without preserving the per-module findings files (need them for drill-down)
+- ❌ Skipping the [SWEEP] echo lines — they ARE the parallel-drift guard
+- ❌ Dispatching module K+1 before module K's complete-echo
+- ❌ Dispatching the 3 dimensions as 3 separate sub-agents per module (v0.4 behavior — wasteful spin-up)
+- ❌ Auto-applying fixes during the sweep
+- ❌ Skipping the stop-condition gate
 - ❌ Inventing modules that don't exist on disk
 
 ## Tool usage
 
 - **Glob**: enumerate modules + match TTDs
-- Per audit: this skill invokes `/audit`, `/scale-audit`, `/security-audit` in sequence — they handle their own tool usage
-- **Write**: only the master findings file in `.lattice/findings/sweep-*.md`
+- **Task / Agent dispatch**: ONE per module (Sonnet, module-scoped)
+- **Write**: master findings file in `.lattice/findings/sweep-*.md`
+- **Bash**: only for git operations and the auto-mode commit
 
 ## Output discipline
 
-- Print "Sweep starting: N modules planned" upfront
-- One status line per module after its triple completes
+- Print resolved sweep plan upfront
+- One `[SWEEP] Module K/N starting` line per module before dispatch
+- One `[SWEEP] Module K/N complete` line per module after return
 - Final output = master findings file path + counts + one prompt
-- Do not summarize — the file is the summary
+- The findings file IS the summary — do not re-summarize in chat
