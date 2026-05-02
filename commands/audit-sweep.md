@@ -1,9 +1,11 @@
 ---
 description: Run /audit + /scale-audit + /security-audit on every module under src/modules/, aggregate into one master findings file with cross-cutting pattern detection.
-argument-hint: <project-root>
+argument-hint: <project-root> [auto]
 ---
 
 Project root to sweep: $ARGUMENTS (defaults to `.` if empty)
+
+**Auto-mode**: if `$ARGUMENTS` contains the literal token `auto` (e.g. `/audit-sweep . auto`), the skill will automatically apply drafted checklist entries to `CLAUDE.md` and commit them at the end of the sweep. Without `auto`, the skill stops with the drafted block and waits for `apply checklist` from the user. CRITICAL/BLOCKER fixes are NEVER auto-applied — those always require human approval, regardless of mode.
 
 # audit-sweep
 
@@ -82,9 +84,33 @@ For each cross-cutting pattern, suggest:
 - List of files to modify
 - Estimated effort
 
-### Step 5 — Stop with one prompt
-Output the master findings file path + headline counts + one prompt:
+### Step 5 — Auto-apply checklist (only if `auto` flag present)
+If `$ARGUMENTS` contains `auto`:
+1. Append all drafted HIGH/MEDIUM/RISK/WATCH checklist entries to `CLAUDE.md` under a new dated sub-heading: `## Pre-deploy checklist — sweep <YYYY-MM-DD>`.
+2. Commit the change with: `docs: append sweep <YYYY-MM-DD> findings to pre-deploy checklist`.
+3. Report what was applied.
 
+If `auto` is NOT present, skip this step and proceed to Step 6.
+
+CRITICAL/BLOCKER findings are NEVER auto-applied. They always wait for explicit `fix <id>` or `fix all critical` from the user.
+
+### Step 6 — Stop with one prompt
+Output the master findings file path + headline counts + one prompt.
+
+If `auto` mode applied checklist:
+```
+Lattice sweep complete. Findings: .lattice/findings/sweep-<ts>.md
+- Modules: <n>
+- CRITICAL/BLOCKER: <n> (need attention today — NOT auto-applied)
+- HIGH/RISK: <n> (auto-applied to CLAUDE.md pre-deploy checklist, commit <hash>)
+- MEDIUM/WATCH: <n> (auto-applied)
+- LOW: <n> (auto-applied)
+- Cross-cutting bundles suggested: <n>
+
+Reply 'fix all critical' to triage CRITICAL/BLOCKERs in order, 'show bundles' to drill into cross-cutting PR candidates, or 'discuss' to review tradeoffs first.
+```
+
+If NOT in auto mode (default):
 ```
 Lattice sweep complete. Findings: .lattice/findings/sweep-<ts>.md
 - Modules: <n>
