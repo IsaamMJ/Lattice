@@ -2,6 +2,9 @@
 .lattice/
 .cc-reef/
 
+# OMC runtime state (created by hooks if user has OMC installed)
+.omc/
+
 # OS junk
 .DS_Store
 Thumbs.db
