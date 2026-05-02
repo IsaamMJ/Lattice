@@ -1,0 +1,14 @@
+# Lattice working notes — audit findings live here per-project, not in the plugin repo
+.lattice/
+.cc-reef/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

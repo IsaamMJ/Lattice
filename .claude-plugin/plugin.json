@@ -1,0 +1,22 @@
+{
+  "name": "lattice",
+  "version": "0.1.0",
+  "description": "Audit framework for keeping docs aligned with code. Doc-vs-code drift, scale risks, security exposures — grounded findings with file:line evidence.",
+  "author": {
+    "name": "Isaam MJ",
+    "email": "isaam.mj@gmail.com"
+  },
+  "repository": "https://github.com/IsaamMJ/Lattice",
+  "homepage": "https://github.com/IsaamMJ/Lattice",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "audit",
+    "documentation",
+    "drift-detection",
+    "scale-audit",
+    "security-audit"
+  ],
+  "commands": "./commands/"
+}

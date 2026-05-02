@@ -1,0 +1,18 @@
+{
+  "name": "lattice-marketplace",
+  "owner": {
+    "name": "Isaam MJ",
+    "email": "isaam.mj@gmail.com",
+    "url": "https://github.com/IsaamMJ"
+  },
+  "plugins": [
+    {
+      "name": "lattice",
+      "source": "./",
+      "description": "Audit framework — doc-vs-code drift, scale risks, security exposures with file:line evidence.",
+      "version": "0.1.0",
+      "category": "quality",
+      "tags": ["audit", "documentation", "drift", "scale", "security"]
+    }
+  ]
+}
