@@ -1,11 +1,38 @@
 ---
-description: Run /audit + /scale-audit + /security-audit on every module under src/modules/, aggregate into one master findings file with cross-cutting pattern detection.
-argument-hint: <project-root> [auto]
+description: Run /audit + /scale-audit + /security-audit on every module (or a subset), aggregate into one master findings file with cross-cutting pattern detection. Supports dimension and module filtering.
+argument-hint: <project-root> [audit|scale|security] [auto] [<module-paths...>]
 ---
 
-Project root to sweep: $ARGUMENTS (defaults to `.` if empty)
+Sweep arguments: $ARGUMENTS
 
-**Auto-mode**: if `$ARGUMENTS` contains the literal token `auto` (e.g. `/audit-sweep . auto`), the skill will automatically apply drafted checklist entries to `CLAUDE.md` and commit them at the end of the sweep. Without `auto`, the skill stops with the drafted block and waits for `apply checklist` from the user. CRITICAL/BLOCKER fixes are NEVER auto-applied — those always require human approval, regardless of mode.
+## Argument parsing (do this FIRST)
+
+Split `$ARGUMENTS` on whitespace. Classify each token:
+
+| Token | Means |
+|---|---|
+| `audit` | run only `/audit` (skip scale + security) |
+| `scale` | run only `/scale-audit` |
+| `security` | run only `/security-audit` |
+| `auto` | auto-apply drafted checklist entries to CLAUDE.md and commit at end |
+| Path starting with `src/modules/` or absolute path | explicit module to audit (overrides auto-discovery) |
+| `.` or any other path | project root (defaults to `.` if none given) |
+
+**Dimension filtering**: If ANY of `audit` / `scale` / `security` are present, run ONLY those. If NONE are present, run all three. Multiple dimensions allowed: `security scale` runs both, skips doc audit.
+
+**Module filtering**: If one or more `src/modules/X` paths are given, audit ONLY those modules. If none given, auto-discover via `Glob src/modules/*/`.
+
+**Examples**:
+- `/audit-sweep .` → all 3 dimensions, all modules, manual triage
+- `/audit-sweep . auto` → all 3, all modules, auto-apply checklist
+- `/audit-sweep . security` → security only, all modules
+- `/audit-sweep . security auto` → security only, all modules, auto-apply
+- `/audit-sweep . security src/modules/payments src/modules/admin` → security only, those 2 modules
+- `/audit-sweep . security auto src/modules/payments` → security only, payments only, auto-apply
+
+Print the resolved plan upfront before running anything: "Sweep plan: dimensions=[...], modules=[...], auto=true|false".
+
+**Auto-mode caveat**: CRITICAL/BLOCKER fixes are NEVER auto-applied regardless of mode — those always require human approval.
 
 # audit-sweep
 
@@ -27,11 +54,11 @@ User invokes: `/audit-sweep <project-root>` (e.g. `/audit-sweep .` or `/audit-sw
 3. Print the planned sweep: "Will audit N modules: [list]. Estimated time: ~Nx10 min."
 
 ### Step 2 — Per-module sequential sweep
-For each module, in this order:
+For each module, in this order — **but skip any dimension not in the resolved plan**:
 
-**a) `/audit`** on the matching TTD doc (skip if no doc exists; flag in report).
-**b) `/scale-audit`** on the module path.
-**c) `/security-audit`** on the module path.
+**a) `/audit`** on the matching TTD doc — only if `audit` is in the dimension plan (or no dimension filter was given). Skip if no doc exists; flag in report.
+**b) `/scale-audit`** on the module path — only if `scale` is in the dimension plan (or no filter).
+**c) `/security-audit`** on the module path — only if `security` is in the dimension plan (or no filter).
 
 After each module's three audits complete, append a one-line status to the running summary: `<module>: audit=N OK/N DRIFT, scale=N BLOCKER/N RISK, security=N CRIT/N HIGH`.
 
