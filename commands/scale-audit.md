@@ -105,36 +105,35 @@ If the module's TTD has a Decision saying "uses setInterval — do NOT migrate" 
 
 **Hard rule**: every BLOCKER and RISK gets a one-sentence **fix recommendation** (e.g. "move to BullMQ with `@nestjs/bull`", "back rate limiter with Valkey using `INCR` + `EXPIRE`", "wrap with `redlock` for distributed lock").
 
-### Step 6 — Write findings
-Write to `.lattice/findings/scale-<module-name>-<YYYYMMDD-HHMMSS>.md`:
+### Step 6 — Write findings (v0.6 YAML schema)
 
-```markdown
-# Scale Audit: <module-path>
-date: <ISO timestamp>
+Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
+
+For scale dimension, `<rule-slug>` is a kebab-case pattern name: `setinterval-cron`, `in-memory-rate-limiter`, `local-file-write`, `unbounded-promise-all`, etc.
+
+YAML body per finding (scale dimension):
+
+```yaml
+id: <12-char hash of rule + module + file + line>
+rule: <kebab-case pattern slug>
+dimension: scale
+tier: BLOCKER | RISK | WATCH | OK
+module: <module path>
+file: <path>
+line: <integer>
+title: <one-line risk summary>
+fix: <one-sentence recommended migration>
+sweep_date: <YYYY-MM-DD>
+sweep_id: <12-char hex>
 auditor: claude-code/scale-audit
-target instances: assumed 2+ behind LB
-
-## Summary
-- BLOCKER: <n>
-- RISK: <n>
-- WATCH: <n>
-- OK: <n>
-
-## Findings
-
-### [BLOCKER] <one-line risk>
-- **pattern**: <e.g. "setInterval cron job">
-- **evidence**: <file:line>
-- **failure mode**: <1 sentence — what breaks at instance #2>
-- **fix**: <1 sentence — recommended migration>
-
-(repeat per finding, BLOCKERs first, then RISK, then WATCH, then OK)
-
-## Pre-scale checklist
-- [ ] Resolve every BLOCKER before deploying to >1 instance
-- [ ] Decide on each RISK: accept, monitor, or fix
-- [ ] Confirm every WATCH still has a documented justification
+# Required if tier in [BLOCKER, RISK]:
+failure_mode: <one sentence — what breaks at instance #2>
+# Required if tier=WATCH:
+intentional_citation: <CLAUDE.md:line or TTD:line that justifies the single-instance choice>
+notes: <only if needed>
 ```
+
+Skip the legacy multi-finding markdown file. The CLAUDE.md pre-scale checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
 
 ### Step 7 — Draft checklist entries for deferred items
 For every **WATCH** and every **RISK that won't be fixed today**, draft a checklist line ready to paste into `CLAUDE.md` "Pre-scale checklist" section. Format:

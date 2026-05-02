@@ -122,31 +122,33 @@ Per claim:
 
 **Hard rule**: `INTENTIONAL` without a commit hash or CLAUDE.md citation is downgraded to `UNVERIFIABLE`. This prevents lazy "probably intentional" verdicts.
 
-### Step 8 — Write findings file
-Write to `.lattice/findings/<doc-basename>-<YYYYMMDD-HHMMSS>.md` using exactly this schema:
+### Step 8 — Write findings (v0.6 YAML schema)
 
-```markdown
-# Audit: <doc-path>
-date: <ISO timestamp>
-auditor: claude-code/audit-doc
-living-truth-sources: [CLAUDE.md, ...]
+Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
 
-## Summary
-- OK: <n>
-- DRIFT: <n>
-- INTENTIONAL: <n>
-- UNVERIFIABLE: <n>
+For audit dimension, `<rule-slug>` should be a kebab-case description of the claim type, e.g. `missing-export-userservice`, `stale-route-spec`, `orphan-file-lumi-agent-service`.
 
-## Findings
+YAML body per finding (audit dimension):
 
-### [<verdict>] <one-line claim summary>
-- **claim**: <what the doc says, with doc:line>
-- **evidence**: <file:line or commit hash>
-- **action**: PATCH_DOC | NO_ACTION | NEEDS_HUMAN
-- **notes**: <only if NEEDS_HUMAN — what question the human must answer>
-
-(repeat per claim)
+```yaml
+id: <12-char hash of rule + module + file + line>
+rule: <kebab-case rule slug>
+dimension: audit
+tier: DRIFT | INTENTIONAL | OK | UNVERIFIABLE
+module: <module path or doc path>
+file: <file:line being audited, or 'doc' for doc-only claims>
+line: <integer>
+title: <one-line summary>
+fix: PATCH_DOC | NO_ACTION | NEEDS_HUMAN <details>
+sweep_date: <YYYY-MM-DD>
+sweep_id: <12-char hex>
+auditor: claude-code/audit
+# Required if tier=INTENTIONAL:
+intentional_citation: <commit-hash or CLAUDE.md:line>
+notes: <only if needed>
 ```
+
+Skip the legacy multi-finding markdown file. The CLAUDE.md checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
 
 ### Step 9 — Propose contract-format rewrite
 Generate a proposed new version of the doc in this structure (do NOT write it yet):

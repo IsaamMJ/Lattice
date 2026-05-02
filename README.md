@@ -86,13 +86,19 @@ bash scripts/migrate.sh   # moves legacy findings to .lattice/findings/
 
 ---
 
-## Architecture (v0.5)
+## Architecture (v0.6)
 
-`/audit-sweep` dispatches **one Sonnet sub-agent per module**, not per dimension. A 5-module sweep = 5 dispatches (not 15). Each module-scoped agent runs all in-scope dimensions inline, returns combined findings. Anthropic's prompt caching reuses the methodology library across module dispatches at ~90% discount.
+**Findings as a structured YAML database.** Each finding is one file:
+- Open: `.lattice/findings/open/<sweep-date>/<TIER>-<module>-<rule>.yml`
+- Closed: `.lattice/findings/closed/<commit-sha>/<TIER>-<module>-<rule>.yml`
 
-Standalone mode: works without `oh-my-claudecode` — same methodology, same verdict quality, slightly more tokens.
+Status lives in the path. Closing a finding = `bash scripts/lattice-close.sh <id> --commit <sha>`. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
 
-See `docs/finding-schema.md` for the output contract every skill conforms to.
+**Module-scoped dispatch (from v0.5).** `/audit-sweep` sends one Sonnet sub-agent per module that runs all in-scope dimensions inline. A 5-module sweep = 5 dispatches (not 15). Anthropic prompt caching reuses the methodology library across module dispatches at ~90% discount.
+
+**Standalone.** Works without `oh-my-claudecode` — same methodology, same verdict quality, slightly more tokens.
+
+See `docs/finding-schema.md` for the YAML schema every skill conforms to.
 
 ---
 
@@ -117,11 +123,11 @@ See `docs/finding-schema.md` for the output contract every skill conforms to.
 
 ## Roadmap
 
-- **v0.5** (current) — module-scoped dispatch, prompt-cache-aware, output schema contract, sequential echo-back guard, validate.sh cross-skill checks
-- **v0.6** — `/checklist-sweep` (CLAUDE.md hygiene, auto-mark-done)
-- **v0.7** — `/audit-diff` (incremental, per-module memory via Anthropic Memory tool)
-- **v0.8** — `/mock-sweep` (3rd dimension: stubs, NODE_ENV bypass, mockLink-class fallbacks)
-- **v1.0** — spec written after v0.8, based on what real usage on real projects validates
+- **v0.5** — module-scoped dispatch, prompt-cache-aware, output schema contract, sequential echo-back guard, validate.sh cross-skill checks
+- **v0.6** (current) — YAML-per-finding lifecycle (open/closed in path), CLAUDE.md regenerated from YAML truth via markers, `lattice-close.sh` + `lattice-regenerate.sh` helpers
+- **v0.7** — `lattice diff <since-sweep>` (incremental sweeps, regression detection)
+- **v0.8** — cross-dimension dedupe by `file:line` + rule (one finding, one report)
+- **v1.0** — pre-push hook blocking on open CRITICAL, spec written after v0.8 real usage
 
 See `CHANGELOG.md` for full version history.
 

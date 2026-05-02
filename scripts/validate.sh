@@ -123,6 +123,28 @@ else
   ok "docs/finding-schema.md present"
 fi
 
+# --- 7. v0.6 helpers exist ---------------------------------------------
+note "checking v0.6 lifecycle helpers"
+for helper in lattice-close.sh lattice-regenerate.sh; do
+  if [ ! -f "${ROOT}/scripts/${helper}" ]; then
+    warn "missing scripts/${helper}"
+  else
+    if ! bash -n "${ROOT}/scripts/${helper}" 2>/dev/null; then
+      warn "${helper}: bash syntax error"
+    else
+      ok "${helper}"
+    fi
+  fi
+done
+
+# --- 8. Schema doc declares v0.6 YAML format ---------------------------
+note "checking schema doc declares v0.6 YAML format"
+if grep -qE 'one YAML file per finding' "${ROOT}/docs/finding-schema.md" 2>/dev/null; then
+  ok "schema declares v0.6 YAML format"
+else
+  warn "docs/finding-schema.md does not declare 'one YAML file per finding' (v0.6 contract)"
+fi
+
 # --- Result ------------------------------------------------------------
 if [ "${fail}" -ne 0 ]; then
   printf "[validate] FAILED\n" >&2

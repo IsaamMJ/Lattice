@@ -161,36 +161,41 @@ If documented intentional, downgrade tier or mark `OK` with the citation.
 - MEDIUM → fix within 1 month
 - LOW → backlog
 
-### Step 6 — Write findings
-Write to `.lattice/findings/security-<module-name>-<YYYYMMDD-HHMMSS>.md`:
+### Step 6 — Write findings (v0.6 YAML schema)
 
-```markdown
-# Security Audit: <module-path>
-date: <ISO timestamp>
+Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
+
+For security dimension, `<rule-slug>` is a kebab-case pattern name: `webhook-timing-unsafe-eq`, `unguarded-route`, `xss-template-interpolation`, `missing-rate-limit`, `idor-userid-not-checked`, etc.
+
+YAML body per finding (security dimension):
+
+```yaml
+id: <12-char hash of rule + module + file + line>
+rule: <kebab-case pattern slug>
+dimension: security
+tier: CRITICAL | HIGH | MEDIUM | LOW | OK
+module: <module path>
+file: <path>
+line: <integer>
+title: <one-line risk summary>
+fix: <one-sentence recommended remediation>
+sweep_date: <YYYY-MM-DD>
+sweep_id: <12-char hex>
 auditor: claude-code/security-audit
-
-## Summary
-- CRITICAL: <n>
-- HIGH: <n>
-- MEDIUM: <n>
-- LOW: <n>
-- OK: <n>
-
-## Findings (sorted by severity)
-
-### [CRITICAL] <one-line risk summary>
-- **pattern**: <e.g. "Webhook signature compared with === (timing-unsafe)">
-- **evidence**: <file:line>
-- **attack scenario**: <1 sentence — what an attacker does>
-- **fix**: <1 sentence — recommended remediation>
-
-(repeat per finding, CRITICAL → HIGH → MEDIUM → LOW → OK)
-
-## Pre-deploy security checklist
-- [ ] Resolve every CRITICAL before next deploy
-- [ ] Schedule HIGH items for this sprint
-- [ ] Confirm every OK still has a documented justification
+# Required if tier in [CRITICAL, HIGH]:
+owasp: A01..A10
+exploitability: Remote-unauth | Remote-auth | Local-only
+blast_radius: <one sentence>
+attack_scenario: <one sentence — what an attacker does>
+secure_code_example: |
+  // BAD
+  ...
+  // GOOD
+  ...
+notes: <only if needed>
 ```
+
+Skip the legacy multi-finding markdown file. The CLAUDE.md pre-deploy checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
 
 ### Step 7 — Draft checklist entries for deferred items
 For every HIGH and every MEDIUM not fixed today, draft a checklist line ready to paste into `CLAUDE.md` "Pre-deploy security checklist" section. Format:

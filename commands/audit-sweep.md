@@ -162,13 +162,24 @@ mode: SEQUENTIAL (module-scoped dispatch, v0.5)
 ### Step 4 — Cross-cutting pattern detection
 Scan all findings across all modules for repeated defect classes. Any pattern appearing in 2+ modules = bundle-PR candidate. For each, suggest single PR title + files to modify + estimated effort.
 
-### Step 5 — Auto-apply checklist (only if `auto` flag present)
-If `$ARGUMENTS` contains `auto`:
-1. Append all drafted HIGH/MEDIUM/RISK/WATCH checklist entries to `CLAUDE.md` under `## Pre-deploy checklist — sweep <YYYY-MM-DD>`.
-2. Commit: `docs: append sweep <YYYY-MM-DD> findings to pre-deploy checklist`.
-3. Report what was applied.
+### Step 5 — Regenerate CLAUDE.md checklist from YAML truth (v0.6)
 
-CRITICAL/BLOCKER findings are NEVER auto-applied.
+After all module dispatches complete, the `.lattice/findings/open/<sweep-date>/` directory contains one YAML file per finding (per the v0.6 schema in `docs/finding-schema.md`). The CLAUDE.md checklist is now a **read-only view** of this YAML truth.
+
+Run the regenerator:
+```
+bash scripts/lattice-regenerate.sh --claude-md ./CLAUDE.md
+```
+
+This rewrites the block between `<!-- lattice:checklist:start -->` and `<!-- lattice:checklist:end -->` in CLAUDE.md. Anything outside the markers is preserved (manual triage notes go in a sibling `## Triage notes` section).
+
+If `$ARGUMENTS` contains `auto`, also commit:
+```
+git add .lattice/findings/ CLAUDE.md
+git commit -m "chore(lattice): sweep <sweep-date> — <n> findings opened, <n> closed"
+```
+
+CRITICAL/BLOCKER findings are still NEVER auto-resolved — the checklist marks them open and the user must explicitly close them via `bash scripts/lattice-close.sh <finding-id> --commit <sha> --pr <num>` after fixing.
 
 ### Step 6 — Stop with one prompt
 
