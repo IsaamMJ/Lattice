@@ -1,6 +1,14 @@
-# Lattice finding schema (v0.6)
+# Lattice finding schema (v0.6 / v0.6.3)
 
-**Breaking change from v0.5:** findings are now one YAML file per finding (not one Markdown file per audit). Status lives in the file path. CLAUDE.md is regenerated from YAML, not authored by hand.
+**Breaking change from v0.5:** findings are now one YAML file per finding (not one Markdown file per audit). Status lives in the file path AND in a `status:` field (added v0.6.3). CLAUDE.md is regenerated from YAML, not authored by hand — and v0.6.3 adds a CI check that enforces this.
+
+## v0.6.3 changes (additive, non-breaking)
+
+- New `status:` field on open YAMLs: `open | in_progress | deferred | wont_fix` (default: `open`)
+- Partial fixes stay in `open/` with `status: in_progress` + `partial_commits: [<sha>]` + `remaining:` text — they are NOT moved to `closed/` until fully fixed
+- New `previously_closed_in: <sha>` field on reopened findings
+- **Short-SHA convention:** all SHA references — `closed/<sha>/` directory names, `closed_by_commit:`, `partial_commits:`, `previously_closed_in:` — use **7-char short SHA**. The closer truncates to 7 automatically; existing full-SHA dirs are tolerated for backward compat but new closes always emit 7-char.
+- CLAUDE.md regen is now CI-enforced: `scripts/validate.sh` runs `lattice-regenerate.sh --check` and fails the build if the markered block in CLAUDE.md differs from what regen would produce. **Manual edits to the markered section will not land.**
 
 ## Why this redesign
 
@@ -25,18 +33,25 @@ v0.6 fixes 1-3 and 5 directly via the schema. v0.7 adds `lattice diff`. v0.8 add
     │       ├── HIGH-payments-missing-rate-limit.yml
     │       └── MEDIUM-results-stack-trace-leak.yml
     └── closed/
-        └── <commit-sha>/                      # short SHA of the closing commit
+        └── <7-char-sha>/                      # 7-char short SHA of the closing commit (v0.6.3)
             ├── CRITICAL-admin-token-eq.yml
             └── CRITICAL-thyrocare-key-eq.yml
 ```
 
-**Status lives in the path:**
-- `findings/open/<date>/...yml` — open finding from a specific sweep date
-- `findings/closed/<commit>/...yml` — closed by that commit
+**Status lives in BOTH the path AND the `status:` field (v0.6.3):**
+- `findings/open/<date>/...yml` with `status: open` — actively being worked / unaddressed
+- `findings/open/<date>/...yml` with `status: in_progress` — partial fix landed, more work needed; `partial_commits:` tracks what's done
+- `findings/open/<date>/...yml` with `status: deferred` — acknowledged risk, deliberately not fixing now
+- `findings/open/<date>/...yml` with `status: wont_fix` — intentionally not fixing (rationale in `notes:`)
+- `findings/closed/<7-char-sha>/...yml` — fully fixed by that commit
 
-**Closing a finding** = `mv .lattice/findings/open/<date>/<file>.yml .lattice/findings/closed/<commit>/<file>.yml`
+**Why both path AND field?** The path is the coarse filter (open vs closed). The `status` field is the triage filter (which open findings are actually actionable). Without it, deferred and in_progress findings hide among actionable ones.
 
-The `scripts/lattice-close.sh` helper does this and updates the file's `closed_at` + `closed_by_commit` fields.
+**Closing a finding** = `bash scripts/lattice-close.sh <slug>` → moves to `closed/<7-char-sha>/`, sets `closed_at` + `closed_by_commit`.
+
+**Partially closing a finding (v0.6.3)** = `bash scripts/lattice-close.sh <slug> --partial "what's still left"` → keeps the file in `open/`, sets `status: in_progress`, appends to `partial_commits:`, sets `remaining:`. The finding does NOT move to `closed/` until fully fixed.
+
+**Reopening a closed finding (v0.6.3)** = `bash scripts/lattice-reopen.sh <slug>` → moves from `closed/<sha>/` back to `open/<today>/`, sets `status: open`, adds `previously_closed_in: <original-sha>`. Used when a regression reintroduces a previously-fixed defect.
 
 ## Filename slug format
 
@@ -69,10 +84,20 @@ sweep_date: <ISO date, YYYY-MM-DD>
 sweep_id: <12-char hex, generated per sweep run>
 auditor: claude-code/<skill-name>
 
+# Triage status (open findings only; v0.6.3+)
+status: open | in_progress | deferred | wont_fix   # default: open
+
+# Partial-fix tracking (only when status: in_progress; v0.6.3+)
+partial_commits: [<7-char-sha>, <7-char-sha>]      # commits that fixed part of this finding
+remaining: <one-line summary of what is still unfixed>
+
+# Reopen tracking (only on findings reopened from closed/; v0.6.3+)
+previously_closed_in: <7-char-sha>                  # the commit that originally claimed to close this
+
 # Lifecycle (closed findings only — set by scripts/lattice-close.sh)
 closed_at: <ISO timestamp>          # only present in findings/closed/
-closed_by_commit: <full SHA>         # only present in findings/closed/
-closed_by_pr: <PR number or url>     # optional
+closed_by_commit: <7-char-sha>      # only present in findings/closed/ (v0.6.3: 7-char short)
+closed_by_pr: <PR number or url>    # optional
 
 # Conditional fields (required per dimension + tier)
 

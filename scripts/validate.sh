@@ -145,6 +145,21 @@ else
   warn "docs/finding-schema.md does not declare 'one YAML file per finding' (v0.6 contract)"
 fi
 
+# --- 8a. CLAUDE.md drift gate (v0.6.3) --------------------------------
+# Enforces that lattice-regenerate.sh is the only path to update the markered
+# block. If anyone hand-edits the section, this CI check fails the build.
+note "checking CLAUDE.md drift (v0.6.3 regen-only enforcement)"
+if [ -f "${ROOT}/CLAUDE.md" ] && [ -d "${ROOT}/.lattice/findings" ]; then
+  if bash "${ROOT}/scripts/lattice-regenerate.sh" --check > /tmp/lattice-regen-check.log 2>&1; then
+    ok "CLAUDE.md is in sync with .lattice/findings/"
+  else
+    sed 's/^/[validate]   /' /tmp/lattice-regen-check.log >&2 || true
+    warn "CLAUDE.md drift detected — run scripts/lattice-regenerate.sh and commit"
+  fi
+else
+  ok "CLAUDE.md drift check skipped (no CLAUDE.md or no .lattice/findings/ in plugin repo)"
+fi
+
 # --- 8b. Decision schema validation (v0.7) ----------------------------
 note "validating decisions/ (v0.7 decision schema)"
 if [ -f "${ROOT}/scripts/validate-decisions.sh" ]; then

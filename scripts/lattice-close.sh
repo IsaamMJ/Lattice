@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
-# lattice-close — mark a finding closed by moving its YAML file from open/ to closed/<commit>/
+# lattice-close — mark a finding closed (or partially closed) by updating its YAML.
 #
 # Usage:
 #   bash scripts/lattice-close.sh <finding-id-or-filename> [--commit <sha>] [--pr <num-or-url>]
+#   bash scripts/lattice-close.sh <finding-id-or-filename> --partial "what's still unfixed" [--commit <sha>]
 #
 # Examples:
-#   bash scripts/lattice-close.sh CRITICAL-admin-token-eq                    # uses HEAD full SHA
-#   bash scripts/lattice-close.sh CRITICAL-admin-token-eq --commit cb88972abc...
+#   bash scripts/lattice-close.sh CRITICAL-admin-token-eq                    # uses HEAD short SHA (7-char)
+#   bash scripts/lattice-close.sh CRITICAL-admin-token-eq --commit cb88972
 #   bash scripts/lattice-close.sh CRITICAL-admin-token-eq --pr 42
+#   bash scripts/lattice-close.sh RISK-booking-no-tx --partial "advisory lock deferred"
 #
 # Behavior:
-#   - Locates the YAML file under .lattice/findings/open/*/  (sorted; deterministic if duplicates)
-#   - Moves it to .lattice/findings/closed/<commit-sha>/<filename>
-#   - REPLACES (not appends) closed_at + closed_by_commit + closed_by_pr fields
-#   - Hard-fails if outside a git repo and no --commit given (no silent "unknown")
-#   - Idempotent — already-closed findings are reported, not re-closed
+#   - SHA is normalized to 7-char short SHA (v0.6.3 convention).
+#   - WITHOUT --partial: moves YAML from open/ to closed/<7-char-sha>/, sets closed_at + closed_by_commit.
+#   - WITH    --partial: keeps YAML in open/, sets status: in_progress, appends to partial_commits, sets remaining.
+#   - REPLACES (not appends) closed_at + closed_by_commit + closed_by_pr fields on full close.
+#   - For --partial, partial_commits APPENDS each invocation, remaining is overwritten.
+#   - Hard-fails if outside a git repo and no --commit given.
+#   - Idempotent — already-closed findings are reported, not re-closed.
 #
-# Requires: bash, git (unless --commit is given), grep
+# Requires: bash, git (unless --commit is given), grep, awk
 
 set -euo pipefail
 
 usage() {
-  echo "usage: bash scripts/lattice-close.sh <finding-id-or-filename> [--commit <sha>] [--pr <num-or-url>]" >&2
+  cat >&2 <<USAGE
+usage: bash scripts/lattice-close.sh <finding-id-or-filename> [--commit <sha>] [--pr <num-or-url>]
+       bash scripts/lattice-close.sh <finding-id-or-filename> --partial "<remaining text>" [--commit <sha>]
+USAGE
 }
 
 if [ "$#" -lt 1 ]; then
@@ -34,6 +41,8 @@ shift
 
 COMMIT=""
 PR=""
+PARTIAL=""
+PARTIAL_MODE=0
 
 require_value_for() {
   local flag="$1" next="$2"
@@ -54,6 +63,12 @@ while [ "$#" -gt 0 ]; do
       require_value_for "--pr" "${2:-}"
       PR="$2"; shift 2
       ;;
+    --partial)
+      require_value_for "--partial" "${2:-}"
+      PARTIAL="$2"
+      PARTIAL_MODE=1
+      shift 2
+      ;;
     *)
       echo "[lattice-close] error: unknown arg: $1" >&2
       usage
@@ -62,19 +77,26 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Resolve commit. Schema requires full SHA. Hard-fail outside git if no --commit given.
+# Resolve commit. Hard-fail outside git if no --commit given.
 if [ -z "${COMMIT}" ]; then
   if ! COMMIT="$(git rev-parse HEAD 2>/dev/null)"; then
-    echo "[lattice-close] error: not in a git repo. Use --commit <full-sha> to specify." >&2
+    echo "[lattice-close] error: not in a git repo. Use --commit <sha> to specify." >&2
     exit 1
   fi
 fi
 
-# Strip .yml if present, normalize
+# v0.6.3: normalize to 7-char short SHA
+SHORT_SHA="${COMMIT:0:7}"
+if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]; then
+  echo "[lattice-close] error: --commit must be a hex SHA (got: ${COMMIT})" >&2
+  exit 2
+fi
+COMMIT="${SHORT_SHA}"
+
+# Strip .yml if present
 FIND="${FIND%.yml}"
 
 # Find ALL matching files under open/, sort for deterministic close order
-SRC=""
 shopt -s nullglob
 matches=()
 for f in .lattice/findings/open/*/"${FIND}.yml"; do
@@ -82,7 +104,6 @@ for f in .lattice/findings/open/*/"${FIND}.yml"; do
 done
 
 if [ "${#matches[@]}" -eq 0 ]; then
-  # Maybe it's already closed
   for f in .lattice/findings/closed/*/"${FIND}.yml"; do
     echo "[lattice-close] already closed: ${f}"
     exit 0
@@ -91,7 +112,6 @@ if [ "${#matches[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# Sort lexicographically for deterministic behavior on duplicate IDs across sweep dirs
 IFS=$'\n' sorted=($(printf '%s\n' "${matches[@]}" | sort))
 unset IFS
 SRC="${sorted[0]}"
@@ -99,18 +119,60 @@ if [ "${#sorted[@]}" -gt 1 ]; then
   echo "[lattice-close] warning: ${#sorted[@]} matches; closing deterministic first: ${SRC}" >&2
 fi
 
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ---------------------------------------------------------------------------
+# PARTIAL CLOSE: stay in open/, update fields in place
+# ---------------------------------------------------------------------------
+if [ "${PARTIAL_MODE}" -eq 1 ]; then
+  # Read existing partial_commits (if any) — single-line list form: "partial_commits: [a, b]"
+  existing="$(grep -E '^partial_commits:' "${SRC}" || true)"
+  new_list=""
+  if [ -n "${existing}" ]; then
+    # Extract content between [ and ] and append
+    content="$(echo "${existing}" | sed -E 's/^partial_commits:[[:space:]]*\[(.*)\][[:space:]]*$/\1/')"
+    if [ -n "${content}" ]; then
+      new_list="${content}, ${COMMIT}"
+    else
+      new_list="${COMMIT}"
+    fi
+  else
+    new_list="${COMMIT}"
+  fi
+
+  # Strip status / partial_commits / remaining lines, then re-emit canonical block
+  tmp="$(mktemp)"
+  grep -v -E '^(status|partial_commits|remaining)[[:space:]]*:|^# Triage \(set by lattice-close\.sh --partial\)$' "${SRC}" > "${tmp}" || true
+  mv "${tmp}" "${SRC}"
+
+  {
+    printf "\n# Triage (set by lattice-close.sh --partial)\n"
+    printf "status: in_progress\n"
+    printf "partial_commits: [%s]\n" "${new_list}"
+    # Escape double-quotes in remaining text
+    esc_remaining="$(printf "%s" "${PARTIAL}" | sed 's/"/\\"/g')"
+    printf "remaining: \"%s\"\n" "${esc_remaining}"
+  } >> "${SRC}"
+
+  echo "[lattice-close] partial close: ${FIND} (status: in_progress)"
+  echo "[lattice-close] partial_commits=[${new_list}]"
+  echo "[lattice-close] remaining=${PARTIAL}"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# FULL CLOSE: move to closed/<sha>/
+# ---------------------------------------------------------------------------
 DEST_DIR=".lattice/findings/closed/${COMMIT}"
 mkdir -p "${DEST_DIR}"
 DEST="${DEST_DIR}/${FIND}.yml"
 
 mv "${SRC}" "${DEST}"
 
-# REPLACE existing lifecycle fields (don't append duplicates).
-# Use grep -v to strip any prior closed_at / closed_by_commit / closed_by_pr / Lifecycle marker,
-# then append the canonical block.
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Strip stale lifecycle/triage lines, then append canonical close block.
+# v0.6.3: also strip the in_progress fields if present (fully closing a previously partial finding).
 tmp="$(mktemp)"
-grep -v -E '^(closed_at|closed_by_commit|closed_by_pr)[[:space:]]*:|^# Lifecycle \(set by lattice-close\.sh\)$' "${DEST}" > "${tmp}" || true
+grep -v -E '^(status|partial_commits|remaining|closed_at|closed_by_commit|closed_by_pr)[[:space:]]*:|^# Lifecycle \(set by lattice-close\.sh\)$|^# Triage \(set by lattice-close\.sh --partial\)$' "${DEST}" > "${tmp}" || true
 mv "${tmp}" "${DEST}"
 
 {

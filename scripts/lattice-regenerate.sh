@@ -2,19 +2,23 @@
 # lattice-regenerate — regenerate the CLAUDE.md checklist block from YAML findings.
 #
 # Usage:
-#   bash scripts/lattice-regenerate.sh [--claude-md <path>] [--days-closed <n>]
+#   bash scripts/lattice-regenerate.sh [--claude-md <path>] [--days-closed <n>] [--check]
 #
 # Defaults:
 #   --claude-md   ./CLAUDE.md
 #   --days-closed 7         (how many days of closed findings to include)
+#   --check       (v0.6.3) dry-run: regenerate to memory, diff against current CLAUDE.md
+#                 markered block, exit 1 if different. Used by CI to enforce
+#                 "regen is the only path" — manual edits to the section can't land.
 #
 # Behavior:
 #   - Reads .lattice/findings/open/*/*.yml — the source of truth
 #   - Reads .lattice/findings/closed/*/*.yml filtered by --days-closed
+#   - Groups open findings by `status:` field (v0.6.3): open, in_progress, deferred, wont_fix
+#   - Within "open", groups by tier (CRITICAL/BLOCKER/HIGH/RISK/...)
 #   - Validates each YAML has required fields (rule, file, line) — fails fast on malformed
-#   - Escapes field values before Markdown injection (no corruption from backticks/pipes/brackets)
-#   - Requires exactly one start + one end marker (no destructive replace on duplicate markers)
-#   - Try-catch around CLAUDE.md write — friendly error on EACCES/EPERM
+#   - Escapes field values before Markdown injection
+#   - Requires exactly one start + one end marker (no destructive replace on duplicates)
 #   - Inserts markers at end of CLAUDE.md if missing
 #   - Never touches anything outside the markers
 
@@ -22,6 +26,7 @@ set -euo pipefail
 
 CLAUDE_MD="./CLAUDE.md"
 DAYS_CLOSED=7
+CHECK_MODE=0
 
 require_value_for() {
   local flag="$1" next="$2"
@@ -39,11 +44,12 @@ while [ "$#" -gt 0 ]; do
     --days-closed)
       require_value_for "--days-closed" "${2:-}"
       DAYS_CLOSED="$2"; shift 2 ;;
+    --check)
+      CHECK_MODE=1; shift ;;
     *) echo "[lattice-regenerate] error: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-# Validate --days-closed is a non-negative integer (no silent NaN downstream)
 if ! [[ "${DAYS_CLOSED}" =~ ^[0-9]+$ ]]; then
   echo "[lattice-regenerate] error: --days-closed must be a non-negative integer (got: ${DAYS_CLOSED})" >&2
   exit 2
@@ -54,17 +60,17 @@ if [ ! -d ".lattice/findings" ]; then
   exit 0
 fi
 
-node --input-type=module - "$CLAUDE_MD" "$DAYS_CLOSED" <<'NODE'
+node --input-type=module - "$CLAUDE_MD" "$DAYS_CLOSED" "$CHECK_MODE" <<'NODE'
 import fs from 'node:fs';
 import path from 'node:path';
 
 const claudeMdPath = process.argv[2];
 const daysClosed = parseInt(process.argv[3], 10);
+const checkMode = process.argv[4] === '1';
 
 const START = '<!-- lattice:checklist:start -->';
 const END = '<!-- lattice:checklist:end -->';
 
-// Escape Markdown special chars in field values so finding data can't corrupt CLAUDE.md.
 function escapeMd(value) {
   return String(value ?? '?')
     .replace(/\\/g, '\\\\')
@@ -75,8 +81,7 @@ function escapeMd(value) {
     .replace(/\r?\n/g, ' ');
 }
 
-// Minimal YAML parser for the flat-key-value + scalar subset Lattice emits.
-// Throws on malformed input — caller wraps in try/catch and reports per-file.
+// Minimal YAML parser for the flat-key-value + block-scalar + simple-list subset Lattice emits.
 function parseYaml(text) {
   const out = {};
   const lines = text.split(/\r?\n/);
@@ -100,6 +105,13 @@ function parseYaml(text) {
     const [, k, v] = m;
     if (v === '|' || v === '>') {
       block = { key: k, value: '' };
+      continue;
+    }
+    // Inline list: [a, b, c]
+    const listMatch = v.match(/^\[\s*(.*?)\s*\]$/);
+    if (listMatch) {
+      const inner = listMatch[1].trim();
+      out[k] = inner === '' ? [] : inner.split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
       continue;
     }
     out[k] = v.replace(/^["']|["']$/g, '');
@@ -127,9 +139,6 @@ function readDirRecursive(dir) {
   return out;
 }
 
-const openFiles = readDirRecursive('.lattice/findings/open');
-const closedFiles = readDirRecursive('.lattice/findings/closed');
-
 function loadAll(files, requireFields) {
   const loaded = [];
   for (const f of files) {
@@ -145,10 +154,23 @@ function loadAll(files, requireFields) {
   return loaded;
 }
 
+const openFiles = readDirRecursive('.lattice/findings/open');
+const closedFiles = readDirRecursive('.lattice/findings/closed');
 const open = loadAll(openFiles, true);
 const closed = loadAll(closedFiles, false);
 
-// Filter recently closed: must have valid closed_at, not in the future, and within the window
+// v0.6.3: partition open findings by status field. Default = 'open'.
+const VALID_STATUS = ['open', 'in_progress', 'deferred', 'wont_fix'];
+const byStatus = { open: [], in_progress: [], deferred: [], wont_fix: [] };
+for (const f of open) {
+  const s = (f.status || 'open').toLowerCase();
+  if (!VALID_STATUS.includes(s)) {
+    console.error(`[lattice-regenerate] error: invalid status '${f.status}' in ${f.path} (allowed: ${VALID_STATUS.join('|')})`);
+    process.exit(1);
+  }
+  byStatus[s].push(f);
+}
+
 const now = Date.now();
 const cutoff = now - daysClosed * 86400 * 1000;
 const recentlyClosed = closed.filter(f => {
@@ -157,13 +179,39 @@ const recentlyClosed = closed.filter(f => {
   return Number.isFinite(ts) && ts <= now && ts >= cutoff;
 });
 
-// Group open by tier
 const TIER_ORDER = ['CRITICAL', 'BLOCKER', 'HIGH', 'RISK', 'DRIFT', 'MEDIUM', 'WATCH', 'LOW', 'INTENTIONAL', 'UNVERIFIABLE', 'OK'];
-const groups = Object.fromEntries(TIER_ORDER.map(t => [t, []]));
-for (const f of open) {
-  const t = (f.tier || 'OK').toUpperCase();
-  if (!groups[t]) groups[t] = [];
-  groups[t].push(f);
+
+function groupByTier(items) {
+  const groups = Object.fromEntries(TIER_ORDER.map(t => [t, []]));
+  for (const f of items) {
+    const t = (f.tier || 'OK').toUpperCase();
+    if (!groups[t]) groups[t] = [];
+    groups[t].push(f);
+  }
+  return groups;
+}
+
+function renderFindingLine(f) {
+  const rel = f.path.replace(/\\/g, '/');
+  return `- [ ] \`${escapeMd(f.module)}\` / \`${escapeMd(f.rule)}\` — \`${escapeMd(f.file)}:${escapeMd(f.line)}\` — fix: ${escapeMd(f.fix)} — [yml](${escapeMd(rel)})`;
+}
+
+function renderInProgressLine(f) {
+  const rel = f.path.replace(/\\/g, '/');
+  let line = `- [~] \`${escapeMd(f.module)}\` / \`${escapeMd(f.rule)}\` — \`${escapeMd(f.file)}:${escapeMd(f.line)}\``;
+  if (f.partial_commits && Array.isArray(f.partial_commits) && f.partial_commits.length > 0) {
+    line += ` — partial in ${f.partial_commits.map(c => '`' + escapeMd(c) + '`').join(', ')}`;
+  }
+  if (f.remaining) {
+    line += ` — remaining: ${escapeMd(f.remaining)}`;
+  }
+  line += ` — [yml](${escapeMd(rel)})`;
+  return line;
+}
+
+function renderSimpleLine(f) {
+  const rel = f.path.replace(/\\/g, '/');
+  return `- [ ] \`${escapeMd(f.module)}\` / \`${escapeMd(f.rule)}\` — \`${escapeMd(f.file)}:${escapeMd(f.line)}\` — [yml](${escapeMd(rel)})`;
 }
 
 const ts = new Date().toISOString();
@@ -171,33 +219,65 @@ let body = '';
 body += `${START}\n`;
 body += `<!-- Generated ${ts} — DO NOT EDIT BY HAND -->\n`;
 body += `<!-- Source of truth: .lattice/findings/open/ — to close, run scripts/lattice-close.sh -->\n\n`;
-body += `## Open findings (${open.length} total)\n\n`;
 
+// --- Open (actionable) ---
+const openItems = byStatus.open;
+body += `## Open findings (${openItems.length} actionable)\n\n`;
+const openGroups = groupByTier(openItems);
 for (const tier of TIER_ORDER) {
-  const items = groups[tier];
+  const items = openGroups[tier];
   if (!items || items.length === 0) continue;
   body += `### ${tier} (${items.length})\n`;
   for (const f of items.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
-    const rel = f.path.replace(/\\/g, '/');
-    body += `- [ ] \`${escapeMd(f.module)}\` / \`${escapeMd(f.rule)}\` — \`${escapeMd(f.file)}:${escapeMd(f.line)}\` — fix: ${escapeMd(f.fix)} — [yml](${escapeMd(rel)})\n`;
+    body += renderFindingLine(f) + '\n';
   }
-  body += `\n`;
+  body += '\n';
 }
 
+// --- In progress (partial fixes) ---
+if (byStatus.in_progress.length > 0) {
+  body += `## In progress (${byStatus.in_progress.length})\n\n`;
+  body += `_Partial fixes landed — these are still open concerns._\n\n`;
+  for (const f of byStatus.in_progress.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
+    body += renderInProgressLine(f) + '\n';
+  }
+  body += '\n';
+}
+
+// --- Deferred ---
+if (byStatus.deferred.length > 0) {
+  body += `## Deferred (${byStatus.deferred.length})\n\n`;
+  body += `_Acknowledged risks, deliberately not fixing now._\n\n`;
+  for (const f of byStatus.deferred.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
+    body += renderSimpleLine(f) + '\n';
+  }
+  body += '\n';
+}
+
+// --- Won't fix ---
+if (byStatus.wont_fix.length > 0) {
+  body += `## Won't fix (${byStatus.wont_fix.length})\n\n`;
+  body += `_Intentionally not fixing. Rationale in the YAML \`notes:\` field._\n\n`;
+  for (const f of byStatus.wont_fix.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
+    body += renderSimpleLine(f) + '\n';
+  }
+  body += '\n';
+}
+
+// --- Recently closed ---
 if (recentlyClosed.length > 0) {
   body += `## Recently closed (last ${daysClosed} days, ${recentlyClosed.length})\n\n`;
   for (const f of recentlyClosed.sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || ''))) {
-    body += `- [x] \`${escapeMd(f.module)}\` / \`${escapeMd(f.rule)}\` — closed in ${escapeMd(f.closed_by_commit)}${f.closed_by_pr ? ' (PR ' + escapeMd(f.closed_by_pr) + ')' : ''}\n`;
+    body += `- [x] \`${escapeMd(f.module)}\` / \`${escapeMd(f.rule)}\` — closed in \`${escapeMd(f.closed_by_commit)}\`${f.closed_by_pr ? ' (PR ' + escapeMd(f.closed_by_pr) + ')' : ''}\n`;
   }
-  body += `\n`;
+  body += '\n';
 }
 
-body += `${END}\n`;
+body += `${END}`;  // no trailing newline — caller adds one only on first install
 
 let claude = '';
 if (fs.existsSync(claudeMdPath)) claude = fs.readFileSync(claudeMdPath, 'utf8');
 
-// Count markers — require exactly one of each (or zero of both for first install).
 function indexesOf(haystack, needle) {
   const idxs = [];
   let from = 0;
@@ -212,9 +292,11 @@ function indexesOf(haystack, needle) {
 const startIdxs = indexesOf(claude, START);
 const endIdxs = indexesOf(claude, END);
 
+let newClaude;
 if (startIdxs.length === 0 && endIdxs.length === 0) {
-  if (claude.length > 0 && !claude.endsWith('\n')) claude += '\n';
-  claude += '\n' + body;
+  newClaude = claude;
+  if (newClaude.length > 0 && !newClaude.endsWith('\n')) newClaude += '\n';
+  newClaude += '\n' + body + '\n';
 } else if (startIdxs.length !== 1 || endIdxs.length !== 1) {
   console.error(`[lattice-regenerate] error: CLAUDE.md has malformed checklist markers (found ${startIdxs.length} start, ${endIdxs.length} end; expected exactly 1 of each)`);
   process.exit(1);
@@ -225,11 +307,25 @@ if (startIdxs.length === 0 && endIdxs.length === 0) {
     console.error('[lattice-regenerate] error: CLAUDE.md checklist markers are out of order (end before start)');
     process.exit(1);
   }
-  claude = claude.slice(0, startIdx) + body + claude.slice(endIdx);
+  newClaude = claude.slice(0, startIdx) + body + claude.slice(endIdx);
+}
+
+if (checkMode) {
+  // Compare timestamp-stripped versions so the "Generated <ts>" line never causes false drift.
+  // Strip the entire generated-at comment line from both sides.
+  const stripTs = s => s.replace(/<!-- Generated [^\n]*?-->\n/g, '');
+  if (stripTs(newClaude) === stripTs(claude)) {
+    console.log(`[lattice-regenerate] check OK — CLAUDE.md is in sync (${open.length} open, ${recentlyClosed.length} recently closed)`);
+    process.exit(0);
+  } else {
+    console.error(`[lattice-regenerate] DRIFT: ${claudeMdPath} markered block does not match what regen would produce.`);
+    console.error(`  Run: bash scripts/lattice-regenerate.sh   # then commit the result`);
+    process.exit(1);
+  }
 }
 
 try {
-  fs.writeFileSync(claudeMdPath, claude);
+  fs.writeFileSync(claudeMdPath, newClaude);
 } catch (e) {
   if (e.code === 'EACCES' || e.code === 'EPERM') {
     console.error(`[lattice-regenerate] error: ${claudeMdPath} is not writable (${e.code}). Check file permissions.`);
@@ -239,5 +335,12 @@ try {
   process.exit(1);
 }
 
-console.log(`[lattice-regenerate] wrote ${open.length} open + ${recentlyClosed.length} recently-closed findings to ${claudeMdPath}`);
+const summary = [
+  `${open.length} open`,
+  byStatus.in_progress.length > 0 ? `${byStatus.in_progress.length} in_progress` : null,
+  byStatus.deferred.length > 0 ? `${byStatus.deferred.length} deferred` : null,
+  byStatus.wont_fix.length > 0 ? `${byStatus.wont_fix.length} wont_fix` : null,
+  `${recentlyClosed.length} recently-closed`,
+].filter(Boolean).join(', ');
+console.log(`[lattice-regenerate] wrote ${summary} to ${claudeMdPath}`);
 NODE

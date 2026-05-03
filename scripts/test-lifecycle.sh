@@ -67,12 +67,12 @@ auditor: claude-code/security-audit
 YML
 
 bash "${CLOSE}" HIGH-mod-rule --commit aaaaaaa1 >/dev/null
-# Re-open by moving back, then close again with a different commit
+# Re-open by moving back, then close again with a different commit (v0.6.3: SHAs truncate to 7-char)
 mkdir -p .lattice/findings/open/2026-05-02
-mv .lattice/findings/closed/aaaaaaa1/HIGH-mod-rule.yml .lattice/findings/open/2026-05-02/
+mv .lattice/findings/closed/aaaaaaa/HIGH-mod-rule.yml .lattice/findings/open/2026-05-02/
 bash "${CLOSE}" HIGH-mod-rule --commit bbbbbbb2 >/dev/null
 
-dest=".lattice/findings/closed/bbbbbbb2/HIGH-mod-rule.yml"
+dest=".lattice/findings/closed/bbbbbbb/HIGH-mod-rule.yml"
 count_at=$(grep -cE '^closed_at:[[:space:]]' "${dest}" || true)
 count_commit=$(grep -cE '^closed_by_commit:[[:space:]]' "${dest}" || true)
 if [ "${count_at}" = "1" ] && [ "${count_commit}" = "1" ]; then
@@ -293,6 +293,299 @@ if grep -q "manual note A" CLAUDE.md \
   ok "manual content preserved; old generated content replaced"
 else
   fail "regenerator damaged content outside markers"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 9 (v0.6.3): close.sh truncates SHA to 7-char short form
+# ---------------------------------------------------------------------------
+note "Test 9 (v0.6.3): close.sh normalizes SHA to 7-char"
+new_fixture t9 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-mod-rule.yml <<'YML'
+id: t9aa
+rule: rule
+dimension: security
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+bash "${CLOSE}" HIGH-mod-rule --commit 7481d57c5138f39c25a1058593a753835e7575af >/dev/null
+if [ -d ".lattice/findings/closed/7481d57" ] \
+   && [ -f ".lattice/findings/closed/7481d57/HIGH-mod-rule.yml" ] \
+   && grep -q "^closed_by_commit: 7481d57$" ".lattice/findings/closed/7481d57/HIGH-mod-rule.yml"; then
+  ok "long SHA truncated to 7-char (dir + closed_by_commit field)"
+else
+  fail "long SHA not normalized: $(ls .lattice/findings/closed/ 2>&1)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 10 (v0.6.3): --partial keeps finding in open/ with status: in_progress
+# ---------------------------------------------------------------------------
+note "Test 10 (v0.6.3): --partial keeps finding in open/, sets in_progress"
+new_fixture t10 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/RISK-booking-no-tx.yml <<'YML'
+id: t10a
+rule: no-tx
+dimension: scale
+tier: RISK
+module: booking
+file: src/booking.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/scale-audit
+status: open
+YML
+bash "${CLOSE}" RISK-booking-no-tx --partial "advisory lock deferred" --commit aaaaaaa1 >/dev/null
+
+src=".lattice/findings/open/2026-05-02/RISK-booking-no-tx.yml"
+if [ -f "${src}" ] \
+   && grep -q "^status: in_progress$" "${src}" \
+   && grep -q "^partial_commits: \[aaaaaaa\]$" "${src}" \
+   && grep -q '^remaining: "advisory lock deferred"$' "${src}"; then
+  ok "partial close keeps file in open/ with in_progress + partial_commits + remaining"
+else
+  fail "partial close fields wrong:\n$(cat "${src}" 2>&1)"
+fi
+
+# Second partial commit should APPEND to partial_commits
+bash "${CLOSE}" RISK-booking-no-tx --partial "still need retry logic" --commit bbbbbbb2 >/dev/null
+if grep -q "^partial_commits: \[aaaaaaa, bbbbbbb\]$" "${src}" \
+   && grep -q '^remaining: "still need retry logic"$' "${src}"; then
+  ok "second --partial appends to partial_commits, overwrites remaining"
+else
+  fail "second partial did not append correctly:\n$(cat "${src}" 2>&1)"
+fi
+
+# Now do a FULL close — should move to closed/ and strip in_progress fields
+bash "${CLOSE}" RISK-booking-no-tx --commit ccccccc3 >/dev/null
+dest=".lattice/findings/closed/ccccccc/RISK-booking-no-tx.yml"
+if [ -f "${dest}" ] \
+   && ! grep -q "^status: in_progress" "${dest}" \
+   && ! grep -q "^partial_commits:" "${dest}" \
+   && ! grep -q "^remaining:" "${dest}" \
+   && grep -q "^closed_by_commit: ccccccc$" "${dest}"; then
+  ok "full close after partial strips in_progress fields, moves to closed/"
+else
+  fail "full close after partial did not clean up:\n$(cat "${dest}" 2>&1)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 11 (v0.6.3): lattice-reopen.sh moves closed → open with previously_closed_in
+# ---------------------------------------------------------------------------
+REOPEN="${REPO_ROOT}/scripts/lattice-reopen.sh"
+note "Test 11 (v0.6.3): reopen moves closed → open and preserves origin SHA"
+new_fixture t11 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t11a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+bash "${CLOSE}" HIGH-x-y --commit ddddddd4 >/dev/null
+bash "${REOPEN}" HIGH-x-y --reason "regression in 1234567" >/dev/null
+
+today="$(date -u +%Y-%m-%d)"
+reopened=".lattice/findings/open/${today}/HIGH-x-y.yml"
+if [ -f "${reopened}" ] \
+   && grep -q "^status: open$" "${reopened}" \
+   && grep -q "^previously_closed_in: ddddddd$" "${reopened}" \
+   && grep -q '^reopen_reason: "regression in 1234567"$' "${reopened}" \
+   && ! grep -q "^closed_at:" "${reopened}" \
+   && ! grep -q "^closed_by_commit:" "${reopened}"; then
+  ok "reopen moves to open/<today>/, sets previously_closed_in, strips closed_* fields"
+else
+  fail "reopen did not produce expected file:\n$(cat "${reopened}" 2>&1)"
+fi
+
+# Idempotent — re-opening an already-open finding is a no-op
+out="$(bash "${REOPEN}" HIGH-x-y 2>&1)"
+if echo "${out}" | grep -q "already open"; then
+  ok "reopen is idempotent (already-open is no-op)"
+else
+  fail "reopen not idempotent: ${out}"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 12 (v0.6.3): regen --check exits 1 on drift
+# ---------------------------------------------------------------------------
+note "Test 12 (v0.6.3): regen --check detects manual CLAUDE.md edits"
+new_fixture t12 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t12a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+echo "# fixture" > CLAUDE.md
+bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null
+
+# Sanity: --check passes immediately after regen
+if bash "${REGEN}" --claude-md ./CLAUDE.md --check >/dev/null 2>&1; then
+  ok "regen --check passes when CLAUDE.md is in sync"
+else
+  fail "regen --check failed when freshly regenerated"
+fi
+
+# Hand-edit the markered section → --check must fail
+sed -i 's/Open findings/MANUALLY EDITED HEADING/' CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md --check >/dev/null 2>&1; then
+  fail "regen --check should detect drift, but passed"
+else
+  ok "regen --check detects manual edits to CLAUDE.md"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 13 (v0.6.3): regen renders status sections (in_progress, deferred)
+# ---------------------------------------------------------------------------
+note "Test 13 (v0.6.3): regen groups by status field"
+new_fixture t13 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-a-actionable.yml <<'YML'
+id: t13a
+rule: actionable
+dimension: security
+tier: HIGH
+module: a
+file: src/a.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+write_yaml .lattice/findings/open/2026-05-02/RISK-b-partial.yml <<'YML'
+id: t13b
+rule: partial
+dimension: scale
+tier: RISK
+module: b
+file: src/b.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/scale-audit
+status: in_progress
+partial_commits: [eeeeeee]
+remaining: "still missing retry"
+YML
+write_yaml .lattice/findings/open/2026-05-02/RISK-c-deferred.yml <<'YML'
+id: t13c
+rule: deferred
+dimension: scale
+tier: RISK
+module: c
+file: src/c.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/scale-audit
+status: deferred
+YML
+echo "# fixture" > CLAUDE.md
+bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null
+
+if grep -q "^## Open findings (1 actionable)" CLAUDE.md \
+   && grep -q "^## In progress (1)" CLAUDE.md \
+   && grep -q "^## Deferred (1)" CLAUDE.md \
+   && grep -q "still missing retry" CLAUDE.md \
+   && grep -q "eeeeeee" CLAUDE.md; then
+  ok "regen groups by status (open/in_progress/deferred) with partial details"
+else
+  fail "regen did not group by status correctly:\n$(cat CLAUDE.md)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 14 (v0.6.3): regen rejects invalid status values
+# ---------------------------------------------------------------------------
+note "Test 14 (v0.6.3): regen rejects unknown status"
+new_fixture t14 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t14a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: bogus_value
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  fail "regen should reject status: bogus_value"
+else
+  ok "regen rejects invalid status values"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 15 (v0.6.3): migrate-status.sh adds status: open idempotently
+# ---------------------------------------------------------------------------
+MIGRATE="${REPO_ROOT}/scripts/migrate-status.sh"
+note "Test 15 (v0.6.3): migrate-status adds status: open idempotently"
+new_fixture t15 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-no-status.yml <<'YML'
+id: t15a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+YML
+bash "${MIGRATE}" >/dev/null
+if grep -q "^status: open$" ".lattice/findings/open/2026-05-02/HIGH-no-status.yml"; then
+  ok "migrate-status added status: open"
+else
+  fail "migrate-status did not add status field"
+fi
+# Run again — must not duplicate
+bash "${MIGRATE}" >/dev/null
+count=$(grep -cE "^status:" ".lattice/findings/open/2026-05-02/HIGH-no-status.yml")
+if [ "${count}" = "1" ]; then
+  ok "migrate-status is idempotent (no duplicate status field)"
+else
+  fail "migrate-status duplicated status field (count=${count})"
 fi
 
 # ---------------------------------------------------------------------------
