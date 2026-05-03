@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# Lattice CLI dispatcher (v0.7)
+#
+# Subcommands:
+#   lattice install-hooks         Install pre-push hook in current git repo
+#   lattice decision ack <id>     Acknowledge a decision warning
+#   lattice decision check        Re-run pre-push check manually (CI fallback)
+#
+# Spec: docs/v0.7-decision-tracking.md
+
+set -u
+
+LATTICE_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+HOOK_TEMPLATE="${LATTICE_HOME}/scripts/pre-push-hook.sh"
+
+err()  { printf "[lattice] error: %s\n" "$*" >&2; }
+note() { printf "[lattice] %s\n" "$*"; }
+ok()   { printf "[lattice]   ok: %s\n" "$*"; }
+
+# -- Helpers --------------------------------------------------------------
+
+require_git_repo() {
+  if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+    err "not inside a git repository"
+    exit 1
+  fi
+}
+
+repo_root() {
+  git rev-parse --show-toplevel
+}
+
+sanitize_email() {
+  local email="$1"
+  local PY
+  PY="$(command -v python3 || command -v python || true)"
+  if [ -n "${PY}" ]; then
+    printf "%s" "${email}" | "${PY}" -c "
+import re, sys
+print(re.sub(r'[^a-zA-Z0-9._@-]', '_', sys.stdin.read().strip()))
+"
+  else
+    # Fallback: pure shell, replace non-allowed with _
+    printf "%s" "${email}" | sed 's/[^a-zA-Z0-9._@-]/_/g'
+  fi
+}
+
+# -- install-hooks --------------------------------------------------------
+
+cmd_install_hooks() {
+  require_git_repo
+  local root; root="$(repo_root)"
+  local hooks_dir="${root}/.git/hooks"
+  local wrapper="${hooks_dir}/pre-push"
+  local tracked_dir="${root}/.lattice/hooks"
+  local tracked_hook="${tracked_dir}/pre-push"
+  local gitignore="${root}/.gitignore"
+
+  if [ ! -f "${HOOK_TEMPLATE}" ]; then
+    err "hook template not found at ${HOOK_TEMPLATE}"
+    exit 1
+  fi
+
+  # 1. Place tracked hook (commit this so other devs get it).
+  mkdir -p "${tracked_dir}"
+  if [ -f "${tracked_hook}" ]; then
+    if cmp -s "${HOOK_TEMPLATE}" "${tracked_hook}"; then
+      ok ".lattice/hooks/pre-push (already up-to-date)"
+    else
+      cp "${HOOK_TEMPLATE}" "${tracked_hook}"
+      chmod +x "${tracked_hook}"
+      ok ".lattice/hooks/pre-push (updated from plugin)"
+    fi
+  else
+    cp "${HOOK_TEMPLATE}" "${tracked_hook}"
+    chmod +x "${tracked_hook}"
+    ok ".lattice/hooks/pre-push (installed — please commit)"
+  fi
+
+  # 2. Wrapper at .git/hooks/pre-push.
+  local wrapper_body
+  wrapper_body='#!/bin/sh
+# Installed by `lattice install-hooks` — execs the tracked hook.
+exec "$(git rev-parse --show-toplevel)/.lattice/hooks/pre-push" "$@"
+'
+  if [ -f "${wrapper}" ]; then
+    if [ "$(cat "${wrapper}")" = "${wrapper_body}" ]; then
+      ok ".git/hooks/pre-push (wrapper already installed)"
+    else
+      err ".git/hooks/pre-push exists and is not a Lattice wrapper."
+      err "  Refusing to overwrite. To chain manually, add this line near the top:"
+      err '    exec "$(git rev-parse --show-toplevel)/.lattice/hooks/pre-push" "$@"'
+      exit 1
+    fi
+  else
+    printf "%s" "${wrapper_body}" > "${wrapper}"
+    chmod +x "${wrapper}"
+    ok ".git/hooks/pre-push (wrapper installed)"
+  fi
+
+  # 3. Append .lattice/acks/ to .gitignore if not present.
+  if [ -f "${gitignore}" ] && grep -qE '^\.lattice/acks/?$' "${gitignore}"; then
+    ok ".gitignore (already ignores .lattice/acks/)"
+  else
+    printf "\n# Lattice v0.7 — per-developer ack state, not shared\n.lattice/acks/\n" >> "${gitignore}"
+    ok ".gitignore (added .lattice/acks/)"
+  fi
+
+  note "install complete. Decisions live in decisions/. Pre-push warnings will fire on changes to active decisions."
+}
+
+# -- decision ack ---------------------------------------------------------
+
+cmd_decision_ack() {
+  if [ "$#" -lt 1 ]; then
+    err "usage: lattice decision ack <decision-id>"
+    exit 2
+  fi
+  local id="$1"
+  if ! [[ "${id}" =~ ^[a-z0-9-]+$ ]]; then
+    err "invalid decision id '${id}' (must match [a-z0-9-]+)"
+    exit 2
+  fi
+
+  require_git_repo
+  local root; root="$(repo_root)"
+  local decision_file="${root}/decisions/${id}.md"
+  if [ ! -f "${decision_file}" ]; then
+    err "no decision found at decisions/${id}.md"
+    exit 1
+  fi
+
+  local email; email="$(git config user.email 2>/dev/null || true)"
+  if [ -z "${email}" ]; then
+    err "git config user.email is empty — cannot ack without a developer identity"
+    exit 1
+  fi
+  local email_safe; email_safe="$(sanitize_email "${email}")"
+
+  local ack_dir="${root}/.lattice/acks/${email_safe}"
+  local ack_file="${ack_dir}/${id}"
+  mkdir -p "${ack_dir}"
+  : > "${ack_file}"
+  ok "acknowledged: ${id} (${email})"
+  note "ack stored at .lattice/acks/${email_safe}/${id}"
+  note "this suppression sticks until decisions/${id}.md is modified"
+}
+
+# -- decision check (manual / CI fallback) -------------------------------
+
+cmd_decision_check() {
+  require_git_repo
+  local root; root="$(repo_root)"
+  if [ ! -x "${HOOK_TEMPLATE}" ]; then
+    chmod +x "${HOOK_TEMPLATE}" 2>/dev/null || true
+  fi
+  # Run the hook with no stdin; the hook falls back to "HEAD~1..HEAD" diff.
+  bash "${HOOK_TEMPLATE}" </dev/null
+}
+
+# -- dispatcher -----------------------------------------------------------
+
+usage() {
+  cat <<'USAGE'
+lattice — decision tracking CLI (v0.7)
+
+Usage:
+  lattice install-hooks              Install pre-push hook in current repo
+  lattice decision ack <id>          Acknowledge a decision warning
+  lattice decision check             Run the pre-push check manually
+
+Environment:
+  LATTICE_SKIP_HOOKS=1               Bypass the pre-push hook entirely
+USAGE
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 0
+fi
+
+case "$1" in
+  install-hooks)
+    shift
+    cmd_install_hooks "$@"
+    ;;
+  decision)
+    shift
+    if [ "$#" -eq 0 ]; then
+      err "usage: lattice decision <ack|check> ..."
+      exit 2
+    fi
+    sub="$1"; shift
+    case "${sub}" in
+      ack)   cmd_decision_ack   "$@" ;;
+      check) cmd_decision_check "$@" ;;
+      *)
+        err "unknown subcommand: lattice decision ${sub}"
+        exit 2
+        ;;
+    esac
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    err "unknown command: $1"
+    usage
+    exit 2
+    ;;
+esac
