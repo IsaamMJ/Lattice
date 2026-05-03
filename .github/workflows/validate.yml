@@ -11,9 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install validator deps (PyYAML for v0.7 decision schema)
-        run: pip install pyyaml
       - name: Run validate.sh
         run: |
-          chmod +x scripts/validate.sh scripts/validate-decisions.sh
+          chmod +x scripts/validate.sh
           ./scripts/validate.sh

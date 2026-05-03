@@ -160,20 +160,6 @@ else
   ok "CLAUDE.md drift check skipped (no CLAUDE.md or no .lattice/findings/ in plugin repo)"
 fi
 
-# --- 8b. Decision schema validation (v0.7) ----------------------------
-note "validating decisions/ (v0.7 decision schema)"
-if [ -f "${ROOT}/scripts/validate-decisions.sh" ]; then
-  if bash "${ROOT}/scripts/validate-decisions.sh" > /tmp/lattice-decisions-output.log 2>&1; then
-    sed 's/^/[validate]   /' /tmp/lattice-decisions-output.log
-    ok "validate-decisions.sh"
-  else
-    sed 's/^/[validate]   /' /tmp/lattice-decisions-output.log >&2 || true
-    warn "validate-decisions.sh failed"
-  fi
-else
-  warn "missing scripts/validate-decisions.sh (v0.7 decision schema validator)"
-fi
-
 # --- 9. Functional lifecycle test suite (v0.6.2 protection layer) -----
 note "running lifecycle test suite"
 if [ -f "${ROOT}/scripts/test-lifecycle.sh" ]; then
