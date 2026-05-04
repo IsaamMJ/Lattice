@@ -1,6 +1,15 @@
-# Lattice finding schema (v0.6 / v0.6.3)
+# Lattice finding schema (v0.6 / v0.6.3 / v0.6.4)
 
 **Breaking change from v0.5:** findings are now one YAML file per finding (not one Markdown file per audit). Status lives in the file path AND in a `status:` field (added v0.6.3). CLAUDE.md is regenerated from YAML, not authored by hand — and v0.6.3 adds a CI check that enforces this.
+
+## v0.6.4 changes (additive, non-breaking)
+
+- New `tests:` field — list of acceptance criteria that verify the fix. Closes the "tested or eyeballed?" gap. Each entry is one line describing a scenario + expected outcome.
+- New `simulate:` field — list of reproducer commands (curl, admin endpoint call, simulated input). Lets verification be mechanical rather than from memory.
+- Two new dimensions: `flow` and `coverage`.
+  - `flow` — customer-journey gaps (happy path, error handling, abandonment, state transitions, exits). Targets conversational AI and request-response flows. See `commands/flow-audit.md`.
+  - `coverage` — module-surface audit (what does this module do? is it all tested/documented/used?).
+- `intentional_citation:` is now valid for any dimension's "this is OK because..." case (previously documented as audit-INTENTIONAL only). Same field, broader applicability.
 
 ## v0.6.3 changes (additive, non-breaking)
 
@@ -69,7 +78,7 @@ The slug is the **stable ID** — a finding for the same rule + same module on a
 # Identity
 id: <stable hash — sha1(rule + module + file + line) truncated 12 chars>
 rule: <kebab-case rule slug, matches filename>
-dimension: audit | scale | security
+dimension: audit | scale | security | flow | coverage   # flow + coverage added v0.6.4
 tier: <see verdict tiers per dimension>
 module: <module path, e.g. src/modules/payments>
 
@@ -115,8 +124,25 @@ secure_code_example: |
 # Required if dimension=scale AND tier in [BLOCKER, RISK]:
 failure_mode: <one sentence — what breaks at instance #2>
 
-# Required if dimension=audit AND tier=INTENTIONAL:
-intentional_citation: <commit-hash or CLAUDE.md:line>
+# Required if dimension=flow AND tier in [CRITICAL, HIGH]:
+impact: <one sentence — how this breaks the customer experience>
+
+# Required when tier=INTENTIONAL (audit) OR tier=OK with documented-as-intentional rationale:
+intentional_citation: <commit-hash or CLAUDE.md:line or TTD:line>   # v0.6.4: now valid for any dimension
+
+# Acceptance criteria (v0.6.4, optional everywhere)
+# Each entry is one line: scenario + expected outcome.
+# When the finding is closed, these become the verification spec.
+tests:
+  - "First-time user sends 'hi' → consent message appears before any profile question"
+  - "User sends 'no' to consent → bot stops and explains why it can't proceed"
+
+# Mechanical reproducers (v0.6.4, optional everywhere)
+# curl commands, admin endpoint calls, simulated inputs — anything that lets
+# the fix be verified without manual memory of how to trigger the bug.
+simulate:
+  - "curl -X POST http://localhost:3000/api/webhook -H 'X-Sig: bad' -d '{}'"
+  - "Run admin tool: simulate REPORT_FULL with gender=F"
 
 # Optional everywhere
 notes: <free text, only if needed>
@@ -129,6 +155,8 @@ notes: <free text, only if needed>
 | audit | DRIFT, INTENTIONAL, OK, UNVERIFIABLE | INTENTIONAL requires `intentional_citation` |
 | scale | BLOCKER, RISK, WATCH, OK | BLOCKER/RISK require `failure_mode` |
 | security | CRITICAL, HIGH, MEDIUM, LOW, OK | CRITICAL/HIGH require OWASP + scenario + secure code |
+| flow | CRITICAL, HIGH, MEDIUM, LOW, OK | CRITICAL/HIGH require `impact` (v0.6.4) |
+| coverage | HIGH, MEDIUM, LOW, OK | Module-surface gaps; no extra required fields (v0.6.4) |
 
 ## CLAUDE.md generator contract
 

@@ -81,14 +81,18 @@ function escapeMd(value) {
     .replace(/\r?\n/g, ' ');
 }
 
-// Minimal YAML parser for the flat-key-value + block-scalar + simple-list subset Lattice emits.
+// Minimal YAML parser for the flat-key-value + block-scalar + list (inline + block) subset Lattice emits.
 function parseYaml(text) {
   const out = {};
   const lines = text.split(/\r?\n/);
   let block = null;
+  let blockList = null;  // v0.6.4: collect "  - item" lines after a "key:" with empty value
+
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     const line = raw.replace(/\r$/, '');
+
+    // Handle continuation of a block scalar (|, >)
     if (block !== null) {
       if (/^\s+/.test(line) || line === '') {
         block.value += (block.value ? '\n' : '') + line.replace(/^  /, '');
@@ -97,6 +101,19 @@ function parseYaml(text) {
       out[block.key] = block.value;
       block = null;
     }
+
+    // Handle continuation of a block list (key: \n  - item)
+    if (blockList !== null) {
+      const itemMatch = line.match(/^\s+-\s*(.*)$/);
+      if (itemMatch) {
+        blockList.items.push(itemMatch[1].trim().replace(/^["']|["']$/g, ''));
+        continue;
+      }
+      // List ended — commit it and fall through to handle this line normally
+      out[blockList.key] = blockList.items;
+      blockList = null;
+    }
+
     if (line.startsWith('#') || line.trim() === '') continue;
     const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/);
     if (!m) {
@@ -114,9 +131,20 @@ function parseYaml(text) {
       out[k] = inner === '' ? [] : inner.split(',').map(s => s.trim().replace(/^["']|["']$/g, ''));
       continue;
     }
+    // v0.6.4: empty value may be the start of a block-list (next non-blank line starts with "  - ").
+    // Peek ahead one non-blank line; if it's a list item, start collecting.
+    if (v === '') {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() === '') j++;
+      if (j < lines.length && /^\s+-\s/.test(lines[j])) {
+        blockList = { key: k, items: [] };
+        continue;
+      }
+    }
     out[k] = v.replace(/^["']|["']$/g, '');
   }
   if (block) out[block.key] = block.value;
+  if (blockList) out[blockList.key] = blockList.items;
   return out;
 }
 

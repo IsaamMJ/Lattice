@@ -126,8 +126,9 @@ See `docs/finding-schema.md` for the YAML schema every skill conforms to.
 - **v0.5** — module-scoped dispatch, prompt-cache-aware, output schema contract, sequential echo-back guard, validate.sh cross-skill checks
 - **v0.6** — YAML-per-finding lifecycle (open/closed in path), CLAUDE.md regenerated from YAML truth via markers, `lattice-close.sh` + `lattice-regenerate.sh` helpers
 - **v0.6.3** — `status:` field on open findings (`open` / `in_progress` / `deferred` / `wont_fix`), `--partial` close, `lattice-reopen.sh` for regressions, `migrate-status.sh`, CI-enforced CLAUDE.md drift gate (`lattice-regenerate.sh --check`)
-- **v0.6.3.1** (current) — hardening patch: 8 bugs from a hostile-fixture stress pass. close.sh refuses to overwrite existing closed findings; multiline `--partial` text uses YAML block scalars; installer/updater ship all 5 lifecycle helpers; regen validates `line` as integer and applies required-field checks to closed findings; validate.sh now greps for stale version refs and legacy path patterns
-- **v0.6.4** — `tests:` field on findings, `lattice diff <id-1> <id-2>` (sweep regression detection), pre-commit regen hook, BLOCKER CI gate, `module-sweep.md` template, `flow` / `coverage` dimensions
+- **v0.6.3.1** — hardening patch: 8 bugs from a hostile-fixture stress pass. close.sh refuses to overwrite existing closed findings; multiline `--partial` text uses YAML block scalars; installer/updater ship all 5 lifecycle helpers; regen validates `line` as integer and applies required-field checks to closed findings; validate.sh now greps for stale version refs and legacy path patterns
+- **v0.6.4** (current) — `flow` and `coverage` dimensions formalized; `/flow-audit` command shipped (customer-flow gaps for conversational AI / multi-step request flows); new optional `tests:` field (acceptance criteria) and `simulate:` field (mechanical reproducers) on findings; regen YAML parser supports block-list form
+- **v0.6.5** — `lattice diff <id-1> <id-2>`, pre-commit regen hook, BLOCKER CI gate, `module-sweep.md` template
 - **v0.8** — cross-dimension dedupe by `file:line` + rule (one finding, one report)
 - **v1.0** — pre-push hook blocking on open CRITICAL, spec written after v0.8 real usage
 

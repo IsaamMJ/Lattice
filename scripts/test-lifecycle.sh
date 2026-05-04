@@ -737,6 +737,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 20 (v0.6.4): tests:/simulate: block-lists parse + render through regen
+# ---------------------------------------------------------------------------
+note "Test 20 (v0.6.4): tests:/simulate: block-list YAML parses through regen"
+new_fixture t20 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-lumi-onboarding.yml <<'YML'
+id: t20a
+rule: happy-path-incomplete
+dimension: flow
+tier: HIGH
+module: lumi
+file: src/modules/lumi/onboarding.ts
+line: 42
+title: "Onboarding consent step missing"
+fix: "Add handler for consent response"
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/flow-audit
+status: open
+impact: "Customer reaches continue button, nothing happens"
+tests:
+  - "First-time user sends 'hi' → consent message appears"
+  - "User sends 'no' to consent → bot exits with explanation"
+  - "User who already consented → consent skipped on return"
+simulate:
+  - "Send WhatsApp 'hi' from fresh test number"
+  - "Admin tool: reset_user --phone +91XXX && send 'hi'"
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  if grep -q "happy-path-incomplete" CLAUDE.md \
+     && grep -q "src/modules/lumi/onboarding.ts:42" CLAUDE.md; then
+    ok "block-list tests:/simulate: YAML parses + renders through regen"
+  else
+    fail "regen did not render the block-list finding correctly"
+  fi
+else
+  fail "regen failed on block-list YAML (parser broken)"
+fi
+
 # Result
 # ---------------------------------------------------------------------------
 cd "${REPO_ROOT}"

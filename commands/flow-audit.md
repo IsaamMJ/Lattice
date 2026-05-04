@@ -67,6 +67,14 @@ For each, evidence is concrete: a `file:line` showing the gap.
 | Flow logs missing or insufficient (cannot reconstruct customer journey on error) | Debugging gaps |
 | No test coverage for error paths | Coverage looks good, reality is fragile |
 
+## Tool usage
+
+- **Grep**: pattern hunting for handler paths, error catches, state transitions, exits, timeouts, cleanup, notifications, context usage, concurrency primitives (never Bash grep — Windows path issues)
+- **Read**: context for every hit before assigning a verdict; load CLAUDE.md / TTD / flow diagram first
+- **Glob**: enumerate handlers, services, state stores in the module
+- **Bash**: only for `git log` if checking when a flow gap was introduced
+- **Write**: only for the findings file in `.lattice/findings/open/<sweep-date>/`
+
 ## Methodology
 
 ### Step 1 — Load living truth
@@ -156,10 +164,18 @@ fix: <one-sentence recommended fix>
 sweep_date: <YYYY-MM-DD>
 sweep_id: <12-char hex>
 auditor: claude-code/flow-audit
+status: open
 # Required if tier in [CRITICAL, HIGH]:
 impact: <one sentence — how this breaks the customer experience>
 # Required if tier=OK:
 intentional_citation: <TTD:line or CLAUDE.md:line that documents it as intentional/deferred>
+# v0.6.4 — acceptance criteria. Highest leverage on flow dimension.
+tests:
+  - "<scenario> → <expected outcome>"
+  - "<edge case> → <expected outcome>"
+# v0.6.4 — mechanical reproducers (when applicable; admin tools, curl, simulated input).
+simulate:
+  - "<command or simulated input that triggers the gap>"
 notes: <only if needed>
 ```
 
@@ -202,6 +218,13 @@ line: 42
 title: "Onboarding happy path missing consent step; test coverage incomplete"
 fix: "Add handler for consent response; implement test case: user accepts → flow continues"
 impact: "Customer reaches 'continue' button, nothing happens; forced to abandon"
+tests:
+  - "First-time user sends 'hi' → consent message appears before any profile question"
+  - "User sends 'yes' to consent → flow advances to profile setup"
+  - "User who already consented → consent step skipped on return message"
+simulate:
+  - "Send WhatsApp message 'hi' from a fresh test number"
+  - "Admin tool: reset_user --phone +91XXX && send 'hi'"
 ```
 
 ### HIGH: No error handling
