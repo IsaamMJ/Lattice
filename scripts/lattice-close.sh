@@ -149,9 +149,15 @@ if [ "${PARTIAL_MODE}" -eq 1 ]; then
     printf "\n# Triage (set by lattice-close.sh --partial)\n"
     printf "status: in_progress\n"
     printf "partial_commits: [%s]\n" "${new_list}"
-    # Escape double-quotes in remaining text
-    esc_remaining="$(printf "%s" "${PARTIAL}" | sed 's/"/\\"/g')"
-    printf "remaining: \"%s\"\n" "${esc_remaining}"
+    # Multiline-safe: if PARTIAL contains newlines, use YAML block scalar (|),
+    # otherwise use double-quoted scalar (escape internal double-quotes).
+    if [[ "${PARTIAL}" == *$'\n'* ]]; then
+      printf "remaining: |\n"
+      printf "%s\n" "${PARTIAL}" | sed 's/^/  /'
+    else
+      esc_remaining="$(printf "%s" "${PARTIAL}" | sed 's/"/\\"/g')"
+      printf "remaining: \"%s\"\n" "${esc_remaining}"
+    fi
   } >> "${SRC}"
 
   echo "[lattice-close] partial close: ${FIND} (status: in_progress)"
@@ -166,6 +172,21 @@ fi
 DEST_DIR=".lattice/findings/closed/${COMMIT}"
 mkdir -p "${DEST_DIR}"
 DEST="${DEST_DIR}/${FIND}.yml"
+
+# Refuse to silently overwrite an existing closed finding for the same slug+commit.
+# Earlier closed YAML carries lifecycle metadata (closed_at, closed_by_pr, partial history)
+# that mv would destroy without warning.
+if [ -e "${DEST}" ]; then
+  echo "[lattice-close] error: ${DEST} already exists" >&2
+  echo "[lattice-close]   refusing to overwrite. Options:" >&2
+  echo "[lattice-close]     1. Different closing commit: re-run with --commit <other-sha>" >&2
+  echo "[lattice-close]     2. Reopen first if regression:  bash scripts/lattice-reopen.sh ${FIND}" >&2
+  echo "[lattice-close]     3. Force overwrite (destructive): set LATTICE_FORCE_OVERWRITE=1" >&2
+  if [ "${LATTICE_FORCE_OVERWRITE:-0}" != "1" ]; then
+    exit 1
+  fi
+  echo "[lattice-close] LATTICE_FORCE_OVERWRITE=1 set — overwriting ${DEST}" >&2
+fi
 
 mv "${SRC}" "${DEST}"
 

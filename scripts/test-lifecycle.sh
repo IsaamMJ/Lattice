@@ -589,6 +589,154 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 16 (v0.6.3.1): close refuses to overwrite existing closed finding
+# ---------------------------------------------------------------------------
+note "Test 16 (v0.6.3.1): close refuses to overwrite existing closed finding"
+new_fixture t16 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t16a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t1
+fix: f1
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+bash "${CLOSE}" HIGH-x-y --commit 1234567 >/dev/null
+
+# Now create a different open finding with the same slug (e.g. resurrected by another sweep)
+mkdir -p .lattice/findings/open/2026-05-04
+write_yaml .lattice/findings/open/2026-05-04/HIGH-x-y.yml <<'YML'
+id: t16b
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t2-different
+fix: f2
+sweep_date: 2026-05-04
+sweep_id: s2
+auditor: claude-code/security-audit
+status: open
+YML
+
+# Closing again with the same SHA should refuse, NOT overwrite
+if bash "${CLOSE}" HIGH-x-y --commit 1234567 >/dev/null 2>&1; then
+  fail "close should refuse to overwrite existing closed/<sha>/<slug>.yml, but succeeded"
+else
+  if grep -q "title: t1" .lattice/findings/closed/1234567/HIGH-x-y.yml \
+     && [ -f .lattice/findings/open/2026-05-04/HIGH-x-y.yml ]; then
+    ok "close refused to overwrite; original closed finding intact, source still in open/"
+  else
+    fail "close refused but state was corrupted"
+  fi
+fi
+
+# LATTICE_FORCE_OVERWRITE=1 should allow it (escape hatch)
+if LATTICE_FORCE_OVERWRITE=1 bash "${CLOSE}" HIGH-x-y --commit 1234567 >/dev/null 2>&1; then
+  if grep -q "title: t2-different" .lattice/findings/closed/1234567/HIGH-x-y.yml; then
+    ok "LATTICE_FORCE_OVERWRITE=1 escape hatch works"
+  else
+    fail "force overwrite did not actually overwrite"
+  fi
+else
+  fail "LATTICE_FORCE_OVERWRITE=1 should permit overwrite"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 17 (v0.6.3.1): --partial with multiline text produces valid YAML
+# ---------------------------------------------------------------------------
+note "Test 17 (v0.6.3.1): --partial multiline uses YAML block scalar"
+new_fixture t17 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/RISK-x-multiline.yml <<'YML'
+id: t17a
+rule: ml
+dimension: scale
+tier: RISK
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/scale-audit
+status: open
+YML
+bash "${CLOSE}" RISK-x-multiline --partial "$(printf 'line one\nline two\nline three')" --commit 7890abc >/dev/null
+
+src=".lattice/findings/open/2026-05-02/RISK-x-multiline.yml"
+# Block scalar form: `remaining: |` then indented lines
+if grep -q "^remaining: |$" "${src}" \
+   && grep -q "^  line one$" "${src}" \
+   && grep -q "^  line two$" "${src}" \
+   && grep -q "^  line three$" "${src}"; then
+  ok "multiline --partial uses block scalar form"
+else
+  fail "multiline --partial did not use block scalar:\n$(cat "${src}")"
+fi
+
+# And regen must successfully parse it (this was the core failure mode in P2 #4)
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  ok "regen parses block-scalar multiline remaining text without error"
+else
+  fail "regen failed on block-scalar multiline finding"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 18 (v0.6.3.1): regen rejects non-integer line values
+# ---------------------------------------------------------------------------
+note "Test 18 (v0.6.3.1): regen rejects line: <non-integer>"
+new_fixture t18 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-bad-line.yml <<'YML'
+id: t18a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: not-a-number
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  fail "regen should reject non-integer line, but succeeded"
+else
+  ok "regen rejects line: not-a-number"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 19 (v0.6.3.1): closed findings get required-field validation
+# ---------------------------------------------------------------------------
+note "Test 19 (v0.6.3.1): closed findings missing rule/module fail regen"
+new_fixture t19 >/dev/null
+mkdir -p .lattice/findings/closed/abcdefg
+write_yaml .lattice/findings/closed/abcdefg/HIGH-corrupt.yml <<'YML'
+closed_at: 2026-05-04T00:00:00Z
+closed_by_commit: abcdefg
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  fail "regen should reject closed YAML missing rule/module, but succeeded"
+else
+  ok "regen applies required-field validation to closed findings"
+fi
+
+# ---------------------------------------------------------------------------
 # Result
 # ---------------------------------------------------------------------------
 cd "${REPO_ROOT}"

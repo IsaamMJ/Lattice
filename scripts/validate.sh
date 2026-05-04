@@ -38,14 +38,51 @@ for f in "${ROOT}/.claude-plugin/plugin.json" "${ROOT}/.claude-plugin/marketplac
   ok "$(basename "${f}")"
 done
 
-# --- 1b. Version match ---------------------------------------------------
-note "checking plugin/marketplace version match"
+# Shared helper used by 1b + 1d. Defined once, here, so 1b can call it.
 read_json_field() {
   local file="$1" expr="$2"
   python3 -c "import json,sys; print(json.load(open(sys.argv[1]))${expr})" "${file}" 2>/dev/null \
     || node -e "const o=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(String(o${expr}))" "${file}" 2>/dev/null \
     || echo ""
 }
+
+# --- 1b. Stale version refs in README / CHANGELOG (v0.6.3.1) ------------
+# Catches the drift the user reported: README + CHANGELOG referencing 0.6.2
+# while plugin.json was already at 0.6.3.
+note "checking README/CHANGELOG for stale 'current' version refs"
+plugin_ver_for_drift=$(read_json_field "${ROOT}/.claude-plugin/plugin.json" "['version']" 2>/dev/null || true)
+if [ -n "${plugin_ver_for_drift:-}" ]; then
+  for f in "${ROOT}/README.md" "${ROOT}/CHANGELOG.md"; do
+    [ -f "${f}" ] || continue
+    # Look for "(current)" tags or "current version" claims pointing at a different version.
+    stale=$(grep -nE '\(current\)' "${f}" | grep -vE "${plugin_ver_for_drift}" || true)
+    if [ -n "${stale}" ]; then
+      warn "$(basename "${f}"): '(current)' tag does not match plugin.json (${plugin_ver_for_drift})"
+      printf "%s\n" "${stale}" | sed 's/^/[validate]     /' >&2
+    else
+      ok "$(basename "${f}"): no stale '(current)' version drift"
+    fi
+  done
+fi
+
+# --- 1c. Legacy path/format patterns inside command bodies (v0.6.3.1) ---
+# Catches commands that still tell module agents to write legacy
+# audit-<module>-<ts>.md files or to .cc-reef/. These contradict the YAML schema
+# silently and cause downstream pipeline confusion.
+note "checking commands/*.md for legacy path or filename patterns"
+for cmd in "${ROOT}/commands/"*.md; do
+  name="$(basename "${cmd}")"
+  legacy=$(grep -nE '\.cc-reef/|audit-<module>-<ts>\.md|scale-<module>-<ts>\.md|security-<module>-<ts>\.md' "${cmd}" || true)
+  if [ -n "${legacy}" ]; then
+    warn "${name}: legacy path/filename pattern detected"
+    printf "%s\n" "${legacy}" | sed 's/^/[validate]     /' >&2
+  else
+    ok "${name}: no legacy patterns"
+  fi
+done
+
+# --- 1d. Version match ---------------------------------------------------
+note "checking plugin/marketplace version match"
 plugin_ver=$(read_json_field "${ROOT}/.claude-plugin/plugin.json" "['version']")
 mkt_ver=$(read_json_field "${ROOT}/.claude-plugin/marketplace.json" "['plugins'][0]['version']")
 if [ -z "${plugin_ver}" ] || [ -z "${mkt_ver}" ]; then

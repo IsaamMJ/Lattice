@@ -96,10 +96,10 @@ Hard rules across all dimensions:
 - Never auto-apply fixes
 - Use Grep, Read, Glob — never Bash grep (Windows path issues)
 
-Write findings to .lattice/findings/ using the schema in docs/finding-schema.md:
-- audit-<module>-<ts>.md
-- scale-<module>-<ts>.md
-- security-<module>-<ts>.md
+Write findings to .lattice/findings/open/<sweep-date>/ using the v0.6 YAML schema (docs/finding-schema.md).
+One YAML file per finding — never write monolithic markdown audit reports.
+Filename pattern: <TIER>-<module-slug>-<rule-slug>.yml
+Example: HIGH-payments-missing-rate-limit.yml
 
 Return a JSON summary to the orchestrator:
 {

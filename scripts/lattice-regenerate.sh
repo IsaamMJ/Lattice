@@ -120,10 +120,21 @@ function parseYaml(text) {
   return out;
 }
 
-function validateFinding(parsed, filePath) {
-  for (const required of ['rule', 'file', 'line']) {
-    if (parsed[required] === undefined || parsed[required] === '') {
-      throw new Error(`missing required field '${required}' in ${filePath}`);
+function validateFinding(parsed, filePath, kind = 'open') {
+  // Open findings need full evidence; closed findings need at least identity + lifecycle.
+  const required = kind === 'open'
+    ? ['rule', 'file', 'line', 'module', 'tier']
+    : ['rule', 'module', 'closed_by_commit'];
+  for (const k of required) {
+    if (parsed[k] === undefined || parsed[k] === '') {
+      throw new Error(`missing required field '${k}' in ${filePath}`);
+    }
+  }
+  // v0.6.3.1: line must be a positive integer string (rendered as src/x.ts:<line>)
+  if (kind === 'open') {
+    const lineStr = String(parsed.line);
+    if (!/^\d+$/.test(lineStr) || parseInt(lineStr, 10) < 1) {
+      throw new Error(`invalid 'line' in ${filePath}: must be a positive integer (got ${JSON.stringify(parsed.line)})`);
     }
   }
 }
@@ -139,12 +150,12 @@ function readDirRecursive(dir) {
   return out;
 }
 
-function loadAll(files, requireFields) {
+function loadAll(files, kind /* 'open' | 'closed' */) {
   const loaded = [];
   for (const f of files) {
     try {
       const parsed = parseYaml(fs.readFileSync(f, 'utf8'));
-      if (requireFields) validateFinding(parsed, f);
+      validateFinding(parsed, f, kind);
       loaded.push({ path: f, ...parsed });
     } catch (e) {
       console.error(`[lattice-regenerate] error parsing ${f}: ${e.message}`);
@@ -156,8 +167,8 @@ function loadAll(files, requireFields) {
 
 const openFiles = readDirRecursive('.lattice/findings/open');
 const closedFiles = readDirRecursive('.lattice/findings/closed');
-const open = loadAll(openFiles, true);
-const closed = loadAll(closedFiles, false);
+const open = loadAll(openFiles, 'open');
+const closed = loadAll(closedFiles, 'closed');
 
 // v0.6.3: partition open findings by status field. Default = 'open'.
 const VALID_STATUS = ['open', 'in_progress', 'deferred', 'wont_fix'];
