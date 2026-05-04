@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
-COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep")
+COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit")
 SCRIPTS=("lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "migrate.sh" "migrate-status.sh")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 

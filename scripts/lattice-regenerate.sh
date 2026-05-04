@@ -148,21 +148,59 @@ function parseYaml(text) {
   return out;
 }
 
+const VALID_DIMENSIONS = new Set(['audit', 'scale', 'security', 'flow', 'coverage']);
+
+// v0.6.4.1: dimension+tier specific required fields. Mirrors docs/finding-schema.md.
+const DIMENSION_TIER_REQUIRED = {
+  security: {
+    CRITICAL: ['owasp', 'exploitability', 'blast_radius', 'attack_scenario', 'secure_code_example'],
+    HIGH:     ['owasp', 'exploitability', 'blast_radius', 'attack_scenario', 'secure_code_example'],
+  },
+  scale: {
+    BLOCKER: ['failure_mode'],
+    RISK:    ['failure_mode'],
+  },
+  audit: {
+    INTENTIONAL: ['intentional_citation'],
+  },
+  flow: {
+    CRITICAL: ['impact'],
+    HIGH:     ['impact'],
+  },
+};
+
 function validateFinding(parsed, filePath, kind = 'open') {
   // Open findings need full evidence; closed findings need at least identity + lifecycle.
   const required = kind === 'open'
-    ? ['rule', 'file', 'line', 'module', 'tier']
+    ? ['rule', 'file', 'line', 'module', 'tier', 'dimension']
     : ['rule', 'module', 'closed_by_commit'];
   for (const k of required) {
     if (parsed[k] === undefined || parsed[k] === '') {
       throw new Error(`missing required field '${k}' in ${filePath}`);
     }
   }
-  // v0.6.3.1: line must be a positive integer string (rendered as src/x.ts:<line>)
   if (kind === 'open') {
+    // v0.6.3.1: line must be a positive integer (rendered as src/x.ts:<line>)
     const lineStr = String(parsed.line);
     if (!/^\d+$/.test(lineStr) || parseInt(lineStr, 10) < 1) {
       throw new Error(`invalid 'line' in ${filePath}: must be a positive integer (got ${JSON.stringify(parsed.line)})`);
+    }
+
+    // v0.6.4.1: dimension must be in the allowed enum
+    const dim = String(parsed.dimension).toLowerCase();
+    if (!VALID_DIMENSIONS.has(dim)) {
+      throw new Error(`invalid 'dimension' in ${filePath}: '${parsed.dimension}' (allowed: ${[...VALID_DIMENSIONS].join('|')})`);
+    }
+
+    // v0.6.4.1: dimension+tier specific required fields
+    const tier = String(parsed.tier).toUpperCase();
+    const dimRules = DIMENSION_TIER_REQUIRED[dim];
+    if (dimRules && dimRules[tier]) {
+      for (const k of dimRules[tier]) {
+        if (parsed[k] === undefined || parsed[k] === '') {
+          throw new Error(`missing required field '${k}' in ${filePath} (dimension=${dim}, tier=${tier} requires it per docs/finding-schema.md)`);
+        }
+      }
     }
   }
 }

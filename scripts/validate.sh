@@ -65,6 +65,55 @@ if [ -n "${plugin_ver_for_drift:-}" ]; then
   done
 fi
 
+# --- 1c2. Installer/updater coverage (v0.6.4.1) -------------------------
+# Catches the drift class where install.sh / update.sh COMMANDS or SCRIPTS
+# arrays don't match what's actually in the repo. Has happened twice:
+# v0.6.3 (missing lattice-reopen.sh + migrate-status.sh) and v0.6.4 (missing
+# flow-audit). Now structurally checked so it can't slip past CI again.
+note "checking install.sh / update.sh cover every commands/*.md and lifecycle helper"
+expected_cmds=()
+for cmd in "${ROOT}/commands/"*.md; do
+  expected_cmds+=( "$(basename "${cmd}" .md)" )
+done
+
+for installer in "${ROOT}/scripts/install.sh" "${ROOT}/scripts/update.sh"; do
+  [ -f "${installer}" ] || continue
+  installer_name="$(basename "${installer}")"
+  cmds_line=$(grep -E '^COMMANDS=\(' "${installer}" || true)
+  if [ -z "${cmds_line}" ]; then
+    warn "${installer_name}: no COMMANDS=(...) array found"
+    continue
+  fi
+  for cmd in "${expected_cmds[@]}"; do
+    if ! printf "%s" "${cmds_line}" | grep -qE "\"${cmd}\""; then
+      warn "${installer_name}: COMMANDS missing '${cmd}' (commands/${cmd}.md exists in repo)"
+    fi
+  done
+done
+
+# Same check for lifecycle helper scripts: every lattice-*.sh + migrate*.sh
+# at top of scripts/ should appear in installer SCRIPTS arrays.
+expected_scripts=()
+for s in "${ROOT}/scripts/"lattice-*.sh "${ROOT}/scripts/"migrate*.sh; do
+  [ -f "${s}" ] || continue
+  expected_scripts+=( "$(basename "${s}")" )
+done
+for installer in "${ROOT}/scripts/install.sh" "${ROOT}/scripts/update.sh"; do
+  [ -f "${installer}" ] || continue
+  installer_name="$(basename "${installer}")"
+  scripts_line=$(grep -E '^SCRIPTS=\(' "${installer}" || true)
+  if [ -z "${scripts_line}" ]; then
+    warn "${installer_name}: no SCRIPTS=(...) array found"
+    continue
+  fi
+  for s in "${expected_scripts[@]}"; do
+    if ! printf "%s" "${scripts_line}" | grep -qF "\"${s}\""; then
+      warn "${installer_name}: SCRIPTS missing '${s}' (scripts/${s} exists in repo)"
+    fi
+  done
+done
+ok "installer/updater coverage check done"
+
 # --- 1c. Legacy path/format patterns inside command bodies (v0.6.3.1) ---
 # Catches commands that still tell module agents to write legacy
 # audit-<module>-<ts>.md files or to .cc-reef/. These contradict the YAML schema

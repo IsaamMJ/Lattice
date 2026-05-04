@@ -55,7 +55,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-mod-rule.yml <<'YML'
 id: aaaa
 rule: rule
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: mod
 file: src/x.ts
 line: 1
@@ -155,7 +155,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-bad.yml <<'YML'
 id: dddd
 rule broken-no-colon
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: nope
@@ -178,7 +178,7 @@ write_yaml .lattice/findings/open/2026-05-02/CRITICAL-x-inject.yml <<'YML'
 id: eeee
 rule: inject
 dimension: security
-tier: CRITICAL
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -304,7 +304,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-mod-rule.yml <<'YML'
 id: t9aa
 rule: rule
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: mod
 file: src/x.ts
 line: 1
@@ -333,7 +333,7 @@ write_yaml .lattice/findings/open/2026-05-02/RISK-booking-no-tx.yml <<'YML'
 id: t10a
 rule: no-tx
 dimension: scale
-tier: RISK
+tier: WATCH
 module: booking
 file: src/booking.ts
 line: 1
@@ -388,7 +388,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
 id: t11a
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -432,7 +432,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
 id: t12a
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -470,7 +470,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-a-actionable.yml <<'YML'
 id: t13a
 rule: actionable
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: a
 file: src/a.ts
 line: 1
@@ -485,7 +485,7 @@ write_yaml .lattice/findings/open/2026-05-02/RISK-b-partial.yml <<'YML'
 id: t13b
 rule: partial
 dimension: scale
-tier: RISK
+tier: WATCH
 module: b
 file: src/b.ts
 line: 1
@@ -502,7 +502,7 @@ write_yaml .lattice/findings/open/2026-05-02/RISK-c-deferred.yml <<'YML'
 id: t13c
 rule: deferred
 dimension: scale
-tier: RISK
+tier: WATCH
 module: c
 file: src/c.ts
 line: 1
@@ -535,7 +535,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
 id: t14a
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -563,7 +563,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-no-status.yml <<'YML'
 id: t15a
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -597,7 +597,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
 id: t16a
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -616,7 +616,7 @@ write_yaml .lattice/findings/open/2026-05-04/HIGH-x-y.yml <<'YML'
 id: t16b
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: 1
@@ -660,7 +660,7 @@ write_yaml .lattice/findings/open/2026-05-02/RISK-x-multiline.yml <<'YML'
 id: t17a
 rule: ml
 dimension: scale
-tier: RISK
+tier: WATCH
 module: x
 file: src/x.ts
 line: 1
@@ -701,7 +701,7 @@ write_yaml .lattice/findings/open/2026-05-02/HIGH-x-bad-line.yml <<'YML'
 id: t18a
 rule: y
 dimension: security
-tier: HIGH
+tier: MEDIUM
 module: x
 file: src/x.ts
 line: not-a-number
@@ -776,6 +776,117 @@ else
   fail "regen failed on block-list YAML (parser broken)"
 fi
 
+# ---------------------------------------------------------------------------
+# Test 21 (v0.6.4.1): regen rejects unknown dimension
+# ---------------------------------------------------------------------------
+note "Test 21 (v0.6.4.1): regen rejects unknown dimension values"
+new_fixture t21 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/MEDIUM-x-y.yml <<'YML'
+id: t21a
+rule: y
+dimension: bananas
+tier: MEDIUM
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  fail "regen should reject dimension: bananas, but succeeded"
+else
+  ok "regen rejects unknown dimension"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 22 (v0.6.4.1): security HIGH/CRITICAL must have OWASP + scenario fields
+# ---------------------------------------------------------------------------
+note "Test 22 (v0.6.4.1): security HIGH without OWASP fails regen"
+new_fixture t22 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t22a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  fail "regen should reject security HIGH missing OWASP, but succeeded"
+else
+  ok "regen rejects security HIGH without OWASP fields"
+fi
+
+# Same finding with all required security fields → should pass
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t22a
+rule: y
+dimension: security
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/security-audit
+status: open
+owasp: A01
+exploitability: Remote-unauth
+blast_radius: "single tenant"
+attack_scenario: "attacker forges signature"
+secure_code_example: |
+  // good
+  if (timingSafeEqual(...)) { }
+YML
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  ok "regen accepts security HIGH with all required fields"
+else
+  fail "regen rejected security HIGH with all required fields"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 23 (v0.6.4.1): flow HIGH/CRITICAL must have impact: field
+# ---------------------------------------------------------------------------
+note "Test 23 (v0.6.4.1): flow HIGH without impact: fails regen"
+new_fixture t23 >/dev/null
+write_yaml .lattice/findings/open/2026-05-02/HIGH-x-y.yml <<'YML'
+id: t23a
+rule: y
+dimension: flow
+tier: HIGH
+module: x
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-02
+sweep_id: s
+auditor: claude-code/flow-audit
+status: open
+YML
+echo "# fixture" > CLAUDE.md
+if bash "${REGEN}" --claude-md ./CLAUDE.md >/dev/null 2>&1; then
+  fail "regen should reject flow HIGH missing impact:, but succeeded"
+else
+  ok "regen rejects flow HIGH without impact field"
+fi
+
+# ---------------------------------------------------------------------------
 # Result
 # ---------------------------------------------------------------------------
 cd "${REPO_ROOT}"

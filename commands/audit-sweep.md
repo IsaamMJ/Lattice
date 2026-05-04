@@ -1,6 +1,6 @@
 ---
-description: Run audit + scale + security across every module via one dispatch per module (module-scoped agents), aggregate into one master findings file with cross-cutting pattern detection.
-argument-hint: <project-root> [audit|scale|security] [auto] [<module-paths...>]
+description: Run audit + scale + security (default) across every module via one dispatch per module (module-scoped agents), aggregate into one master findings file with cross-cutting pattern detection. Optionally include flow / coverage dimensions.
+argument-hint: <project-root> [audit|scale|security|flow|coverage] [auto] [<module-paths...>]
 ---
 
 Sweep arguments: $ARGUMENTS
@@ -14,11 +14,16 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 | `audit` | run only the audit dimension |
 | `scale` | run only the scale dimension |
 | `security` | run only the security dimension |
+| `flow` | run only the flow dimension (v0.6.4 — opt-in only, see below) |
+| `coverage` | run only the coverage dimension (v0.6.4 — opt-in only) |
 | `auto` | auto-apply drafted checklist entries to CLAUDE.md and commit at end |
 | Path starting with `src/modules/` or absolute path | explicit module to audit (overrides auto-discovery) |
 | `.` or any other path | project root (defaults to `.` if none given) |
 
-**Dimension filtering**: If ANY of `audit` / `scale` / `security` are present, run ONLY those. If NONE are present, run all three.
+**Dimension filtering**:
+- If NO dimension token is present, run **audit + scale + security** (default — flow / coverage are opt-in).
+- If any of `audit` / `scale` / `security` / `flow` / `coverage` are present, run ONLY those.
+- `flow` and `coverage` are v0.6.4 dimensions and are NOT in the default sweep yet — explicitly include them when you want flow / coverage findings mixed into sweep output (`/audit-sweep . flow` or `/audit-sweep . security flow`). They invoke the same methodology as `/flow-audit` and `/coverage-audit` respectively, just dispatched per-module.
 
 **Module filtering**: If one or more `src/modules/X` paths are given, audit ONLY those modules. If none given, auto-discover via `Glob src/modules/*/`.
 
