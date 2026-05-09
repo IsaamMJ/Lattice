@@ -319,7 +319,7 @@ const ts = new Date().toISOString();
 let body = '';
 body += `${START}\n`;
 body += `<!-- Generated ${ts} — DO NOT EDIT BY HAND -->\n`;
-body += `<!-- Source of truth: .lattice/findings/open/ — to close, run scripts/lattice-close.sh -->\n\n`;
+body += `<!-- Source of truth: .lattice/findings/open/ — to triage, run \`lattice help\` (CLI installed via Lattice's install.sh) -->\n\n`;
 
 // --- Open (actionable) ---
 const openItems = byStatus.open;

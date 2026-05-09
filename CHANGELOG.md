@@ -2,6 +2,13 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6.2] — 2026-05-09
+
+One-line distribution-bug patch from a flow-audit debrief.
+
+### Fixed
+- **Regenerated CLAUDE.md hint pointed at a path that doesn't exist in user repos.** The `<!-- Source of truth: ... -->` comment said `to close, run scripts/lattice-close.sh` — but Lattice's helpers are installed at `~/.claude/lattice/scripts/`, not committed to the user's project. New hint: `to triage, run \`lattice help\` (CLI installed via Lattice's install.sh)`. Aligned with the v0.6.5 dispatcher reality.
+
 ## [0.6.6.1] — 2026-05-09
 
 Two same-day fixes from the v0.6.6 retest. Both real, both small.
