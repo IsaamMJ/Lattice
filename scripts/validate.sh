@@ -94,7 +94,7 @@ done
 # Same check for lifecycle helper scripts: every lattice-*.sh + migrate*.sh
 # at top of scripts/ should appear in installer SCRIPTS arrays.
 expected_scripts=()
-for s in "${ROOT}/scripts/"lattice-*.sh "${ROOT}/scripts/"migrate*.sh; do
+for s in "${ROOT}/scripts/"lattice-*.sh "${ROOT}/scripts/"migrate*.sh "${ROOT}/scripts/lattice"; do
   [ -f "${s}" ] || continue
   expected_scripts+=( "$(basename "${s}")" )
 done
@@ -211,7 +211,7 @@ fi
 
 # --- 7. v0.6 helpers exist ---------------------------------------------
 note "checking v0.6 lifecycle helpers"
-for helper in lattice-close.sh lattice-regenerate.sh; do
+for helper in lattice lattice-close.sh lattice-regenerate.sh lattice-reopen.sh; do
   if [ ! -f "${ROOT}/scripts/${helper}" ]; then
     warn "missing scripts/${helper}"
   else

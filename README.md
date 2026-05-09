@@ -24,7 +24,16 @@ curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/instal
 # 2. cd into the project you want to audit, then in Claude Code:
 /audit-sweep .
 
-# 3. Findings land in .lattice/findings/sweep-<timestamp>.md
+# 3. Findings land in .lattice/findings/open/<sweep-date>/<TIER>-<module>-<rule>.yml
+
+# 4. Triage with the lattice CLI (v0.6.5+):
+~/.claude/lattice/scripts/lattice list                    # see open findings
+~/.claude/lattice/scripts/lattice show <id>               # inspect one
+~/.claude/lattice/scripts/lattice close <id> --commit HEAD
+~/.claude/lattice/scripts/lattice defer <id> --until 2026-07-01 --reason "blocked on backend"
+~/.claude/lattice/scripts/lattice sync                    # regenerate CLAUDE.md from YAML
+
+# (alias `lattice=~/.claude/lattice/scripts/lattice` in your shell rc to drop the path)
 ```
 
 Expected output:
@@ -92,7 +101,7 @@ bash scripts/migrate.sh   # moves legacy findings to .lattice/findings/
 - Open: `.lattice/findings/open/<sweep-date>/<TIER>-<module>-<rule>.yml`
 - Closed: `.lattice/findings/closed/<commit-sha>/<TIER>-<module>-<rule>.yml`
 
-Status lives in the path. Closing a finding = `bash scripts/lattice-close.sh <id> --commit <sha>`. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
+Status lives in the path. Operate via the `lattice` CLI: `lattice close <id> --commit <sha>`, `lattice reopen <id>`, `lattice defer <id> --until <date>`, `lattice list`, `lattice show <id>`, `lattice sync`. Run `lattice help` for the full surface. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
 
 **Module-scoped dispatch (from v0.5).** `/audit-sweep` sends one Sonnet sub-agent per module that runs all in-scope dimensions inline. A 5-module sweep = 5 dispatches (not 15). Anthropic prompt caching reuses the methodology library across module dispatches at ~90% discount.
 
@@ -128,9 +137,10 @@ See `docs/finding-schema.md` for the YAML schema every skill conforms to.
 - **v0.6.3** — `status:` field on open findings (`open` / `in_progress` / `deferred` / `wont_fix`), `--partial` close, `lattice-reopen.sh` for regressions, `migrate-status.sh`, CI-enforced CLAUDE.md drift gate (`lattice-regenerate.sh --check`)
 - **v0.6.3.1** — hardening patch: 8 bugs from a hostile-fixture stress pass. close.sh refuses to overwrite existing closed findings; multiline `--partial` text uses YAML block scalars; installer/updater ship all 5 lifecycle helpers; regen validates `line` as integer and applies required-field checks to closed findings; validate.sh now greps for stale version refs and legacy path patterns
 - **v0.6.4** — `flow` and `coverage` dimensions formalized; `/flow-audit` command shipped (customer-flow gaps for conversational AI / multi-step request flows); new optional `tests:` field (acceptance criteria) and `simulate:` field (mechanical reproducers) on findings; regen YAML parser supports block-list form
-- **v0.6.4.1** (current) — installer/updater now ship `/flow-audit`; structural drift gate (validate.sh greps installer COMMANDS+SCRIPTS arrays against actual repo files); regen enforces dimension enum and dimension+tier required fields (security HIGH/CRITICAL needs OWASP, scale BLOCKER/RISK needs failure_mode, flow HIGH/CRITICAL needs impact); audit-sweep documents flow + coverage as opt-in dimensions
-- **v0.6.5** — `lattice diff <id-1> <id-2>`, pre-commit regen hook, BLOCKER CI gate, `module-sweep.md` template
-- **v0.8** — cross-dimension dedupe by `file:line` + rule (one finding, one report)
+- **v0.6.4.1** — installer/updater now ship `/flow-audit`; structural drift gate (validate.sh greps installer COMMANDS+SCRIPTS arrays against actual repo files); regen enforces dimension enum and dimension+tier required fields (security HIGH/CRITICAL needs OWASP, scale BLOCKER/RISK needs failure_mode, flow HIGH/CRITICAL needs impact); audit-sweep documents flow + coverage as opt-in dimensions
+- **v0.6.5** (current) — `scripts/lattice` unified CLI dispatcher (`close`/`reopen`/`sync`/`defer`/`list`/`show`/`sweeps`/`version`/`help`); `defer_until` + `defer_reason` + `deferred_at` fields formalize v0.6.3's `status: deferred`; `lattice list --due-for-review` surfaces past-due deferred findings; installer/updater + validate.sh track the dispatcher
+- **v0.7** (drafted) — fingerprint algorithm change so `id:` survives line shifts (`docs/v0.7-fingerprint-spec.md`); flatten `open/<date>/` and `closed/<sha>/` directories; close-reason taxonomy (`fixed | false-positive | wont-fix | out-of-scope | duplicate`); sweep manifest writer; JSON Schema; one-shot migration script
+- **v0.8** — cross-dimension dedupe by fingerprint + rule (one finding, one report); `Closes-Lattice: <id>` commit-message hook; bundle/related-finding linking
 - **v1.0** — pre-push hook blocking on open CRITICAL, spec written after v0.8 real usage
 
 See `CHANGELOG.md` for full version history.

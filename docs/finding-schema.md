@@ -100,6 +100,11 @@ status: open | in_progress | deferred | wont_fix   # default: open
 partial_commits: [<7-char-sha>, <7-char-sha>]      # commits that fixed part of this finding
 remaining: <one-line summary of what is still unfixed>
 
+# Defer tracking (only when status: deferred; v0.6.5+)
+defer_until: <ISO date, YYYY-MM-DD>                # when to revisit; surfaced by `lattice list --due-for-review`
+deferred_at: <ISO timestamp>                        # when defer was set
+defer_reason: <one-line reason>                     # why this is deferred
+
 # Reopen tracking (only on findings reopened from closed/; v0.6.3+)
 previously_closed_in: <7-char-sha>                  # the commit that originally claimed to close this
 

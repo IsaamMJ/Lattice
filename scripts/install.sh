@@ -7,7 +7,7 @@ set -euo pipefail
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
 COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit")
-SCRIPTS=("lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "migrate.sh" "migrate-status.sh")
+SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "migrate.sh" "migrate-status.sh")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
 DEST="${HOME}/.claude/commands"
@@ -59,7 +59,18 @@ echo "[lattice] version sentinel: ${VERSION}"
 
 echo ""
 echo "[lattice] installed ${#COMMANDS[@]} commands + ${#SCRIPTS[@]} scripts + ${#DOCS[@]} docs."
+echo ""
 echo "[lattice] restart Claude Code to load commands, then try:"
 echo "[lattice]   /audit-sweep ."
+echo ""
+echo "[lattice] CLI dispatcher (v0.6.5+) installed at:"
+echo "[lattice]   ${SCRIPT_DEST}/lattice"
+echo ""
+echo "[lattice] add to PATH (one-time, copy whichever fits your shell):"
+echo "[lattice]   echo 'alias lattice=\"${SCRIPT_DEST}/lattice\"' >> ~/.bashrc"
+echo "[lattice]   echo 'alias lattice=\"${SCRIPT_DEST}/lattice\"' >> ~/.zshrc"
+echo "[lattice]   # or: ln -s ${SCRIPT_DEST}/lattice ~/.local/bin/lattice"
+echo ""
+echo "[lattice] then run \`lattice help\` from any project root."
 echo ""
 echo "[lattice] docs: ${REPO}#readme"

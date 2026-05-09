@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# lattice — unified CLI dispatcher (v0.6.5)
+#
+# Discoverability layer over the lifecycle helpers. Wraps the existing
+# scripts/lattice-*.sh + scripts/lattice-regenerate.sh so users have one
+# command to learn instead of five script paths.
+#
+# Subcommands:
+#   lattice close <id> [--commit <sha>] [--pr <num>] [--partial "<text>"]
+#   lattice reopen <id> [--reason "<text>"]
+#   lattice sync [--check]                 # alias: regenerate
+#   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
+#   lattice list [--module X] [--tier Y] [--status Z] [--dimension D] [--due-for-review]
+#   lattice show <id>
+#   lattice sweeps
+#   lattice version | --version
+#   lattice help   | --help
+#
+# Exits with the subcommand's exit code. Unknown subcommands → exit 2.
+#
+# Resolution: every subcommand operates on the current working directory's
+# .lattice/findings/. Helpers are looked up next to this script (works in
+# both the source repo and the installed location ~/.claude/lattice/scripts/).
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+HELPER_CLOSE="${SELF_DIR}/lattice-close.sh"
+HELPER_REOPEN="${SELF_DIR}/lattice-reopen.sh"
+HELPER_REGEN="${SELF_DIR}/lattice-regenerate.sh"
+
+PROG="lattice"
+
+usage() {
+  cat <<'USAGE'
+lattice — Lattice findings CLI
+
+Usage:
+  lattice close <id> [--commit <sha>] [--pr <num>] [--partial "<text>"]
+  lattice reopen <id> [--reason "<text>"]
+  lattice sync [--check]
+  lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
+  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review]
+  lattice show <id>
+  lattice sweeps
+  lattice version
+  lattice help
+
+Subcommands:
+  close      mark a finding closed (or partially closed with --partial)
+  reopen     move a closed finding back to open (regression)
+  sync       regenerate the CLAUDE.md checklist block from YAML
+             (alias: regenerate; --check exits non-zero on drift)
+  defer      mark a finding status: deferred until a date, with reason
+  list       list open findings, optionally filtered
+  show       pretty-print one finding YAML
+  sweeps     list sweep manifests under .lattice/findings/sweeps/
+  version    print the installed Lattice version
+
+All subcommands run against the .lattice/findings/ tree in the current
+working directory. Run with no args from a project root.
+USAGE
+}
+
+die() {
+  echo "[${PROG}] error: $*" >&2
+  exit 2
+}
+
+require_helper() {
+  local h="$1"
+  [ -x "${h}" ] || [ -f "${h}" ] || die "missing helper: ${h}"
+}
+
+# ---------------------------------------------------------------------------
+# Locate a finding YAML by id or filename slug. Echoes the path; non-zero
+# exit if not found. Searches open/ first, then closed/.
+# ---------------------------------------------------------------------------
+locate_finding() {
+  local find_id="${1%.yml}"
+  shopt -s nullglob
+  local matches=()
+  for f in .lattice/findings/open/*/"${find_id}.yml" .lattice/findings/open/"${find_id}.yml"; do
+    matches+=("${f}")
+  done
+  if [ "${#matches[@]}" -eq 0 ]; then
+    for f in .lattice/findings/closed/*/"${find_id}.yml" .lattice/findings/closed/"${find_id}.yml"; do
+      matches+=("${f}")
+    done
+  fi
+  if [ "${#matches[@]}" -eq 0 ]; then
+    return 1
+  fi
+  IFS=$'\n' sorted=($(printf '%s\n' "${matches[@]}" | sort))
+  unset IFS
+  printf '%s\n' "${sorted[0]}"
+}
+
+# Read a top-level scalar field from a YAML file (single-line values only).
+# Echo empty if absent. Strips surrounding quotes.
+yaml_field() {
+  local file="$1" key="$2"
+  local line
+  line=$(grep -E "^${key}[[:space:]]*:" "${file}" 2>/dev/null | head -n1 || true)
+  [ -z "${line}" ] && return 0
+  printf '%s' "${line}" | sed -E "s/^${key}[[:space:]]*:[[:space:]]*//; s/^\"//; s/\"$//; s/^'//; s/'$//"
+}
+
+# ---------------------------------------------------------------------------
+# close
+# ---------------------------------------------------------------------------
+cmd_close() {
+  require_helper "${HELPER_CLOSE}"
+  bash "${HELPER_CLOSE}" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# reopen
+# ---------------------------------------------------------------------------
+cmd_reopen() {
+  require_helper "${HELPER_REOPEN}"
+  bash "${HELPER_REOPEN}" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# sync (alias: regenerate)
+# ---------------------------------------------------------------------------
+cmd_sync() {
+  require_helper "${HELPER_REGEN}"
+  bash "${HELPER_REGEN}" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# defer — set status: deferred + defer_until + defer_reason. Stays in open/.
+# ---------------------------------------------------------------------------
+cmd_defer() {
+  if [ "$#" -lt 1 ]; then
+    die "defer: usage: lattice defer <id> --until <YYYY-MM-DD> [--reason \"<text>\"]"
+  fi
+  local find_id="$1"; shift
+  local until=""
+  local reason=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --until)
+        [ -z "${2:-}" ] || [[ "${2:-}" == --* ]] && die "defer: --until requires a date"
+        until="$2"; shift 2 ;;
+      --reason)
+        [ -z "${2:-}" ] || [[ "${2:-}" == --* ]] && die "defer: --reason requires a value"
+        reason="$2"; shift 2 ;;
+      *) die "defer: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -z "${until}" ] && die "defer: --until <YYYY-MM-DD> is required"
+  [[ "${until}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "defer: --until must be YYYY-MM-DD (got: ${until})"
+
+  local src
+  src="$(locate_finding "${find_id}")" || die "defer: not found: ${find_id}.yml"
+  if [[ "${src}" == .lattice/findings/closed/* ]]; then
+    die "defer: ${find_id} is closed; reopen first if it needs deferring"
+  fi
+
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Strip prior defer/status lines, then append canonical block.
+  local tmp
+  tmp="$(mktemp)"
+  grep -v -E '^(status|defer_until|defer_reason|deferred_at)[[:space:]]*:|^# Defer \(set by lattice defer\)$' "${src}" > "${tmp}" || true
+  mv "${tmp}" "${src}"
+
+  {
+    printf "\n# Defer (set by lattice defer)\n"
+    printf "status: deferred\n"
+    printf "defer_until: %s\n" "${until}"
+    printf "deferred_at: %s\n" "${now}"
+    if [ -n "${reason}" ]; then
+      local esc_reason
+      esc_reason="$(printf "%s" "${reason}" | sed 's/"/\\"/g')"
+      printf "defer_reason: \"%s\"\n" "${esc_reason}"
+    fi
+  } >> "${src}"
+
+  echo "[${PROG}] deferred ${find_id} until ${until}"
+  [ -n "${reason}" ] && echo "[${PROG}] reason: ${reason}"
+  echo "[${PROG}] file: ${src}"
+}
+
+# ---------------------------------------------------------------------------
+# list — print open findings, optional filters. Format: <tier> <module>/<rule> <file>:<line>
+# ---------------------------------------------------------------------------
+cmd_list() {
+  local filter_module="" filter_tier="" filter_status="" filter_dim=""
+  local due_for_review=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --module)    filter_module="$2"; shift 2 ;;
+      --tier)      filter_tier="$2"; shift 2 ;;
+      --status)    filter_status="$2"; shift 2 ;;
+      --dimension) filter_dim="$2"; shift 2 ;;
+      --due-for-review) due_for_review=1; shift ;;
+      *) die "list: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -d ".lattice/findings/open" ] || { echo "[${PROG}] no .lattice/findings/open/ in cwd" >&2; return 0; }
+
+  local today
+  today="$(date -u +%Y-%m-%d)"
+
+  shopt -s nullglob
+  local count=0
+  for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
+    [ -f "${f}" ] || continue
+
+    local rule module tier dimension status defer_until file_field line_field
+    rule="$(yaml_field "${f}" "rule")"
+    module="$(yaml_field "${f}" "module")"
+    tier="$(yaml_field "${f}" "tier")"
+    dimension="$(yaml_field "${f}" "dimension")"
+    status="$(yaml_field "${f}" "status")"
+    defer_until="$(yaml_field "${f}" "defer_until")"
+    file_field="$(yaml_field "${f}" "file")"
+    line_field="$(yaml_field "${f}" "line")"
+    [ -z "${status}" ] && status="open"
+
+    [ -n "${filter_module}" ] && [ "${module}" != "${filter_module}" ] && continue
+    [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
+    [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
+    [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
+
+    if [ "${due_for_review}" -eq 1 ]; then
+      [ "${status}" != "deferred" ] && continue
+      [ -z "${defer_until}" ] && continue
+      [[ ! "${defer_until}" > "${today}" ]] || continue   # only past-due
+    fi
+
+    local extra=""
+    [ "${status}" = "deferred" ] && [ -n "${defer_until}" ] && extra=" (defer_until: ${defer_until})"
+    [ "${status}" = "in_progress" ] && extra=" (in_progress)"
+    [ "${status}" = "wont_fix" ] && extra=" (wont_fix)"
+
+    printf "%-9s %-12s %s/%s — %s:%s%s\n" "${tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}"
+    count=$((count + 1))
+  done
+
+  echo ""
+  echo "[${PROG}] ${count} finding(s)"
+}
+
+# ---------------------------------------------------------------------------
+# show — print one YAML, with a header line.
+# ---------------------------------------------------------------------------
+cmd_show() {
+  [ "$#" -ge 1 ] || die "show: usage: lattice show <id>"
+  local find_id="$1"
+  local src
+  src="$(locate_finding "${find_id}")" || die "show: not found: ${find_id}.yml"
+  local where="open"
+  [[ "${src}" == .lattice/findings/closed/* ]] && where="closed"
+  echo "[${PROG}] ${src} (${where})"
+  echo "----------------------------------------------------------------------"
+  cat "${src}"
+}
+
+# ---------------------------------------------------------------------------
+# sweeps — list sweep manifests under .lattice/findings/sweeps/
+# (Manifest writer ships in v0.7; until then this lists what's there or notes
+# that no manifests exist.)
+# ---------------------------------------------------------------------------
+cmd_sweeps() {
+  local dir=".lattice/findings/sweeps"
+  if [ ! -d "${dir}" ]; then
+    echo "[${PROG}] no ${dir}/ — sweep manifests not yet emitted by audit commands"
+    echo "[${PROG}] (manifest writer planned for v0.7)"
+    return 0
+  fi
+  shopt -s nullglob
+  local count=0
+  for f in "${dir}"/*.yml; do
+    [ -f "${f}" ] || continue
+    local sweep_id sweep_date dims
+    sweep_id="$(yaml_field "${f}" "sweep_id")"
+    sweep_date="$(yaml_field "${f}" "sweep_date")"
+    dims="$(yaml_field "${f}" "dimensions")"
+    printf "%s  %s  %s\n" "${sweep_date:-?}" "${sweep_id:-$(basename "${f}" .yml)}" "${dims}"
+    count=$((count + 1))
+  done
+  echo ""
+  echo "[${PROG}] ${count} sweep manifest(s)"
+}
+
+# ---------------------------------------------------------------------------
+# version
+# ---------------------------------------------------------------------------
+cmd_version() {
+  # Prefer plugin.json next to the script (source repo); fall back to the
+  # installed VERSION sentinel. Strip a leading BOM if present (some Windows
+  # writers prepend U+FEFF).
+  local v=""
+  local plugin="${SELF_DIR}/../.claude-plugin/plugin.json"
+  if [ -f "${plugin}" ]; then
+    v="$(grep -oE '"version"\s*:\s*"[^"]+"' "${plugin}" | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/')"
+  fi
+  if [ -z "${v}" ] && [ -f "${HOME}/.claude/lattice/VERSION" ]; then
+    v="$(cat "${HOME}/.claude/lattice/VERSION" 2>/dev/null || true)"
+    v="${v#$'\xef\xbb\xbf'}"  # strip UTF-8 BOM if present
+    v="${v%$'\r'}"
+  fi
+  echo "lattice ${v:-unknown}"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 0
+fi
+
+sub="$1"; shift || true
+case "${sub}" in
+  close)              cmd_close "$@" ;;
+  reopen)             cmd_reopen "$@" ;;
+  sync|regenerate)    cmd_sync "$@" ;;
+  defer)              cmd_defer "$@" ;;
+  list|ls)            cmd_list "$@" ;;
+  show|cat)           cmd_show "$@" ;;
+  sweeps)             cmd_sweeps "$@" ;;
+  version|--version|-v) cmd_version ;;
+  help|--help|-h)     usage ;;
+  *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;
+esac
