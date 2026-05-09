@@ -46,6 +46,7 @@ Usage:
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
   lattice validate
   lattice sweeps
+  lattice sweep-id
   lattice version
   lattice help
 
@@ -62,6 +63,7 @@ Subcommands:
   validate    scan every YAML, report per-file parse/schema errors
               (does not touch CLAUDE.md; exits 2 if any error found)
   sweeps      list sweep manifests under .lattice/findings/sweeps/
+  sweep-id    generate a deterministic sweep ID (YYYYMMDD + 6-hex)
   version     print the installed Lattice version
 
 All subcommands run against the .lattice/findings/ tree in the current
@@ -550,6 +552,20 @@ cmd_bulk_close() {
 }
 
 # ---------------------------------------------------------------------------
+# sweep-id — emit <YYYYMMDD><6-hex>. Used by audit skills to tag findings
+# and the sweep manifest with a stable, sortable, collision-resistant ID.
+# ---------------------------------------------------------------------------
+cmd_sweep_id() {
+  # 24 bits of entropy from two $RANDOM draws (15 bits each, masked).
+  # Not cryptographic — just enough to avoid collision among same-day sweeps.
+  # Avoids /dev/urandom + tr|head SIGPIPE issues on Git Bash.
+  local date_part rand_part
+  date_part="$(date -u +%Y%m%d)"
+  rand_part="$(printf "%06x" $(( ((RANDOM << 15) | RANDOM) & 0xFFFFFF )))"
+  printf "%s%s\n" "${date_part}" "${rand_part}"
+}
+
+# ---------------------------------------------------------------------------
 # version
 # ---------------------------------------------------------------------------
 cmd_version() {
@@ -589,6 +605,7 @@ case "${sub}" in
   bulk-close)         cmd_bulk_close "$@" ;;
   validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
+  sweep-id)           cmd_sweep_id ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

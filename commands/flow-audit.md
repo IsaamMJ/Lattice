@@ -1,9 +1,20 @@
 ---
 description: Audit a module for customer flow completeness — happy path, error handling, edge cases, state transitions, abandonment, notifications. Targets conversational AI and request-response flows.
-argument-hint: <module-path>
+argument-hint: <module-path> | --scope <path1>,<path2>,...
 ---
 
-Target module to audit: $ARGUMENTS
+Target module(s) to audit: $ARGUMENTS
+
+## Argument parsing (do this FIRST)
+
+Split `$ARGUMENTS` on whitespace. Two supported forms:
+
+| Form | Means |
+|---|---|
+| `/flow-audit <module-path>` | Single-module mode — audit one module end-to-end. |
+| `/flow-audit --scope <path1>,<path2>,...` | Multi-module flow mode (v0.6.7+) — audit a flow that spans multiple modules (e.g. `thyrocare,booking,payments,lumi`). All paths share one sweep_id; findings reference each module by its actual `module:` path. |
+
+If `--scope` is given, treat the comma-separated paths as the audit scope and skip per-module dispatch (the flow IS the unit; it crosses module boundaries by design).
 
 # flow-audit
 
@@ -131,6 +142,15 @@ For each hit, check whether the TTD or CLAUDE.md already documents it as intenti
 
 If documented intentional/deferred, note the citation and adjust tier accordingly.
 
+**TTD-silent rule (v0.6.7+):** If the TTD is silent on an implementation detail (e.g. "what should `ACTIVE_STATUSES` contain" is not documented), **treat the code as ground truth.** Do NOT flag this as a flow finding. If the gap is non-obvious (a reader of the TTD would assume different behavior), emit a separate `dimension: audit, tier: UNVERIFIABLE` finding noting "TTD does not specify X; code does Y" — that's a coverage gap, not a flow defect.
+
+**DRIFT auto-emit (v0.6.7+):** If during cross-check you find an **explicit contradiction** between the TTD and code that grep can verify both sides of (e.g. TTD says "uses fast-xml-parser with ignoreAttributes:false" but `xml-parser.service.ts` is hand-rolled regex), emit an additional `dimension: audit, tier: DRIFT` finding alongside any flow finding. **Conservative threshold:**
+- DO emit DRIFT for present-tense factual claims that the code falsifies.
+- DO NOT emit DRIFT for grep-misses on TTD claims phrased as `will`, `Phase N`, `future`, `deferred`, `roadmap` — those are aspirational, not drift.
+- DO NOT emit DRIFT for "TTD silent on Z" — that's UNVERIFIABLE per the rule above, not DRIFT.
+
+False positives erode trust faster than missed drift catches. When in doubt: UNVERIFIABLE, not DRIFT.
+
 ### Step 5 — Assign verdicts
 
 | Verdict | Means | Required evidence |
@@ -142,6 +162,8 @@ If documented intentional/deferred, note the citation and adjust tier accordingl
 | **OK** | Pattern checked, intentional/documented (with citation) | `file:line` + the TTD/CLAUDE.md line that justifies it |
 
 **Hard rule**: every CRITICAL and HIGH gets a one-sentence **fix recommendation** (e.g. "add timeout handler with 5-minute idle timeout", "validate state transitions in middleware before processing request", "broadcast state changes via WebSocket/event bus").
+
+**OK-finding discipline (v0.6.7+):** Every flow audit MUST emit at least one `tier: OK` finding per major flow stage that was checked-and-found-clean. These are first-class output: knowing what was verified-clean changes how readers triage the rest. Examples: `OK-payments-credit-pack-branch-clean`, `OK-payments-dedup-key-stable`, `OK-lumi-consent-step-complete`. Each requires `intentional_citation` per the schema.
 
 ### Step 6 — Write findings (v0.6 YAML schema)
 
@@ -179,7 +201,35 @@ simulate:
 notes: <only if needed>
 ```
 
-Skip the legacy multi-finding markdown file. The CLAUDE.md pre-launch checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
+Skip the legacy multi-finding markdown file. The CLAUDE.md pre-launch checklist is regenerated from these YAML files by `lattice sync` at end of sweep.
+
+**sweep_id sourcing:** if invoked from `/audit-sweep` with `flow` in scope, use the sweep_id passed through from the orchestrator. Standalone (`/flow-audit src/modules/lumi`) generates its own via `lattice sweep-id` and writes a manifest in Step 6b.
+
+### Step 6b — Write sweep manifest (v0.6.7+)
+
+After all findings are written, emit the sweep manifest to `.lattice/findings/sweeps/<sweep_id>.yml` per the schema in `docs/finding-schema.md`. Required fields:
+
+```yaml
+sweep_id: <id>
+sweep_date: <YYYY-MM-DD>
+project_root: <root>
+modules_audited: [<module>, ...]      # for --scope mode, all paths from the scope arg
+dimensions: [flow]                      # plus [audit] if any DRIFT/UNVERIFIABLE were emitted
+mode: SEQUENTIAL
+auditor: claude-code/flow-audit
+auditor_model: <opus|sonnet|haiku>
+duration_ms: <int>
+totals: { CRITICAL: n, HIGH: n, MEDIUM: n, LOW: n, OK: n, DRIFT: n, UNVERIFIABLE: n }
+opened: [<slug>, ...]
+unchanged: [<slug>, ...]
+closed_since_last: [<slug>, ...]
+regressed: [<slug>, ...]
+skipped: <int>                          # files in open/ that failed to parse during this run
+runtime_warnings:
+  - "<TTD-silent notes from Step 4, threshold-edge calls, etc.>"
+```
+
+If invoked from `/audit-sweep`, **do not** write a separate manifest — the orchestrator writes the unified one.
 
 ### Step 7 — Draft checklist entries for deferred items
 
@@ -193,13 +243,19 @@ Output these **as a fenced block** the user can copy. Do NOT write to CLAUDE.md 
 
 ### Step 8 — Stop and wait
 
-Output the findings file path + the verdict counts + the drafted checklist block. Tell the user:
+Output the YAML directory path + the manifest path + the verdict counts + the drafted checklist block. Tell the user:
 
 ```
-✅ Flow audit complete: <module-path>
+✅ Flow audit complete: <module-path or scope>
 
-Findings: .lattice/findings/open/<date>/
-Verdicts: <N> CRITICAL, <N> HIGH, <N> MEDIUM, <N> LOW, <N> OK
+Findings:  .lattice/findings/open/<sweep_date>/
+Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
+Verdicts:  <N> CRITICAL, <N> HIGH, <N> MEDIUM, <N> LOW, <N> OK
+Cross-cut: <N> dimension: audit findings (DRIFT/UNVERIFIABLE) emitted from Step 4
+Skipped:   <N> (files that failed to parse — see manifest)
+
+Inspect: lattice list --module <module> | lattice show <id> | lattice triage
+Sync the CLAUDE.md checklist: lattice sync
 
 Deferred/Documented items (paste into CLAUDE.md if you agree):
 <checklist block>

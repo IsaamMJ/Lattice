@@ -150,6 +150,13 @@ simulate:
   - "curl -X POST http://localhost:3000/api/webhook -H 'X-Sig: bad' -d '{}'"
   - "Run admin tool: simulate REPORT_FULL with gender=F"
 
+# Optional everywhere — relates other findings (v0.6.7+)
+# Pure advisory hint surfacing sub-symptom / shared-root-cause relationships
+# during triage. Each entry is the slug of another finding (basename minus .yml).
+# Bidirectional linking is the writer's responsibility — A->B doesn't auto-create B->A.
+relates_to:
+  - "MEDIUM-booking-rescheduled-rank-blocks-forward-transitions"
+
 # Optional everywhere
 notes: <free text, only if needed>
 ```
@@ -205,27 +212,45 @@ CLAUDE.md is a **read-only view** of the YAML truth. Authored by `scripts/lattic
 
 ## Sweep manifest
 
-Each sweep also writes one summary file at `.lattice/findings/sweeps/<sweep_id>.yml`:
+Each sweep writes one summary file at `.lattice/findings/sweeps/<sweep_id>.yml` (v0.6.7+).
 
 ```yaml
-sweep_id: <12-char hex>
+sweep_id: <14-char: YYYYMMDD + 6-hex>      # generate via `lattice sweep-id`
 sweep_date: <ISO date>
 project_root: <path>
 modules_audited: [<module>, ...]
-dimensions: [audit, scale, security]
-duration_ms: <int>
-mode: SEQUENTIAL | PARALLEL
+dimensions: [audit, scale, security]        # which dimensions this sweep covered
+mode: SEQUENTIAL | PARALLEL                  # dispatch mode
+
+# Auditor metadata (v0.6.7+)
+auditor: claude-code/<skill-name>            # which skill emitted this sweep
+auditor_model: opus | sonnet | haiku         # the model that ran the patterns; depth varies materially
+duration_ms: <int>                            # wall-clock duration of the sweep
+
+# Verdict totals (per-tier, summed across dimensions)
 totals:
   CRITICAL: <n>
   HIGH: <n>
   ...
-opened: [<finding-id>, ...]      # findings new in this sweep
-unchanged: [<finding-id>, ...]   # findings present in last sweep, still open
-closed_since_last: [<finding-id>, ...]  # findings present in last sweep, gone now
-regressed: [<finding-id>, ...]   # findings closed previously, re-opened by this sweep
+
+# Finding lifecycle deltas vs the previous sweep
+opened: [<slug>, ...]            # findings new in this sweep
+unchanged: [<slug>, ...]         # findings present in last sweep, still open
+closed_since_last: [<slug>, ...] # findings present in last sweep, gone now
+regressed: [<slug>, ...]         # findings closed previously, re-opened by this sweep
+
+# Trust signals (v0.6.7+) — without these, "the sweep looks clean" is unprovable
+skipped: <int>                   # YAMLs that failed to parse and were excluded
+runtime_warnings:                # threshold-edge calls, UNVERIFIABLE flags, etc.
+  - "TTD silent on REPORT_FULL semantics; treated code as ground truth (booking-status.map.ts:54)"
+  - "<other auditor-emitted note>"
 ```
 
-This manifest is what powers v0.7's `lattice diff <since-sweep>`.
+This manifest is what powers v0.7's `lattice diff <since-sweep>`. Until then, `lattice sweeps` lists the manifests and `lattice validate` will (in a future patch) check their shape.
+
+### Sweep ID convention
+
+Generate via `lattice sweep-id` — emits `<YYYYMMDD><6-hex-rand>`. Stable enough to sort lexicographically by sweep date, random enough to avoid collisions when multiple sweeps run on the same day.
 
 ## Stability promise
 

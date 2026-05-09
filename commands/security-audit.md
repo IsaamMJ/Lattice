@@ -161,6 +161,8 @@ If documented intentional, downgrade tier or mark `OK` with the citation.
 - MEDIUM → fix within 1 month
 - LOW → backlog
 
+**OK-finding discipline (v0.6.7+):** Emit `tier: OK` findings for security patterns checked-and-found-safe (e.g. `OK-payments-webhook-uses-timingsafeequal`, `OK-payments-rate-limiter-applied`, `OK-admin-routes-guarded`). These are first-class output — they prevent re-flagging the same patterns and signal which controls have been deliberately implemented. Each OK requires `intentional_citation` per the schema.
+
 ### Step 6 — Write findings (v0.6 YAML schema)
 
 Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
@@ -195,7 +197,35 @@ secure_code_example: |
 notes: <only if needed>
 ```
 
-Skip the legacy multi-finding markdown file. The CLAUDE.md pre-deploy checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
+Skip the legacy multi-finding markdown file. The CLAUDE.md pre-deploy checklist is regenerated from these YAML files by `lattice sync` at end of sweep.
+
+**sweep_id sourcing:** if invoked from `/audit-sweep`, use the sweep_id passed through. Standalone (`/security-audit src/modules/payments`) generates its own via `lattice sweep-id` and writes a manifest in Step 6b.
+
+### Step 6b — Write sweep manifest (v0.6.7+, standalone runs only)
+
+If standalone, emit `.lattice/findings/sweeps/<sweep_id>.yml` per `docs/finding-schema.md`:
+
+```yaml
+sweep_id: <id>
+sweep_date: <YYYY-MM-DD>
+project_root: <root>
+modules_audited: [<module-path>]
+dimensions: [security]
+mode: SEQUENTIAL
+auditor: claude-code/security-audit
+auditor_model: <opus|sonnet|haiku>
+duration_ms: <int>
+totals: { CRITICAL: n, HIGH: n, MEDIUM: n, LOW: n, OK: n }
+opened: [<slug>, ...]
+unchanged: [<slug>, ...]
+closed_since_last: [<slug>, ...]
+regressed: [<slug>, ...]
+skipped: <int>
+runtime_warnings:
+  - "<npm audit timeouts, ambiguous false-positive calls, etc.>"
+```
+
+If invoked from `/audit-sweep`, do NOT write a separate manifest.
 
 ### Step 7 — Draft checklist entries for deferred items
 For every HIGH and every MEDIUM not fixed today, draft a checklist line ready to paste into `CLAUDE.md` "Pre-deploy security checklist" section. Format:
@@ -210,8 +240,14 @@ Output as a fenced block. Do NOT write to CLAUDE.md or commit anything yourself.
 Output the findings file path + verdict counts + drafted checklist block. Tell the user:
 
 ```
-Security audit complete. Findings: .lattice/findings/security-<module>-<timestamp>.md
-CRITICAL: <n>. HIGH: <n>. MEDIUM: <n>. LOW: <n>.
+Security audit complete.
+Findings:  .lattice/findings/open/<sweep_date>/
+Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
+Verdicts:  <n> CRITICAL, <n> HIGH, <n> MEDIUM, <n> LOW, <n> OK
+Skipped:   <n>
+
+Inspect: lattice list --module <module> --dimension security | lattice show <id>
+Sync the CLAUDE.md checklist: lattice sync
 
 [fenced block of checklist lines]
 

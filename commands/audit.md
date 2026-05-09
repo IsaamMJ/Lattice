@@ -122,6 +122,15 @@ Per claim:
 
 **Hard rule**: `INTENTIONAL` without a commit hash or CLAUDE.md citation is downgraded to `UNVERIFIABLE`. This prevents lazy "probably intentional" verdicts.
 
+**DRIFT threshold (v0.6.7+):** DRIFT is reserved for **explicit contradictions** between doc and code. Conservative rules:
+- DO flag DRIFT for present-tense factual claims that the code falsifies (doc says "uses fast-xml-parser", code is regex; doc says "endpoint /v2/foo", code only has /v1/foo).
+- DO NOT flag DRIFT for grep-misses on claims phrased as `will`, `Phase N`, `future`, `deferred`, `roadmap` — those are aspirational and belong in the doc-rewrite under a `## Roadmap` heading, not as drift findings.
+- DO NOT flag DRIFT for "doc is silent on Z" — that's a coverage gap. If the gap is non-obvious, emit `tier: UNVERIFIABLE` with "doc does not specify X; code does Y."
+
+False positives erode trust. When in doubt: UNVERIFIABLE, not DRIFT.
+
+**OK-finding discipline (v0.6.7+):** For every claim that verified cleanly, emit a `tier: OK` finding with `intentional_citation: <file:line>`. These are first-class output — knowing what was checked-and-clean prevents future sessions from re-raising the same false positives.
+
 ### Step 8 — Write findings (v0.6 YAML schema)
 
 Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
@@ -148,7 +157,35 @@ intentional_citation: <commit-hash or CLAUDE.md:line>
 notes: <only if needed>
 ```
 
-Skip the legacy multi-finding markdown file. The CLAUDE.md checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
+Skip the legacy multi-finding markdown file. The CLAUDE.md checklist is regenerated from these YAML files by `lattice sync` at end of sweep.
+
+**sweep_id sourcing:** if invoked from `/audit-sweep`, use the sweep_id passed through. Standalone (`/audit <doc-path>`) generates its own via `lattice sweep-id` and writes a manifest in Step 8b.
+
+### Step 8b — Write sweep manifest (v0.6.7+, standalone runs only)
+
+If running standalone, emit `.lattice/findings/sweeps/<sweep_id>.yml` per `docs/finding-schema.md`:
+
+```yaml
+sweep_id: <id>
+sweep_date: <YYYY-MM-DD>
+project_root: <root>
+modules_audited: [<doc-path-as-module>]
+dimensions: [audit]
+mode: SEQUENTIAL
+auditor: claude-code/audit
+auditor_model: <opus|sonnet|haiku>
+duration_ms: <int>
+totals: { OK: n, DRIFT: n, INTENTIONAL: n, UNVERIFIABLE: n }
+opened: [<slug>, ...]
+unchanged: [<slug>, ...]
+closed_since_last: [<slug>, ...]
+regressed: [<slug>, ...]
+skipped: <int>
+runtime_warnings:
+  - "<doc-silent notes, ambiguous evidence calls, etc.>"
+```
+
+If invoked from `/audit-sweep`, do NOT write a separate manifest — the orchestrator writes the unified one.
 
 ### Step 9 — Propose contract-format rewrite
 Generate a proposed new version of the doc in this structure (do NOT write it yet):
@@ -179,10 +216,17 @@ status: ACTIVE | DEPRECATED | IN_PROGRESS
 Output the unified diff between the original doc and the proposed rewrite. **Do not write the file.** Tell the user:
 
 ```
-Audit complete. Findings: .lattice/findings/<file>
+Audit complete.
+Findings:  .lattice/findings/open/<sweep_date>/
+Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
+Verdicts:  <n> OK, <n> DRIFT, <n> INTENTIONAL, <n> UNVERIFIABLE
+
 Proposed rewrite diff above.
 
-Review and reply 'apply' to overwrite <doc-path>, or 'edit' to discuss changes first.
+Inspect: lattice show <id> | lattice list --dimension audit
+Sync the CLAUDE.md checklist: lattice sync
+
+Reply 'apply' to overwrite <doc-path>, or 'edit' to discuss changes first.
 ```
 
 Wait for explicit approval before any `Write` call against the doc.

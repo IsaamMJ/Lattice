@@ -2,6 +2,45 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] — 2026-05-09
+
+Audit-skill rewrite. Biggest single change since v0.6 itself — touches all 5 skill commands and the schema doc. Driven by 2 days of jiive Lumi heavy-use feedback synthesized across two independent Claude sessions; both signed off on the final scope before shipping.
+
+### Killed
+- **`.lattice/findings/sweep-<YYYYMMDD-HHMMSS>.md` master markdown summary.** This was a second rendering of the same data the YAMLs already capture, written by `audit-sweep` Step 3. It went stale immediately and undermined "YAMLs are the source of truth." The CLAUDE.md checklist (regenerated via `lattice sync`) is the single human-readable view. Two formats for the same data was the bug.
+
+### Added — sweep manifest writer
+- **`.lattice/findings/sweeps/<sweep_id>.yml`** is now emitted at the end of every sweep (per `docs/finding-schema.md` "Sweep manifest" section). `lattice sweeps` finally has data to list. Contains: `sweep_id`, `sweep_date`, `dimensions`, `mode`, `auditor`, **`auditor_model`** (opus/sonnet/haiku — depth varies materially), **`duration_ms`**, `totals`, `opened` / `unchanged` / `closed_since_last` / `regressed`, **`skipped`** (parse-failure count — without this, "the sweep looks clean" is unprovable), and **`runtime_warnings[]`** (TTD-silent notes, threshold-edge calls, cross-cutting bundles).
+
+### Added — `lattice sweep-id`
+- New subcommand emits `<YYYYMMDD><6-hex>` deterministically. 24 bits of entropy from doubled `$RANDOM` — enough to avoid collision among same-day sweeps without `/dev/urandom` SIGPIPE issues on Git Bash. Skills now generate sweep_id once at start and propagate to every per-module dispatch + every emitted YAML so all findings share it.
+
+### Added — `/flow-audit --scope <path1>,<path2>,...`
+- Multi-module flow auditing for flows that span modules (the `thyrocare → booking → payments → lumi` case). Comma-separated paths share one sweep_id; findings reference each module by its actual `module:` path. Designed so a future `flow-map.yml` can declare named flows once and re-use them — natural v0.7+ addition without breaking the comma-separated form.
+
+### Added — finding-YAML field
+- **`relates_to: [<slug>, ...]`** (optional, all dimensions) — purely advisory hint surfacing sub-symptom / shared-root-cause relationships during triage. Cheap to add, addresses real triage waste from the 2026-05-09 sweep where two findings shared a root cause but had no link. Bidirectional linking is the writer's responsibility — A→B doesn't auto-create B→A.
+
+### Changed — methodology hardening
+- **TTD-silent rule (all skills):** if the TTD is silent on an implementation detail, treat the code as ground truth. Do NOT flag this as a finding. If the gap is non-obvious, emit `dimension: audit, tier: UNVERIFIABLE` noting "doc does not specify X; code does Y" — coverage gap, not drift.
+- **DRIFT threshold (audit + flow cross-check):** explicit contradictions only. Skip claims phrased as `will`, `Phase N`, `future`, `deferred`, `roadmap` — those are aspirational. Skip "doc silent on Z" — that's UNVERIFIABLE, not DRIFT. Conservative; false positives erode trust faster than missed catches.
+- **OK-finding discipline (all skills):** every audit MUST emit `tier: OK` findings for patterns checked-and-found-clean. First-class output, not a side-effect. Two of the most useful 2026-05-09 jiive Lumi findings were OK findings; knowing what was verified-clean changed how the rest were triaged. Each requires `intentional_citation`.
+- **`lattice sync` replaces `bash scripts/lattice-regenerate.sh`** in every skill's regen step. Aligns with the v0.6.5 dispatcher reality (the bash form still works for backward compat).
+- **`lattice close <id>` replaces `bash scripts/lattice-close.sh <id>`** in audit-sweep's close-instructions.
+
+### Changed — skill final-output format
+- All 5 skills now print `Findings:` (YAML directory) + `Manifest:` (manifest path) + `Verdicts:` (counts) + `Skipped:` (parse failures) + `Inspect: lattice list / show / triage` hints. No reference to the killed markdown summary path. No second written artifact — chat output mirrors the manifest.
+
+### Schema doc additions (`docs/finding-schema.md`)
+- New optional `relates_to:` field documented under "Optional everywhere"
+- Sweep manifest section rewritten with the v0.6.7 fields (`auditor_model`, `duration_ms`, `skipped`, `runtime_warnings`) + the sweep_id format spec.
+
+### Out of scope (still on docket)
+- **Fingerprint-based dedup before write** — waiting for v0.7's `id:` algorithm change (drafted at `4ba9ff5`). Until then, audit skills use heuristic `(module + rule + file + line)` exact match for opened/unchanged/closed-since-last — catches obvious dups, misses line-shift cases. Documented limitation.
+- **`flow-map.yml` named flows** — v0.7+. The `--scope` shape is forward-compatible.
+- **`module_owner:` distinct from `file:`** — better solved as part of v0.7's "multi-file evidence" (`evidence_files: [...]`); deferred so it doesn't become vestigial.
+- **`simulate:` sub-typing** (`type: curl|db|admin`) — premature schema lock-in until a `lattice verify` consumer exists.
+
 ## [0.6.6.3] — 2026-05-09
 
 Parser robustness patch from a heavy-use review (2 audit sessions, 23 flow-audit findings written by hand from PowerShell). Triaged: 2 of 6 reported "bugs" are real, 4 are downstream symptoms of one of the real ones. Empirically verified each before patching.

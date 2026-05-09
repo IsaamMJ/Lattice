@@ -105,6 +105,8 @@ If the module's TTD has a Decision saying "uses setInterval — do NOT migrate" 
 
 **Hard rule**: every BLOCKER and RISK gets a one-sentence **fix recommendation** (e.g. "move to BullMQ with `@nestjs/bull`", "back rate limiter with Valkey using `INCR` + `EXPIRE`", "wrap with `redlock` for distributed lock").
 
+**OK-finding discipline (v0.6.7+):** Emit `tier: OK` findings for patterns checked-and-found-safe (e.g. `OK-payments-rate-limiter-uses-valkey`, `OK-payments-cron-leader-elected`). These are first-class output — they prevent future audits from re-raising the same patterns and signal which scale risks have been deliberately addressed. Each OK requires `intentional_citation` per the schema.
+
 ### Step 6 — Write findings (v0.6 YAML schema)
 
 Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
@@ -133,7 +135,35 @@ intentional_citation: <CLAUDE.md:line or TTD:line that justifies the single-inst
 notes: <only if needed>
 ```
 
-Skip the legacy multi-finding markdown file. The CLAUDE.md pre-scale checklist is regenerated from these YAML files by `scripts/lattice-regenerate.sh` at end of sweep.
+Skip the legacy multi-finding markdown file. The CLAUDE.md pre-scale checklist is regenerated from these YAML files by `lattice sync` at end of sweep.
+
+**sweep_id sourcing:** if invoked from `/audit-sweep`, use the sweep_id passed through. Standalone (`/scale-audit src/modules/payments`) generates its own via `lattice sweep-id` and writes a manifest in Step 6b.
+
+### Step 6b — Write sweep manifest (v0.6.7+, standalone runs only)
+
+If standalone, emit `.lattice/findings/sweeps/<sweep_id>.yml` per `docs/finding-schema.md`:
+
+```yaml
+sweep_id: <id>
+sweep_date: <YYYY-MM-DD>
+project_root: <root>
+modules_audited: [<module-path>]
+dimensions: [scale]
+mode: SEQUENTIAL
+auditor: claude-code/scale-audit
+auditor_model: <opus|sonnet|haiku>
+duration_ms: <int>
+totals: { BLOCKER: n, RISK: n, WATCH: n, OK: n }
+opened: [<slug>, ...]
+unchanged: [<slug>, ...]
+closed_since_last: [<slug>, ...]
+regressed: [<slug>, ...]
+skipped: <int>
+runtime_warnings:
+  - "<patterns inside try/catch with graceful-degrade, etc.>"
+```
+
+If invoked from `/audit-sweep`, do NOT write a separate manifest.
 
 ### Step 7 — Draft checklist entries for deferred items
 For every **WATCH** and every **RISK that won't be fixed today**, draft a checklist line ready to paste into `CLAUDE.md` "Pre-scale checklist" section. Format:
@@ -148,8 +178,14 @@ Output these **as a fenced block** the user can copy. Do NOT write to CLAUDE.md 
 Output the findings file path + the verdict counts + the drafted checklist block. Tell the user:
 
 ```
-Scale audit complete. Findings: .lattice/findings/scale-<module>-<timestamp>.md
-BLOCKERs: <n>. RISKs: <n>. WATCHes: <n>.
+Scale audit complete.
+Findings:  .lattice/findings/open/<sweep_date>/
+Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
+Verdicts:  <n> BLOCKER, <n> RISK, <n> WATCH, <n> OK
+Skipped:   <n>
+
+Inspect: lattice list --module <module> --dimension scale | lattice show <id>
+Sync the CLAUDE.md checklist: lattice sync
 
 Drafted checklist entries (review wording, then paste into your session to apply):
 
