@@ -44,6 +44,7 @@ Usage:
   lattice show <id>
   lattice triage [--module M] [--tier T] [--status S] [--dimension D]
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
+  lattice validate
   lattice sweeps
   lattice version
   lattice help
@@ -58,6 +59,8 @@ Subcommands:
   show        pretty-print one finding YAML
   triage      interactive walk through open findings — [c/d/s/e/v/q]
   bulk-close  close every finding whose slug matches a glob pattern
+  validate    scan every YAML, report per-file parse/schema errors
+              (does not touch CLAUDE.md; exits 2 if any error found)
   sweeps      list sweep manifests under .lattice/findings/sweeps/
   version     print the installed Lattice version
 
@@ -185,6 +188,17 @@ cmd_sync() {
   # Git Bash on Windows) — `cmd ... || rc=$?` captures it deterministically.
   local rc=0
   bash "${HELPER_REGEN}" "$@" || rc=$?
+  return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
+# validate — diagnostic scan over every YAML. Reports per-file parse/schema
+# errors. Does not touch CLAUDE.md. Exits 2 if any error found.
+# ---------------------------------------------------------------------------
+cmd_validate() {
+  require_helper "${HELPER_REGEN}"
+  local rc=0
+  bash "${HELPER_REGEN}" --validate-only "$@" || rc=$?
   return "${rc}"
 }
 
@@ -573,6 +587,7 @@ case "${sub}" in
   show|cat)           cmd_show "$@" ;;
   triage)             cmd_triage "$@" ;;
   bulk-close)         cmd_bulk_close "$@" ;;
+  validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;

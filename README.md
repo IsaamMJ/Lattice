@@ -87,6 +87,14 @@ Commands appear namespaced: `/lattice:audit`, `/lattice:scale-audit`, etc.
 curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/update.sh | bash
 ```
 
+### Windows note (PowerShell users)
+
+When writing finding YAMLs from PowerShell 5.1, `Set-Content -Encoding UTF8` prepends a UTF-8 BOM that older Lattice parsers (pre-v0.6.6.3) rejected. v0.6.6.3+ strips the BOM automatically, so this is no longer an issue. If you're on an older Lattice and seeing `malformed YAML at line 1`, either update or write files BOM-less:
+
+```powershell
+[System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))
+```
+
 ### Migrate from pre-v0.5 (legacy `.cc-reef/audits/`)
 
 ```bash
@@ -141,7 +149,8 @@ See `docs/finding-schema.md` for the YAML schema every skill conforms to.
 - **v0.6.5** — `scripts/lattice` unified CLI dispatcher (`close`/`reopen`/`sync`/`defer`/`list`/`show`/`sweeps`/`version`/`help`); `defer_until` + `defer_reason` + `deferred_at` fields formalize v0.6.3's `status: deferred`; `lattice list --due-for-review` surfaces past-due deferred findings; installer/updater + validate.sh track the dispatcher
 - **v0.6.6** — bug fixes from first day of real use + two requested subcommands. `lattice show` resolves slug / `<module>/<rule>` / substring forms. `lattice list --module` does substring match. `lattice sync` / `--check` now use distinct exit codes (0=clean, 1=drift, 2=fatal). Dimension allowlist expanded to accept `configuration | quality | product`. New: `lattice triage` (interactive [c/d/s/e/v/q] walk) and `lattice bulk-close --pattern <glob>`
 - **v0.6.6.1** — same-day patch from v0.6.6 retest. `lattice sync` (no `--check`) now exits 2 on parse error (was relying on `set -e` propagation through the dispatcher function, unreliable on Git Bash). Legacy closed YAMLs without `closed_by_commit` no longer block sync — regen auto-derives the SHA from the `closed/<sha>/` parent dir when the field is missing
-- **v0.6.6.2** (current) — regenerated CLAUDE.md hint comment now points at the `lattice` CLI (`lattice help`) instead of the non-existent `scripts/lattice-close.sh` path. Distribution-bug fix from a flow-audit debrief.
+- **v0.6.6.2** — regenerated CLAUDE.md hint comment now points at the `lattice` CLI (`lattice help`) instead of the non-existent `scripts/lattice-close.sh` path. Distribution-bug fix from a flow-audit debrief.
+- **v0.6.6.3** (current) — parser robustness from a heavy-use review. Strips leading UTF-8 BOM (PowerShell 5.1 cause), tolerates `---` document separator, line-1 errors include a fix hint. New `lattice validate` subcommand collects all per-file parse/schema errors instead of fail-fast.
 - **v0.7** (drafted) — fingerprint algorithm change so `id:` survives line shifts (`docs/v0.7-fingerprint-spec.md`); flatten `open/<date>/` and `closed/<sha>/` directories; close-reason taxonomy (`fixed | false-positive | wont-fix | out-of-scope | duplicate`); sweep manifest writer; JSON Schema; one-shot migration script
 - **v0.8** — cross-dimension dedupe by fingerprint + rule (one finding, one report); `Closes-Lattice: <id>` commit-message hook; bundle/related-finding linking
 - **v1.0** — pre-push hook blocking on open CRITICAL, spec written after v0.8 real usage

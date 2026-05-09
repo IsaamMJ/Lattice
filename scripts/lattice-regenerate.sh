@@ -34,6 +34,7 @@ set -euo pipefail
 CLAUDE_MD="./CLAUDE.md"
 DAYS_CLOSED=7
 CHECK_MODE=0
+VALIDATE_MODE=0
 
 require_value_for() {
   local flag="$1" next="$2"
@@ -53,6 +54,10 @@ while [ "$#" -gt 0 ]; do
       DAYS_CLOSED="$2"; shift 2 ;;
     --check)
       CHECK_MODE=1; shift ;;
+    --validate-only)
+      # v0.6.6.3: walk every YAML, collect ALL errors, exit 2 if any. Does not
+      # write CLAUDE.md and does not fail-fast like --check does.
+      VALIDATE_MODE=1; shift ;;
     *) echo "[lattice-regenerate] error: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -67,13 +72,14 @@ if [ ! -d ".lattice/findings" ]; then
   exit 0
 fi
 
-node --input-type=module - "$CLAUDE_MD" "$DAYS_CLOSED" "$CHECK_MODE" <<'NODE'
+node --input-type=module - "$CLAUDE_MD" "$DAYS_CLOSED" "$CHECK_MODE" "$VALIDATE_MODE" <<'NODE'
 import fs from 'node:fs';
 import path from 'node:path';
 
 const claudeMdPath = process.argv[2];
 const daysClosed = parseInt(process.argv[3], 10);
 const checkMode = process.argv[4] === '1';
+const validateMode = process.argv[5] === '1';
 
 const START = '<!-- lattice:checklist:start -->';
 const END = '<!-- lattice:checklist:end -->';
@@ -90,6 +96,12 @@ function escapeMd(value) {
 
 // Minimal YAML parser for the flat-key-value + block-scalar + list (inline + block) subset Lattice emits.
 function parseYaml(text) {
+  // v0.6.6.3: strip leading UTF-8 BOM (﻿). Windows PowerShell 5.1's
+  // Set-Content -Encoding UTF8 prepends one — without this strip, the very
+  // first key-value regex match fails and cascades into "everything broken".
+  if (text.charCodeAt(0) === 0xFEFF) {
+    text = text.slice(1);
+  }
   const out = {};
   const lines = text.split(/\r?\n/);
   let block = null;
@@ -122,9 +134,21 @@ function parseYaml(text) {
     }
 
     if (line.startsWith('#') || line.trim() === '') continue;
+    // v0.6.6.3: tolerate leading `---` document separator (and trailing `...`).
+    // Standard YAML headers; agent-generated files often include them.
+    if (line.trim() === '---' || line.trim() === '...') continue;
     const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/);
     if (!m) {
-      throw new Error(`malformed YAML at line ${i + 1}: ${JSON.stringify(line)}`);
+      // v0.6.6.3: better error hint for line-1 failures, the most common cause.
+      let hint = '';
+      if (i === 0) {
+        if (/[﻿]/.test(line)) {
+          hint = ' (looks like a UTF-8 BOM — write the file as UTF-8 *without* BOM; PowerShell users: use [System.IO.File]::WriteAllText with UTF8Encoding($false))';
+        } else {
+          hint = ' (line-1 errors are usually a BOM, an unescaped tab, or non-key-value content)';
+        }
+      }
+      throw new Error(`malformed YAML at line ${i + 1}: ${JSON.stringify(line)}${hint}`);
     }
     const [, k, v] = m;
     if (v === '|' || v === '>') {
@@ -230,6 +254,10 @@ function readDirRecursive(dir) {
   return out;
 }
 
+// v0.6.6.3: errors collected here when validateMode is on. Otherwise we
+// fail-fast like before (process.exit(2)).
+const validateErrors = [];
+
 function loadAll(files, kind /* 'open' | 'closed' */) {
   const loaded = [];
   for (const f of files) {
@@ -248,6 +276,10 @@ function loadAll(files, kind /* 'open' | 'closed' */) {
       validateFinding(parsed, f, kind);
       loaded.push({ path: f, ...parsed });
     } catch (e) {
+      if (validateMode) {
+        validateErrors.push({ path: f, message: e.message });
+        continue;  // collect, don't fail-fast
+      }
       console.error(`[lattice-regenerate] error parsing ${f}: ${e.message}`);
       process.exit(2);  // v0.6.6: fatal — distinguish from drift (exit 1)
     }
@@ -259,6 +291,24 @@ const openFiles = readDirRecursive('.lattice/findings/open');
 const closedFiles = readDirRecursive('.lattice/findings/closed');
 const open = loadAll(openFiles, 'open');
 const closed = loadAll(closedFiles, 'closed');
+
+// v0.6.6.3: validate-only mode reports per-file status and exits without
+// touching CLAUDE.md. Used by `lattice validate` for diagnostic scans.
+if (validateMode) {
+  const totalFiles = openFiles.length + closedFiles.length;
+  const okCount = totalFiles - validateErrors.length;
+  console.log(`[lattice-validate] scanned ${totalFiles} file(s) (${openFiles.length} open, ${closedFiles.length} closed)`);
+  console.log(`[lattice-validate]   ${okCount} ok, ${validateErrors.length} error(s)`);
+  if (validateErrors.length > 0) {
+    console.log('');
+    for (const e of validateErrors) {
+      console.error(`  FAIL  ${e.path}`);
+      console.error(`        ${e.message}`);
+    }
+    process.exit(2);
+  }
+  process.exit(0);
+}
 
 // v0.6.3: partition open findings by status field. Default = 'open'.
 const VALID_STATUS = ['open', 'in_progress', 'deferred', 'wont_fix'];

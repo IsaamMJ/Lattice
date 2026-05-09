@@ -2,6 +2,29 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6.3] — 2026-05-09
+
+Parser robustness patch from a heavy-use review (2 audit sessions, 23 flow-audit findings written by hand from PowerShell). Triaged: 2 of 6 reported "bugs" are real, 4 are downstream symptoms of one of the real ones. Empirically verified each before patching.
+
+### Fixed (parser)
+- **UTF-8 BOM at start of file no longer breaks parsing.** PowerShell 5.1's `Set-Content -Encoding UTF8` prepends `\xEF\xBB\xBF`; the regex `/^([a-zA-Z_]...)/` failed to match line 1, throwing "malformed YAML at line 1." `parseYaml` now strips a leading `﻿` before tokenizing.
+- **Leading `---` document separator (and trailing `...`) accepted.** Standard YAML headers — agent-generated files often include them. The parser now skips lines whose `.trim()` equals `---` or `...`.
+
+### Improved
+- **Line-1 parse errors now include a hint.** When the regex fails on the first line, the error message appends a hint: BOM detection note (with the PowerShell `WriteAllText` workaround) if the line still contains a BOM byte after stripping, or a generic "BOM / unescaped tab / non-key-value content" hint otherwise. Replaces the unactionable `"malformed YAML at line 1"` with something a user can fix in seconds.
+
+### Added
+- **`lattice validate`** — diagnostic scan over every YAML in `.lattice/findings/{open,closed}/`. Reports per-file pass/fail, collects ALL errors instead of fail-fast, exits 2 if any error found. Does not touch CLAUDE.md. Uses the same parse + validate logic as `sync` (single source of truth). Underlying flag: `lattice-regenerate.sh --validate-only`.
+
+### Triage notes (false alarms from the review)
+- **"YAML list syntax broken"** — false. Block lists (`tests:`/`simulate:` with `  - "item"`) parse correctly. The reporting session's lists almost certainly failed because of the BOM bug cascading: when line 1 fails, the entire file is rejected, including its list fields. One root-cause fix (BOM strip) resolves this.
+- **"Colon-space in unquoted value breaks"** — false. The regex `(.*)$ ` captures everything after the first `: `, so `impact: actual: No active booking found` parses correctly with the inner colon as part of the value. Reporter likely had a different actual error masked by BOM.
+- **"Unicode arrows (`→`) rejected"** — false. The regex accepts any character; arrows work in plain values, quoted strings, and block-list items.
+- **"Silent parse failures"** — false on v0.6.6.1+. Regen exits 2 loudly with the file path and reason. Reporter was on a stale install.
+
+### Schema/template
+- No changes. Block lists work. Skill templates do not need to retreat to inline lists.
+
 ## [0.6.6.2] — 2026-05-09
 
 One-line distribution-bug patch from a flow-audit debrief.
