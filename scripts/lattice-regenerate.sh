@@ -11,6 +11,13 @@
 #                 markered block, exit 1 if different. Used by CI to enforce
 #                 "regen is the only path" — manual edits to the section can't land.
 #
+# Exit codes (v0.6.6):
+#   0  clean — markered block matches (or was inserted on first run)
+#   1  drift detected (--check only): regen would change the markered block
+#   2  fatal — parse error, schema violation, or malformed CLAUDE.md markers
+#      (always non-zero, regardless of --check). Distinguishes "needs sync"
+#      from "broken finding YAML, human attention required" for CI gates.
+#
 # Behavior:
 #   - Reads .lattice/findings/open/*/*.yml — the source of truth
 #   - Reads .lattice/findings/closed/*/*.yml filtered by --days-closed
@@ -148,7 +155,14 @@ function parseYaml(text) {
   return out;
 }
 
-const VALID_DIMENSIONS = new Set(['audit', 'scale', 'security', 'flow', 'coverage']);
+// v0.6.5.1: expand allowlist to cover legitimate auditor categorizations
+// surfaced by jiive Lumi audits (configuration, quality, product). No
+// per-dimension required-field enforcement for these three yet — they
+// behave like `audit` and `coverage` (free-form, evidence in title/fix).
+const VALID_DIMENSIONS = new Set([
+  'audit', 'scale', 'security', 'flow', 'coverage',
+  'configuration', 'quality', 'product',
+]);
 
 // v0.6.4.1: dimension+tier specific required fields. Mirrors docs/finding-schema.md.
 const DIMENSION_TIER_REQUIRED = {
@@ -225,7 +239,7 @@ function loadAll(files, kind /* 'open' | 'closed' */) {
       loaded.push({ path: f, ...parsed });
     } catch (e) {
       console.error(`[lattice-regenerate] error parsing ${f}: ${e.message}`);
-      process.exit(1);
+      process.exit(2);  // v0.6.6: fatal — distinguish from drift (exit 1)
     }
   }
   return loaded;
@@ -243,7 +257,7 @@ for (const f of open) {
   const s = (f.status || 'open').toLowerCase();
   if (!VALID_STATUS.includes(s)) {
     console.error(`[lattice-regenerate] error: invalid status '${f.status}' in ${f.path} (allowed: ${VALID_STATUS.join('|')})`);
-    process.exit(1);
+    process.exit(2);  // v0.6.6: fatal schema violation
   }
   byStatus[s].push(f);
 }
@@ -376,13 +390,13 @@ if (startIdxs.length === 0 && endIdxs.length === 0) {
   newClaude += '\n' + body + '\n';
 } else if (startIdxs.length !== 1 || endIdxs.length !== 1) {
   console.error(`[lattice-regenerate] error: CLAUDE.md has malformed checklist markers (found ${startIdxs.length} start, ${endIdxs.length} end; expected exactly 1 of each)`);
-  process.exit(1);
+  process.exit(2);  // v0.6.6: fatal — broken markers
 } else {
   const startIdx = startIdxs[0];
   const endIdx = endIdxs[0] + END.length;
   if (startIdx > endIdx) {
     console.error('[lattice-regenerate] error: CLAUDE.md checklist markers are out of order (end before start)');
-    process.exit(1);
+    process.exit(2);  // v0.6.6: fatal — broken markers
   }
   newClaude = claude.slice(0, startIdx) + body + claude.slice(endIdx);
 }
@@ -409,7 +423,7 @@ try {
   } else {
     console.error(`[lattice-regenerate] error writing ${claudeMdPath}: ${e.message}`);
   }
-  process.exit(1);
+  process.exit(2);  // v0.6.6: fatal — couldn't write output
 }
 
 const summary = [

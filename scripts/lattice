@@ -42,23 +42,32 @@ Usage:
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
   lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review]
   lattice show <id>
+  lattice triage [--module M] [--tier T] [--status S] [--dimension D]
+  lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
   lattice sweeps
   lattice version
   lattice help
 
 Subcommands:
-  close      mark a finding closed (or partially closed with --partial)
-  reopen     move a closed finding back to open (regression)
-  sync       regenerate the CLAUDE.md checklist block from YAML
-             (alias: regenerate; --check exits non-zero on drift)
-  defer      mark a finding status: deferred until a date, with reason
-  list       list open findings, optionally filtered
-  show       pretty-print one finding YAML
-  sweeps     list sweep manifests under .lattice/findings/sweeps/
-  version    print the installed Lattice version
+  close       mark a finding closed (or partially closed with --partial)
+  reopen      move a closed finding back to open (regression)
+  sync        regenerate the CLAUDE.md checklist block from YAML
+              (alias: regenerate; exits 1 on drift, 2 on parse/schema error)
+  defer       mark a finding status: deferred until a date, with reason
+  list        list open findings, optionally filtered
+  show        pretty-print one finding YAML
+  triage      interactive walk through open findings — [c/d/s/e/v/q]
+  bulk-close  close every finding whose slug matches a glob pattern
+  sweeps      list sweep manifests under .lattice/findings/sweeps/
+  version     print the installed Lattice version
 
 All subcommands run against the .lattice/findings/ tree in the current
 working directory. Run with no args from a project root.
+
+<id> can be:
+  * A filename slug:           CRITICAL-payments-stack-leak
+  * The display format:        src/modules/payments/stack-leak    (module/rule)
+  * A substring of any slug:   stack-leak                          (last resort)
 USAGE
 }
 
@@ -73,21 +82,61 @@ require_helper() {
 }
 
 # ---------------------------------------------------------------------------
-# Locate a finding YAML by id or filename slug. Echoes the path; non-zero
-# exit if not found. Searches open/ first, then closed/.
+# Locate a finding YAML by id, slug, or <module>/<rule> form.
+# Search order:
+#   1. Exact filename match (slug like CRITICAL-payments-stack-leak)
+#   2. <module>/<rule> form (the display format from `lattice list`) —
+#      walks all YAMLs and matches "${module}/${rule}" against <id>
+#   3. Filename substring match (last resort)
+# Echoes the path of the first match; non-zero exit if none. Open/ first,
+# then closed/.
 # ---------------------------------------------------------------------------
 locate_finding() {
-  local find_id="${1%.yml}"
+  local raw="${1%.yml}"
   shopt -s nullglob
+
+  # 1) Exact filename match. nullglob skips empty globs but does NOT skip
+  # literal paths that don't exist — the second pattern in each loop is
+  # fixed-string and will be added even if the file is absent. Filter with -f.
   local matches=()
-  for f in .lattice/findings/open/*/"${find_id}.yml" .lattice/findings/open/"${find_id}.yml"; do
+  for f in .lattice/findings/open/*/"${raw}.yml" .lattice/findings/open/"${raw}.yml"; do
+    [ -f "${f}" ] || continue
     matches+=("${f}")
   done
   if [ "${#matches[@]}" -eq 0 ]; then
-    for f in .lattice/findings/closed/*/"${find_id}.yml" .lattice/findings/closed/"${find_id}.yml"; do
+    for f in .lattice/findings/closed/*/"${raw}.yml" .lattice/findings/closed/"${raw}.yml"; do
+      [ -f "${f}" ] || continue
       matches+=("${f}")
     done
   fi
+
+  # 2) <module>/<rule> form — only if no exact match and the input contains a slash
+  if [ "${#matches[@]}" -eq 0 ] && [[ "${raw}" == */* ]]; then
+    local f mod rule
+    for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml \
+             .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
+      [ -f "${f}" ] || continue
+      mod="$(yaml_field "${f}" "module")"
+      rule="$(yaml_field "${f}" "rule")"
+      if [ "${mod}/${rule}" = "${raw}" ]; then
+        matches+=("${f}")
+      fi
+    done
+  fi
+
+  # 3) Substring match on basename
+  if [ "${#matches[@]}" -eq 0 ]; then
+    local f base
+    for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml \
+             .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
+      [ -f "${f}" ] || continue
+      base="$(basename "${f}" .yml)"
+      if [[ "${base}" == *"${raw}"* ]]; then
+        matches+=("${f}")
+      fi
+    done
+  fi
+
   if [ "${#matches[@]}" -eq 0 ]; then
     return 1
   fi
@@ -127,7 +176,10 @@ cmd_reopen() {
 # ---------------------------------------------------------------------------
 cmd_sync() {
   require_helper "${HELPER_REGEN}"
+  # Explicit exit-code propagation: belt-and-suspenders over `set -e`.
   bash "${HELPER_REGEN}" "$@"
+  local rc=$?
+  return "${rc}"
 }
 
 # ---------------------------------------------------------------------------
@@ -225,7 +277,13 @@ cmd_list() {
     line_field="$(yaml_field "${f}" "line")"
     [ -z "${status}" ] && status="open"
 
-    [ -n "${filter_module}" ] && [ "${module}" != "${filter_module}" ] && continue
+    # --module: case-insensitive substring match against the module: field.
+    # Lets `--module booking` match a `module: src/modules/booking/...` value.
+    if [ -n "${filter_module}" ]; then
+      local mod_lower="${module,,}"
+      local fil_lower="${filter_module,,}"
+      [[ "${mod_lower}" == *"${fil_lower}"* ]] || continue
+    fi
     [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
     [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
     [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
@@ -246,7 +304,11 @@ cmd_list() {
   done
 
   echo ""
-  echo "[${PROG}] ${count} finding(s)"
+  if [ "${count}" -eq 0 ] && [ "${due_for_review}" -eq 1 ]; then
+    echo "[${PROG}] 0 finding(s) past their defer_until date"
+  else
+    echo "[${PROG}] ${count} finding(s)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -292,6 +354,182 @@ cmd_sweeps() {
 }
 
 # ---------------------------------------------------------------------------
+# triage — interactive walk through open findings.
+# Per finding: show summary, prompt [c]lose / [d]efer / [s]kip / [e]dit / [v]iew / [q]uit.
+# Filters mirror `lattice list`. Requires a TTY for stdin.
+# ---------------------------------------------------------------------------
+cmd_triage() {
+  local filter_module="" filter_tier="" filter_status="" filter_dim=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --module)    filter_module="$2"; shift 2 ;;
+      --tier)      filter_tier="$2"; shift 2 ;;
+      --status)    filter_status="$2"; shift 2 ;;
+      --dimension) filter_dim="$2"; shift 2 ;;
+      *) die "triage: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -d ".lattice/findings/open" ] || die "triage: no .lattice/findings/open/ in cwd"
+  [ -t 0 ] || die "triage: requires an interactive terminal (stdin is not a TTY)"
+
+  shopt -s nullglob
+  local files=()
+  for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
+    [ -f "${f}" ] || continue
+
+    local module tier status dimension
+    module="$(yaml_field "${f}" "module")"
+    tier="$(yaml_field "${f}" "tier")"
+    status="$(yaml_field "${f}" "status")"
+    dimension="$(yaml_field "${f}" "dimension")"
+    [ -z "${status}" ] && status="open"
+
+    if [ -n "${filter_module}" ]; then
+      local mod_lower="${module,,}" fil_lower="${filter_module,,}"
+      [[ "${mod_lower}" == *"${fil_lower}"* ]] || continue
+    fi
+    [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
+    [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
+    [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
+
+    files+=("${f}")
+  done
+
+  local total="${#files[@]}"
+  if [ "${total}" -eq 0 ]; then
+    echo "[${PROG}] triage: 0 findings match filters"
+    return 0
+  fi
+
+  echo "[${PROG}] triage: ${total} finding(s) — [c]lose [d]efer [s]kip [e]dit [v]iew [q]uit"
+  local i=0
+  for f in "${files[@]}"; do
+    i=$((i + 1))
+    local slug="$(basename "${f}" .yml)"
+    local rule="$(yaml_field "${f}" "rule")"
+    local module="$(yaml_field "${f}" "module")"
+    local tier="$(yaml_field "${f}" "tier")"
+    local title="$(yaml_field "${f}" "title")"
+    local file_field="$(yaml_field "${f}" "file")"
+    local line_field="$(yaml_field "${f}" "line")"
+    local fix="$(yaml_field "${f}" "fix")"
+
+    while true; do
+      echo ""
+      echo "──── [${i}/${total}] ${slug} ────"
+      echo "  ${tier}  ${module}/${rule}"
+      echo "  ${file_field}:${line_field}"
+      [ -n "${title}" ] && echo "  title: ${title}"
+      [ -n "${fix}"   ] && echo "  fix:   ${fix}"
+      printf "  action [c/d/s/e/v/q]? "
+      local action
+      read -r action </dev/tty || { echo ""; echo "[${PROG}] triage: aborted"; return 0; }
+      case "${action}" in
+        c|close)
+          printf "    --commit (blank = HEAD): "
+          local commit
+          read -r commit </dev/tty || commit=""
+          if [ -n "${commit}" ]; then
+            bash "${HELPER_CLOSE}" "${slug}" --commit "${commit}" || echo "[${PROG}] (close failed; finding still open)"
+          else
+            bash "${HELPER_CLOSE}" "${slug}" || echo "[${PROG}] (close failed; finding still open)"
+          fi
+          break ;;
+        d|defer)
+          printf "    --until (YYYY-MM-DD): "
+          local until; read -r until </dev/tty || until=""
+          [ -z "${until}" ] && { echo "    (cancelled — empty date)"; continue; }
+          printf "    --reason: "
+          local reason; read -r reason </dev/tty || reason=""
+          local args=( "defer" "${slug}" "--until" "${until}" )
+          [ -n "${reason}" ] && args+=( "--reason" "${reason}" )
+          cmd_defer "${args[@]:1}" || echo "[${PROG}] (defer failed)"
+          break ;;
+        s|skip|"") break ;;
+        e|edit)
+          local editor="${EDITOR:-${VISUAL:-vi}}"
+          "${editor}" "${f}" </dev/tty
+          continue ;;  # re-display after edit
+        v|view)
+          echo "    ----------------------------------------------------------------------"
+          sed 's/^/    /' "${f}"
+          continue ;;  # re-prompt
+        q|quit) echo "[${PROG}] triage: stopped at ${i}/${total}"; return 0 ;;
+        *) echo "    (unknown action: '${action}'; one of c/d/s/e/v/q)" ;;
+      esac
+    done
+  done
+  echo ""
+  echo "[${PROG}] triage: complete (${total}/${total})"
+}
+
+# ---------------------------------------------------------------------------
+# bulk-close — close every open finding whose slug matches a glob pattern.
+# Always confirms unless --yes is passed.
+# ---------------------------------------------------------------------------
+cmd_bulk_close() {
+  local pattern=""
+  local commit=""
+  local yes=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pattern) pattern="$2"; shift 2 ;;
+      --commit)  commit="$2"; shift 2 ;;
+      --yes|-y)  yes=1; shift ;;
+      *) die "bulk-close: unknown arg: $1" ;;
+    esac
+  done
+  [ -z "${pattern}" ] && die "bulk-close: --pattern <glob> is required (e.g. --pattern \"LOW-results-*\")"
+
+  shopt -s nullglob
+  local matches=()
+  for f in .lattice/findings/open/*/${pattern}.yml .lattice/findings/open/${pattern}.yml; do
+    [ -f "${f}" ] || continue
+    matches+=("${f}")
+  done
+
+  if [ "${#matches[@]}" -eq 0 ]; then
+    echo "[${PROG}] bulk-close: 0 findings match pattern '${pattern}'"
+    return 0
+  fi
+
+  echo "[${PROG}] bulk-close: ${#matches[@]} match(es) for '${pattern}':"
+  local f
+  for f in "${matches[@]}"; do
+    echo "  - $(basename "${f}" .yml)"
+  done
+
+  if [ "${yes}" -ne 1 ]; then
+    if [ ! -t 0 ]; then
+      die "bulk-close: refusing to close without --yes when stdin is not a TTY"
+    fi
+    printf "[${PROG}] proceed? [y/N] "
+    local ans; read -r ans </dev/tty || ans=""
+    case "${ans}" in
+      y|Y|yes|YES) ;;
+      *) echo "[${PROG}] bulk-close: aborted"; return 0 ;;
+    esac
+  fi
+
+  local closed=0 failed=0
+  for f in "${matches[@]}"; do
+    local slug="$(basename "${f}" .yml)"
+    local args=( "${slug}" )
+    [ -n "${commit}" ] && args+=( "--commit" "${commit}" )
+    if bash "${HELPER_CLOSE}" "${args[@]}"; then
+      closed=$((closed + 1))
+    else
+      failed=$((failed + 1))
+      echo "[${PROG}] (close failed for ${slug}; continuing)"
+    fi
+  done
+  echo ""
+  echo "[${PROG}] bulk-close: ${closed} closed, ${failed} failed"
+  [ "${failed}" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # version
 # ---------------------------------------------------------------------------
 cmd_version() {
@@ -327,6 +565,8 @@ case "${sub}" in
   defer)              cmd_defer "$@" ;;
   list|ls)            cmd_list "$@" ;;
   show|cat)           cmd_show "$@" ;;
+  triage)             cmd_triage "$@" ;;
+  bulk-close)         cmd_bulk_close "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;

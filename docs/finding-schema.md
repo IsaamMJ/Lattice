@@ -78,7 +78,8 @@ The slug is the **stable ID** — a finding for the same rule + same module on a
 # Identity
 id: <stable hash — sha1(rule + module + file + line) truncated 12 chars>
 rule: <kebab-case rule slug, matches filename>
-dimension: audit | scale | security | flow | coverage   # flow + coverage added v0.6.4
+dimension: audit | scale | security | flow | coverage | configuration | quality | product
+# flow + coverage added v0.6.4; configuration + quality + product added v0.6.5.1
 tier: <see verdict tiers per dimension>
 module: <module path, e.g. src/modules/payments>
 
@@ -162,6 +163,9 @@ notes: <free text, only if needed>
 | security | CRITICAL, HIGH, MEDIUM, LOW, OK | CRITICAL/HIGH require OWASP + scenario + secure code |
 | flow | CRITICAL, HIGH, MEDIUM, LOW, OK | CRITICAL/HIGH require `impact` (v0.6.4) |
 | coverage | HIGH, MEDIUM, LOW, OK | Module-surface gaps; no extra required fields (v0.6.4) |
+| configuration | HIGH, MEDIUM, LOW, OK | Env vars, secrets, deploy config gaps. No extra required fields (v0.6.5.1) |
+| quality | HIGH, MEDIUM, LOW, OK | Code-quality concerns not captured by `coverage`. No extra required fields (v0.6.5.1) |
+| product | HIGH, MEDIUM, LOW, OK | Missing/incorrect product behavior, distinct from `flow`. No extra required fields (v0.6.5.1) |
 
 ## CLAUDE.md generator contract
 
