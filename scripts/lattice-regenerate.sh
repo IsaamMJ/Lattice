@@ -235,6 +235,16 @@ function loadAll(files, kind /* 'open' | 'closed' */) {
   for (const f of files) {
     try {
       const parsed = parseYaml(fs.readFileSync(f, 'utf8'));
+      // v0.6.6.1: auto-derive closed_by_commit from path for legacy closed
+      // YAMLs that pre-date the field. Path is .lattice/findings/closed/<sha>/<slug>.yml
+      // — the <sha> sits in the parent dir's basename. Lenient migration:
+      // populate the field implicitly so validation passes and rendering works.
+      if (kind === 'closed' && (parsed.closed_by_commit === undefined || parsed.closed_by_commit === '')) {
+        const parent = path.basename(path.dirname(f));
+        if (/^[0-9a-f]{7,40}$/i.test(parent)) {
+          parsed.closed_by_commit = parent;
+        }
+      }
       validateFinding(parsed, f, kind);
       loaded.push({ path: f, ...parsed });
     } catch (e) {

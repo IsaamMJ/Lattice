@@ -160,7 +160,9 @@ yaml_field() {
 # ---------------------------------------------------------------------------
 cmd_close() {
   require_helper "${HELPER_CLOSE}"
-  bash "${HELPER_CLOSE}" "$@"
+  local rc=0
+  bash "${HELPER_CLOSE}" "$@" || rc=$?
+  return "${rc}"
 }
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,9 @@ cmd_close() {
 # ---------------------------------------------------------------------------
 cmd_reopen() {
   require_helper "${HELPER_REOPEN}"
-  bash "${HELPER_REOPEN}" "$@"
+  local rc=0
+  bash "${HELPER_REOPEN}" "$@" || rc=$?
+  return "${rc}"
 }
 
 # ---------------------------------------------------------------------------
@@ -176,9 +180,11 @@ cmd_reopen() {
 # ---------------------------------------------------------------------------
 cmd_sync() {
   require_helper "${HELPER_REGEN}"
-  # Explicit exit-code propagation: belt-and-suspenders over `set -e`.
-  bash "${HELPER_REGEN}" "$@"
-  local rc=$?
+  # Explicit exit-code propagation. `set -e` propagation through function
+  # boundaries has historically been unreliable in some bash builds (notably
+  # Git Bash on Windows) — `cmd ... || rc=$?` captures it deterministically.
+  local rc=0
+  bash "${HELPER_REGEN}" "$@" || rc=$?
   return "${rc}"
 }
 

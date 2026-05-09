@@ -2,6 +2,14 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6.1] — 2026-05-09
+
+Two same-day fixes from the v0.6.6 retest. Both real, both small.
+
+### Fixed
+- **`lattice sync` (no `--check`) now exits 2 on parse error.** v0.6.6 fixed `--check` but the dispatcher's `cmd_sync` wrapper was relying on `set -e` to propagate the helper's exit code through the function boundary. `set -e` propagation through functions is unreliable on Git Bash for Windows (and arguably on any bash where the function-call site doesn't trigger errexit). Replaced with explicit `bash ... || rc=$?; return $rc` capture. Same fix applied to `cmd_close` and `cmd_reopen` for consistency. Now `lattice sync` and `lattice sync --check` both exit 2 on parse/schema errors as documented.
+- **Legacy closed YAMLs without `closed_by_commit` no longer block sync.** v0.6.6's stricter validation requires `closed_by_commit` on closed findings; manually-closed YAMLs from before the helper-based lifecycle (e.g., user-edited closes from earlier sessions) lack the field and got rejected. Now: if a closed YAML is missing `closed_by_commit`, regen reads the parent directory name (which is the closing SHA per the path convention `closed/<sha>/<slug>.yml`) and uses that. Lenient, no migration script required. Only triggers when the parent dir name matches `[0-9a-f]{7,40}`.
+
 ## [0.6.6] — 2026-05-09
 
 Bug-fix + feature patch from the first day of jiive Lumi real-use feedback. Four bugs from the audit-team session, two new subcommands they asked for, one schema expansion to unstick stuck findings.
