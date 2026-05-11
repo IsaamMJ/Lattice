@@ -50,17 +50,18 @@ done
 
 FIND="${FIND%.yml}"
 
-# Already open?
+# Already open? Check flat (v0.7) and legacy date-nested
 shopt -s nullglob
-for f in .lattice/findings/open/*/"${FIND}.yml"; do
+for f in ".lattice/findings/open/${FIND}.yml" .lattice/findings/open/*/"${FIND}.yml"; do
+  [ -f "${f}" ] || continue
   echo "[lattice-reopen] already open: ${f}"
   exit 0
 done
 
-# Find the closed copy. There may be multiple (reopened+closed cycles); take latest by mtime.
+# Find the closed copy — flat (v0.7) first, then legacy nested
 matches=()
-for f in .lattice/findings/closed/*/"${FIND}.yml"; do
-  matches+=("${f}")
+for f in ".lattice/findings/closed/${FIND}.yml" .lattice/findings/closed/*/"${FIND}.yml"; do
+  [ -f "${f}" ] && matches+=("${f}")
 done
 
 if [ "${#matches[@]}" -eq 0 ]; then
@@ -68,28 +69,24 @@ if [ "${#matches[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# Sort by mtime descending (newest first)
-SRC=""
-newest_mtime=0
-for m in "${matches[@]}"; do
-  mt=$(stat -c %Y "${m}" 2>/dev/null || stat -f %m "${m}" 2>/dev/null || echo 0)
-  if [ "${mt}" -gt "${newest_mtime}" ]; then
-    newest_mtime="${mt}"
-    SRC="${m}"
-  fi
-done
-[ -z "${SRC}" ] && SRC="${matches[0]}"
+SRC="${matches[0]}"
 
-# Extract original closing SHA from the dir name
-ORIG_SHA="$(basename "$(dirname "${SRC}")")"
+# Extract original closing SHA from YAML field (v0.7 flat) or dirname (legacy nested)
+ORIG_SHA="$(grep -E '^closed_by_commit[[:space:]]*:' "${SRC}" | head -n1 | sed -E 's/^closed_by_commit[[:space:]]*:[[:space:]]*//' | sed "s/^['\"]//; s/['\"]$//" || true)"
+if [ -z "${ORIG_SHA}" ]; then
+  ORIG_SHA="$(basename "$(dirname "${SRC}")")"
+fi
 
-# Determine today's open dir
-TODAY="$(date -u +%Y-%m-%d)"
-DEST_DIR=".lattice/findings/open/${TODAY}"
-mkdir -p "${DEST_DIR}"
-DEST="${DEST_DIR}/${FIND}.yml"
+# Destination: flat open/ (v0.7)
+mkdir -p ".lattice/findings/open"
+DEST=".lattice/findings/open/${FIND}.yml"
 
 mv "${SRC}" "${DEST}"
+
+# For legacy nested layout: clean up now-empty closed/<sha>/ dir
+if [[ "${SRC}" == .lattice/findings/closed/*/* ]]; then
+  rmdir "$(dirname "${SRC}")" 2>/dev/null || true
+fi
 
 # Strip closed lifecycle fields + any prior status/reopen tracking, then append canonical reopen block.
 tmp="$(mktemp)"
@@ -106,9 +103,6 @@ mv "${tmp}" "${DEST}"
     printf "reopen_reason: \"%s\"\n" "${esc_reason}"
   fi
 } >> "${DEST}"
-
-# Try to remove the now-empty closed/<sha>/ dir
-rmdir "$(dirname "${SRC}")" 2>/dev/null || true
 
 echo "[lattice-reopen] reopened ${FIND} → ${DEST}"
 echo "[lattice-reopen] previously_closed_in=${ORIG_SHA}"

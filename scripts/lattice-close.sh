@@ -43,6 +43,8 @@ COMMIT=""
 PR=""
 PARTIAL=""
 PARTIAL_MODE=0
+REASON=""
+RATIONALE=""
 
 require_value_for() {
   local flag="$1" next="$2"
@@ -68,6 +70,14 @@ while [ "$#" -gt 0 ]; do
       PARTIAL="$2"
       PARTIAL_MODE=1
       shift 2
+      ;;
+    --reason)
+      require_value_for "--reason" "${2:-}"
+      REASON="$2"; shift 2
+      ;;
+    --rationale)
+      require_value_for "--rationale" "${2:-}"
+      RATIONALE="$2"; shift 2
       ;;
     *)
       echo "[lattice-close] error: unknown arg: $1" >&2
@@ -96,17 +106,16 @@ COMMIT="${SHORT_SHA}"
 # Strip .yml if present
 FIND="${FIND%.yml}"
 
-# Find ALL matching files under open/, sort for deterministic close order
+# Find ALL matching files under open/ — support flat (v0.7) and date-nested (legacy)
 shopt -s nullglob
 matches=()
-for f in .lattice/findings/open/*/"${FIND}.yml"; do
-  matches+=("${f}")
+for f in ".lattice/findings/open/${FIND}.yml" .lattice/findings/open/*/"${FIND}.yml"; do
+  [ -f "${f}" ] && matches+=("${f}")
 done
 
 if [ "${#matches[@]}" -eq 0 ]; then
-  for f in .lattice/findings/closed/*/"${FIND}.yml"; do
-    echo "[lattice-close] already closed: ${f}"
-    exit 0
+  for f in ".lattice/findings/closed/${FIND}.yml" .lattice/findings/closed/*/"${FIND}.yml"; do
+    [ -f "${f}" ] && { echo "[lattice-close] already closed: ${f}"; exit 0; }
   done
   echo "[lattice-close] not found: ${FIND}.yml under .lattice/findings/open/" >&2
   exit 1
@@ -167,21 +176,17 @@ if [ "${PARTIAL_MODE}" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# FULL CLOSE: move to closed/<sha>/
+# FULL CLOSE: move to closed/<slug>.yml (v0.7 flat layout)
 # ---------------------------------------------------------------------------
-DEST_DIR=".lattice/findings/closed/${COMMIT}"
-mkdir -p "${DEST_DIR}"
-DEST="${DEST_DIR}/${FIND}.yml"
+mkdir -p ".lattice/findings/closed"
+DEST=".lattice/findings/closed/${FIND}.yml"
 
-# Refuse to silently overwrite an existing closed finding for the same slug+commit.
-# Earlier closed YAML carries lifecycle metadata (closed_at, closed_by_pr, partial history)
-# that mv would destroy without warning.
+# Refuse to silently overwrite an existing closed finding.
 if [ -e "${DEST}" ]; then
   echo "[lattice-close] error: ${DEST} already exists" >&2
   echo "[lattice-close]   refusing to overwrite. Options:" >&2
-  echo "[lattice-close]     1. Different closing commit: re-run with --commit <other-sha>" >&2
-  echo "[lattice-close]     2. Reopen first if regression:  bash scripts/lattice-reopen.sh ${FIND}" >&2
-  echo "[lattice-close]     3. Force overwrite (destructive): set LATTICE_FORCE_OVERWRITE=1" >&2
+  echo "[lattice-close]     1. Reopen first if regression:  lattice reopen ${FIND}" >&2
+  echo "[lattice-close]     2. Force overwrite (destructive): set LATTICE_FORCE_OVERWRITE=1" >&2
   if [ "${LATTICE_FORCE_OVERWRITE:-0}" != "1" ]; then
     exit 1
   fi
@@ -190,20 +195,24 @@ fi
 
 mv "${SRC}" "${DEST}"
 
-# Strip stale lifecycle/triage lines, then append canonical close block.
-# v0.6.3: also strip the in_progress fields if present (fully closing a previously partial finding).
+# Strip stale lifecycle/triage lines, append canonical close block.
 tmp="$(mktemp)"
-grep -v -E '^(status|partial_commits|remaining|closed_at|closed_by_commit|closed_by_pr)[[:space:]]*:|^# Lifecycle \(set by lattice-close\.sh\)$|^# Triage \(set by lattice-close\.sh --partial\)$' "${DEST}" > "${tmp}" || true
+grep -v -E '^(status|partial_commits|remaining|closed_at|closed_by_commit|closed_by_pr|close_reason|closure_rationale)[[:space:]]*:|^# Lifecycle \(set by lattice-close\.sh\)$|^# Triage \(set by lattice-close\.sh --partial\)$' "${DEST}" > "${tmp}" || true
 mv "${tmp}" "${DEST}"
 
 {
   printf "\n# Lifecycle (set by lattice-close.sh)\n"
   printf "closed_at: %s\n" "${NOW}"
   printf "closed_by_commit: %s\n" "${COMMIT}"
+  printf "close_reason: %s\n" "${REASON:-fixed}"
   if [ -n "${PR}" ]; then
     printf "closed_by_pr: %s\n" "${PR}"
+  fi
+  if [ -n "${RATIONALE}" ]; then
+    esc_rat="$(printf "%s" "${RATIONALE}" | sed 's/"/\\"/g')"
+    printf "closure_rationale: \"%s\"\n" "${esc_rat}"
   fi
 } >> "${DEST}"
 
 echo "[lattice-close] closed ${FIND} → ${DEST}"
-echo "[lattice-close] commit=${COMMIT}${PR:+ pr=${PR}}"
+echo "[lattice-close] commit=${COMMIT} reason=${REASON:-fixed}${PR:+ pr=${PR}}"

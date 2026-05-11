@@ -31,28 +31,33 @@ v0.5 wrote findings as one Markdown file per audit (e.g. `security-payments-2026
 
 v0.6 fixes 1-3 and 5 directly via the schema. v0.7 adds `lattice diff`. v0.8 adds cross-dimension dedupe.
 
-## File layout
+## File layout (v0.7 — flat)
 
 ```
 .lattice/
 └── findings/
     ├── open/
-    │   └── <sweep-date>/                     # ISO date like 2026-05-02
-    │       ├── CRITICAL-payments-webhook-timing-unsafe-eq.yml
-    │       ├── HIGH-payments-missing-rate-limit.yml
-    │       └── MEDIUM-results-stack-trace-leak.yml
-    └── closed/
-        └── <7-char-sha>/                      # 7-char short SHA of the closing commit (v0.6.3)
-            ├── CRITICAL-admin-token-eq.yml
-            └── CRITICAL-thyrocare-key-eq.yml
+    │   ├── CRITICAL-payments-webhook-timing-unsafe-eq.yml
+    │   ├── HIGH-payments-missing-rate-limit.yml
+    │   └── MEDIUM-results-stack-trace-leak.yml
+    ├── closed/
+    │   ├── CRITICAL-admin-token-eq.yml      # closed_by_commit: field carries the SHA
+    │   └── CRITICAL-thyrocare-key-eq.yml
+    └── sweeps/
+        └── 20260511abcdef.yml               # sweep manifests
 ```
 
-**Status lives in BOTH the path AND the `status:` field (v0.6.3):**
-- `findings/open/<date>/...yml` with `status: open` — actively being worked / unaddressed
-- `findings/open/<date>/...yml` with `status: in_progress` — partial fix landed, more work needed; `partial_commits:` tracks what's done
-- `findings/open/<date>/...yml` with `status: deferred` — acknowledged risk, deliberately not fixing now
-- `findings/open/<date>/...yml` with `status: wont_fix` — intentionally not fixing (rationale in `notes:`)
-- `findings/closed/<7-char-sha>/...yml` — fully fixed by that commit
+**v0.7 change:** No more `open/<date>/` or `closed/<sha>/` subdirectories. Date info moves
+into `first_seen_sweep:` YAML field. SHA stays in `closed_by_commit:` YAML field.
+Legacy nested layout is still read by all scripts for backward compat; new writes use flat.
+Run `scripts/migrate-v0.7.sh` to migrate existing findings.
+
+**Status lives in the `status:` field:**
+- `findings/open/...yml` with `status: open` — actively being worked / unaddressed
+- `findings/open/...yml` with `status: in_progress` — partial fix landed; `partial_commits:` tracks what's done
+- `findings/open/...yml` with `status: deferred` — acknowledged risk, deliberately not fixing now
+- `findings/open/...yml` with `status: wont_fix` — intentionally not fixing (rationale in `notes:`)
+- `findings/closed/...yml` — fully fixed; `closed_by_commit:` carries the closing SHA
 
 **Why both path AND field?** The path is the coarse filter (open vs closed). The `status` field is the triage filter (which open findings are actually actionable). Without it, deferred and in_progress findings hide among actionable ones.
 
