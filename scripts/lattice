@@ -554,6 +554,64 @@ cmd_bulk_close() {
 }
 
 # ---------------------------------------------------------------------------
+# cluster — walk the relates_to graph BFS from a root finding.
+# Usage: lattice cluster <id>
+# ---------------------------------------------------------------------------
+cmd_cluster() {
+  [ "$#" -ge 1 ] || die "cluster: usage: lattice cluster <id>"
+  local find_id="$1"
+  local root_path
+  root_path="$(locate_finding "${find_id}")" || die "cluster: not found: ${find_id}"
+
+  local visited=()
+  local queue=("${root_path}")
+
+  echo "[${PROG}] cluster rooted at: $(basename "${root_path}" .yml)"
+  echo "======================================================================"
+
+  while [ "${#queue[@]}" -gt 0 ]; do
+    local current="${queue[0]}"
+    queue=("${queue[@]:1}")
+
+    local slug; slug="$(basename "${current}" .yml)"
+    # Skip if already visited
+    local already=0
+    for v in "${visited[@]:-}"; do [ "${v}" = "${slug}" ] && already=1 && break; done
+    [ "${already}" -eq 1 ] && continue
+    visited+=("${slug}")
+
+    local where="open"
+    [[ "${current}" == .lattice/findings/closed/* ]] && where="closed"
+    local tier; tier="$(yaml_field "${current}" "tier")"
+    local module; module="$(yaml_field "${current}" "module")"
+    local rule; rule="$(yaml_field "${current}" "rule")"
+    local title; title="$(yaml_field "${current}" "title")"
+    local cluster_root_val; cluster_root_val="$(yaml_field "${current}" "cluster_root")"
+    local root_marker=""
+    [ "${cluster_root_val}" = "true" ] && root_marker=" [ROOT]"
+
+    echo ""
+    echo "  ${tier}${root_marker}  ${module}/${rule}  (${where})"
+    [ -n "${title}" ] && echo "  title: ${title}"
+    echo "  file:  ${current}"
+
+    # Enqueue related findings
+    local relates_raw
+    relates_raw="$(awk '/^relates_to:/{found=1; next} found && /^  - /{print; next} found && !/^  /{exit}' "${current}" 2>/dev/null | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -d '"' || true)"
+    while IFS= read -r related_slug; do
+      [ -z "${related_slug}" ] && continue
+      related_slug="${related_slug// /}"
+      local rel_path
+      rel_path="$(locate_finding "${related_slug}" 2>/dev/null)" || continue
+      queue+=("${rel_path}")
+    done <<< "${relates_raw}"
+  done
+
+  echo ""
+  echo "[${PROG}] cluster: ${#visited[@]} finding(s)"
+}
+
+# ---------------------------------------------------------------------------
 # id-gen — compute stable v0.7 finding id from dimension, rule, file, code_context.
 # Usage: lattice id-gen <dimension> <rule> <file> <code_context...>
 # Algorithm: sha1(dimension:rule:file:code_context_normalized)[:12]
@@ -630,6 +688,7 @@ case "${sub}" in
   list|ls)            cmd_list "$@" ;;
   show|cat)           cmd_show "$@" ;;
   triage)             cmd_triage "$@" ;;
+  cluster)            cmd_cluster "$@" ;;
   bulk-close)         cmd_bulk_close "$@" ;;
   validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
