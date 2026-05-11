@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 HELPER_CLOSE="${SELF_DIR}/lattice-close.sh"
 HELPER_REOPEN="${SELF_DIR}/lattice-reopen.sh"
 HELPER_REGEN="${SELF_DIR}/lattice-regenerate.sh"
