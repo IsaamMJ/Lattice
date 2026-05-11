@@ -146,7 +146,29 @@ False positives erode trust faster than missed drift catches. When in doubt: UNV
 
 **v0.6.7 change:** The legacy `.lattice/findings/sweep-<YYYYMMDD-HHMMSS>.md` markdown summary is **gone**. The YAML findings on disk are the source of truth; the CLAUDE.md checklist (regenerated in Step 5) is the human-readable view. Two formats for the same data drift apart immediately and erode trust — kill the dual.
 
-After all module dispatches complete, write the sweep manifest to `.lattice/findings/sweeps/<sweep_id>.yml` (per `docs/finding-schema.md` "Sweep manifest" section). Compute the contents from the JSON summaries returned by each per-module dispatch + a quick scan of the open/ + closed/ directories.
+After all module dispatches complete, write the sweep manifest by calling the dedicated script — do NOT skip this step or merely describe the file contents:
+
+```bash
+bash scripts/lattice-write-manifest.sh \
+  --sweep-id "<sweep_id from Step 1>" \
+  --sweep-date "<YYYY-MM-DD>" \
+  --project-root "<root>" \
+  --modules "<comma-separated module paths>" \
+  --dimensions "<comma-separated dimensions>" \
+  --mode SEQUENTIAL \
+  --auditor "claude-code/audit-sweep" \
+  --auditor-model "<opus|sonnet|haiku>" \
+  --duration-ms <milliseconds> \
+  --totals "CRITICAL=<n>,HIGH=<n>,MEDIUM=<n>,LOW=<n>,BLOCKER=<n>,RISK=<n>,WATCH=<n>,DRIFT=<n>,INTENTIONAL=<n>,UNVERIFIABLE=<n>,OK=<n>" \
+  --opened "<comma-separated new slugs>" \
+  --unchanged "<comma-separated unchanged slugs>" \
+  --closed-since-last "<comma-separated closed slugs>" \
+  --regressed "<comma-separated regressed slugs>" \
+  --skipped <n> \
+  --warnings "<warning1>|<warning2>"
+```
+
+This writes `.lattice/findings/sweeps/<sweep_id>.yml` (per `docs/finding-schema.md` "Sweep manifest" section). Compute the values from the JSON summaries returned by each per-module dispatch + a quick scan of the open/ + closed/ directories.
 
 ```yaml
 sweep_id: <sweep_id from Step 1>

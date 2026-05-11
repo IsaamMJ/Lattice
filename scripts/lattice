@@ -356,8 +356,7 @@ cmd_show() {
 cmd_sweeps() {
   local dir=".lattice/findings/sweeps"
   if [ ! -d "${dir}" ]; then
-    echo "[${PROG}] no ${dir}/ — sweep manifests not yet emitted by audit commands"
-    echo "[${PROG}] (manifest writer planned for v0.7)"
+    echo "[${PROG}] no ${dir}/ — run an audit sweep to generate manifests"
     return 0
   fi
   shopt -s nullglob
