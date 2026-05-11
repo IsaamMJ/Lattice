@@ -167,6 +167,21 @@ simulate:
 relates_to:
   - "MEDIUM-booking-rescheduled-rank-blocks-forward-transitions"
 
+# Ownership (v0.7 — optional)
+# module_owner: the module where the fix design belongs. Defaults to `module:` if absent.
+# Used by `lattice sync` to group findings by owner, and by `lattice handoff` for context injection.
+module_owner: src/modules/thyrocare
+
+# related_files: additional files the fixer must read (design constraints, shared maps, config).
+# Not where the bug manifests (that's `file:`), but files the fix design depends on.
+related_files:
+  - src/modules/booking/booking-status.map.ts
+  - src/config/thyrocare.config.ts
+
+# cluster_root: true marks this as the root cause of a relates_to cluster (v0.7).
+# Walk the full cluster via `lattice cluster <slug>`.
+cluster_root: true   # optional; omit for leaf/symptom findings
+
 # Optional everywhere
 notes: <free text, only if needed>
 ```
