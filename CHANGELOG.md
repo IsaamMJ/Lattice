@@ -2,6 +2,61 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-05-11
+
+Major release. Flat finding layout, stable id algorithm, close-reason taxonomy, and six new CLI commands. Driven by real-use feedback from 36 findings / 29 closed / 8 commits on jiive Lumi.
+
+### Breaking changes
+- **Flat finding layout.** `open/<date>/<slug>.yml` → `open/<slug>.yml` and `closed/<sha>/<slug>.yml` → `closed/<slug>.yml`. Run `bash scripts/migrate-v0.7.sh --dry-run` then `bash scripts/migrate-v0.7.sh` to upgrade existing repos.
+- **`close` requires `--reason`** (one of `fixed|false-positive|wont-fix|out-of-scope|duplicate`).
+- **`reopen` requires `--reason`** (free text, mandatory).
+
+### Added — CLI commands
+- **`lattice handoff <id>`** — emit a Markdown executor brief (tier, module, fix, simulate steps) to stdout. Pipe to a file or paste into a task.
+- **`lattice next [--module M]`** — print the single highest-priority actionable open finding (CRITICAL → BLOCKER → HIGH → … order).
+- **`lattice timeline [--since <date>]`** — list closed findings grouped by date, newest first.
+- **`lattice verify <id> [--run]`** — print the `simulate:` steps; `--run` executes them and reports pass/fail.
+- **`lattice ci-check [--tier <T>]`** — exit 1 if any non-deferred CRITICAL or BLOCKER finding is open. Designed for CI gates.
+- **`lattice pr-body [--since <date>]`** — emit a Markdown PR section of findings closed since a date, grouped by close reason.
+- **`lattice triage --cluster`** — sort cluster-root findings to the top of the triage queue.
+
+### Added — stable id algorithm (V1)
+- **`lattice id-gen <dimension> <rule> <file> <code_context>`** — SHA1(`dimension:rule:file:code_context_normalized`)[:12]. Survives line shifts because no line number is included in the hash. Documented in `docs/finding-schema.md`.
+
+### Added — close-reason taxonomy (V3)
+- New required field `close_reason: fixed|false-positive|wont-fix|out-of-scope|duplicate` on every closed finding.
+- New optional field `closure_rationale:` for free-text explanation.
+- `lattice close` validates the enum; `lattice pr-body` groups by reason.
+
+### Added — schema fields (F1, F2)
+- **`cluster_root: true`** — marks a finding as the entry point for a relates_to cluster. `lattice cluster <id>` does BFS walk.
+- **`module_owner:`** — the team/person responsible for the fix (may differ from the module where the bug manifests).
+- **`related_files:`** — extra files the fixer must read (design constraints, shared maps).
+
+### Added — sync groups by module_owner (F7/U3)
+- `lattice sync` (`lattice-regenerate.sh`) now groups open findings by `module_owner` in CLAUDE.md when any finding has the field set; falls back to tier grouping when none do.
+
+### Added — shell tab completion (U1)
+- `scripts/lattice-completion.bash` — bash completion (subcommands + flags + slug completion from local `.lattice/`).
+- `scripts/lattice-completion.zsh` — zsh completion with descriptions.
+
+### Added — git hook (W1)
+- `scripts/prepare-commit-msg.sh` — prepend a comment warning when CRITICAL/BLOCKER findings are open. Non-blocking (informational); use `lattice ci-check` in CI to gate merges.
+
+### Added — migration script (V2)
+- **`scripts/migrate-v0.7.sh`** — idempotent, dry-run-safe migration from nested to flat layout. Adds `first_seen_sweep:`, `legacy_id:`, and `closed_by_commit:` fields automatically.
+
+### Added — fuzzy match + disambiguation (B4/U2/U4)
+- All commands now accept full YAML paths, slugs, `module/rule` form, or substrings as `<id>`.
+- When multiple findings match, interactive TTY prompt lists choices; non-TTY prints the list and exits non-zero.
+- `lattice show` prints all matches with `--- [N/total] ---` separators.
+
+### Changed
+- `status: partial` is now an alias for `status: in_progress` (B2) — `lattice list --status partial` works.
+- `lattice sweeps` no longer shows a "planned for v0.7" note — the manifest writer ships in this release.
+- `install.sh` installs completion scripts and `prepare-commit-msg.sh`.
+- Usage string updated to list all v0.7 subcommands.
+
 ## [0.6.7] — 2026-05-09
 
 Audit-skill rewrite. Biggest single change since v0.6 itself — touches all 5 skill commands and the schema doc. Driven by 2 days of jiive Lumi heavy-use feedback synthesized across two independent Claude sessions; both signed off on the final scope before shipping.

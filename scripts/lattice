@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.6.5)
+# lattice — unified CLI dispatcher (v0.7.0)
 #
 # Discoverability layer over the lifecycle helpers. Wraps the existing
 # scripts/lattice-*.sh + scripts/lattice-regenerate.sh so users have one
@@ -33,7 +33,7 @@ PROG="lattice"
 
 usage() {
   cat <<'USAGE'
-lattice — Lattice findings CLI
+lattice — Lattice findings CLI (v0.7)
 
 Usage:
   lattice close <id> [--commit <sha>] [--pr <num>] [--partial "<text>"]
@@ -42,8 +42,15 @@ Usage:
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
   lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review]
   lattice show <id>
-  lattice triage [--module M] [--tier T] [--status S] [--dimension D]
+  lattice triage [--module M] [--tier T] [--status S] [--dimension D] [--cluster]
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
+  lattice handoff <id>
+  lattice next [--module M]
+  lattice timeline [--since <YYYY-MM-DD>]
+  lattice verify <id> [--run]
+  lattice ci-check [--tier <TIERS>]
+  lattice pr-body [--since <YYYY-MM-DD>]
+  lattice cluster <id>
   lattice validate
   lattice sweeps
   lattice sweep-id
@@ -58,22 +65,32 @@ Subcommands:
               (alias: regenerate; exits 1 on drift, 2 on parse/schema error)
   defer       mark a finding status: deferred until a date, with reason
   list        list open findings, optionally filtered
-  show        pretty-print one finding YAML
+  show        pretty-print one or more matching finding YAMLs
   triage      interactive walk through open findings — [c/d/s/e/v/q]
+              --cluster sorts cluster-root findings to the top
   bulk-close  close every finding whose slug matches a glob pattern
+  handoff     emit a Markdown executor brief for a finding (stdout)
+  next        print the highest-priority actionable open finding
+  timeline    list closed findings grouped by date (newest first)
+  verify      print (or --run) the simulate: steps for a finding
+  ci-check    exit 1 if any non-deferred CRITICAL/BLOCKER finding is open
+  pr-body     emit a Markdown PR section of findings closed since <date>
+  cluster     walk the relates_to graph BFS from a root finding
   validate    scan every YAML, report per-file parse/schema errors
               (does not touch CLAUDE.md; exits 2 if any error found)
   sweeps      list sweep manifests under .lattice/findings/sweeps/
   sweep-id    generate a deterministic sweep ID (YYYYMMDD + 6-hex)
+  id-gen      compute stable v0.7 finding id (sha1-based, line-shift proof)
   version     print the installed Lattice version
 
 All subcommands run against the .lattice/findings/ tree in the current
 working directory. Run with no args from a project root.
 
 <id> can be:
-  * A filename slug:           CRITICAL-payments-stack-leak
-  * The display format:        src/modules/payments/stack-leak    (module/rule)
-  * A substring of any slug:   stack-leak                          (last resort)
+  * A full YAML path:          .lattice/findings/open/HIGH-payments-leak.yml
+  * A filename slug:           HIGH-payments-leak
+  * The display format:        src/modules/payments/leak    (module/rule)
+  * A substring of any slug:   payments-leak               (last resort)
 USAGE
 }
 
@@ -493,13 +510,14 @@ cmd_sweeps() {
 # Filters mirror `lattice list`. Requires a TTY for stdin.
 # ---------------------------------------------------------------------------
 cmd_triage() {
-  local filter_module="" filter_tier="" filter_status="" filter_dim=""
+  local filter_module="" filter_tier="" filter_status="" filter_dim="" cluster_mode=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --module)    filter_module="$2"; shift 2 ;;
       --tier)      filter_tier="$2"; shift 2 ;;
       --status)    filter_status="$2"; shift 2 ;;
       --dimension) filter_dim="$2"; shift 2 ;;
+      --cluster)   cluster_mode=1; shift ;;
       *) die "triage: unknown arg: $1" ;;
     esac
   done
@@ -529,6 +547,20 @@ cmd_triage() {
 
     files+=("${f}")
   done
+
+  # --cluster: sort so findings with cluster_root:true come first, others follow
+  if [ "${cluster_mode}" -eq 1 ] && [ "${#files[@]}" -gt 0 ]; then
+    local clustered=()
+    for f in "${files[@]}"; do
+      local cr; cr="$(yaml_field "${f}" "cluster_root")"
+      [ "${cr}" = "true" ] && clustered+=("${f}")
+    done
+    for f in "${files[@]}"; do
+      local cr; cr="$(yaml_field "${f}" "cluster_root")"
+      [ "${cr}" != "true" ] && clustered+=("${f}")
+    done
+    files=("${clustered[@]}")
+  fi
 
   local total="${#files[@]}"
   if [ "${total}" -eq 0 ]; then
@@ -782,6 +814,335 @@ cmd_version() {
 }
 
 # ---------------------------------------------------------------------------
+# handoff — emit a Markdown executor brief for a finding (stdout).
+# ---------------------------------------------------------------------------
+cmd_handoff() {
+  [ "$#" -ge 1 ] || die "handoff: usage: lattice handoff <id>"
+  local find_id="$1"
+  local src
+  src="$(locate_finding_interactive "${find_id}")" || die "handoff: not found or cancelled: ${find_id}"
+
+  local slug tier module rule dimension title file_field line_field fix
+  slug="$(basename "${src}" .yml)"
+  tier="$(yaml_field "${src}" "tier")"
+  module="$(yaml_field "${src}" "module")"
+  rule="$(yaml_field "${src}" "rule")"
+  dimension="$(yaml_field "${src}" "dimension")"
+  title="$(yaml_field "${src}" "title")"
+  file_field="$(yaml_field "${src}" "file")"
+  line_field="$(yaml_field "${src}" "line")"
+  fix="$(yaml_field "${src}" "fix")"
+
+  local description simulate
+  description="$(awk '/^description[[:space:]]*:/{found=1;next} found && /^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*:/{exit} found{sub(/^  /,""); print}' "${src}")"
+  simulate="$(awk '/^simulate[[:space:]]*:/{found=1;next} found && /^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*:/{exit} found && /^[[:space:]]*-/{sub(/^[[:space:]]*-[[:space:]]*/,""); print}' "${src}")"
+
+  printf '# Executor Brief: %s\n\n' "${slug}"
+  printf '**Tier:** %s  \n**Dimension:** %s  \n**Module:** %s  \n**Rule:** %s  \n**File:** %s:%s\n\n' \
+    "${tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}"
+  printf '## Summary\n%s\n\n' "${title:-*(see YAML)*}"
+  printf '## Fix\n%s\n\n' "${fix:-*(see YAML)*}"
+  [ -n "${description}" ] && printf '## Description\n%s\n\n' "${description}"
+  printf '## Verification Steps\n'
+  if [ -n "${simulate}" ]; then
+    local i=0
+    while IFS= read -r step; do
+      [ -z "${step}" ] && continue
+      i=$((i + 1))
+      printf '%d. %s\n' "${i}" "${step}"
+    done <<< "${simulate}"
+  else
+    printf '*(no simulate: steps — add them to %s)*\n' "${src}"
+  fi
+  printf '\n## Source\n`%s`\n' "${src}"
+}
+
+# ---------------------------------------------------------------------------
+# next — pick the highest-priority open (non-deferred) finding.
+# Tier order: CRITICAL > BLOCKER > HIGH > MEDIUM > LOW > WATCH > RISK > DRIFT
+# ---------------------------------------------------------------------------
+cmd_next() {
+  local filter_module=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --module) [ -z "${2:-}" ] && die "next: --module requires a value"
+                filter_module="$2"; shift 2 ;;
+      *) die "next: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -d ".lattice/findings/open" ] || { echo "[${PROG}] next: no open findings directory"; return 0; }
+
+  _tier_pri() {
+    case "$1" in
+      CRITICAL) echo 1 ;; BLOCKER) echo 2 ;; HIGH)    echo 3 ;;
+      MEDIUM)   echo 4 ;; LOW)     echo 5 ;; WATCH)   echo 6 ;;
+      RISK)     echo 7 ;; DRIFT)   echo 8 ;; *)        echo 99 ;;
+    esac
+  }
+
+  shopt -s nullglob
+  local best_path="" best_pri=999
+  for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
+    [ -f "${f}" ] || continue
+    local module tier status
+    module="$(yaml_field "${f}" "module")"
+    tier="$(yaml_field "${f}" "tier")"
+    status="$(yaml_field "${f}" "status")"
+    [ "${status}" = "deferred" ] && continue
+    [ "${status}" = "wont_fix" ]  && continue
+    if [ -n "${filter_module}" ]; then
+      [[ "${module,,}" == *"${filter_module,,}"* ]] || continue
+    fi
+    local pri; pri="$(_tier_pri "${tier}")"
+    if [ "${pri}" -lt "${best_pri}" ]; then
+      best_pri="${pri}"; best_path="${f}"
+    fi
+  done
+
+  if [ -z "${best_path}" ]; then
+    echo "[${PROG}] next: no actionable open findings${filter_module:+ in module '${filter_module}'}"
+    return 0
+  fi
+
+  local slug tier module rule file_field line_field title
+  slug="$(basename "${best_path}" .yml)"
+  tier="$(yaml_field "${best_path}" "tier")"
+  module="$(yaml_field "${best_path}" "module")"
+  rule="$(yaml_field "${best_path}" "rule")"
+  file_field="$(yaml_field "${best_path}" "file")"
+  line_field="$(yaml_field "${best_path}" "line")"
+  title="$(yaml_field "${best_path}" "title")"
+
+  echo "[${PROG}] next: ${tier}  ${module}/${rule}"
+  [ -n "${title}" ] && echo "  title: ${title}"
+  echo "  file:  ${file_field}:${line_field}"
+  echo "  slug:  ${slug}"
+  echo "  path:  ${best_path}"
+}
+
+# ---------------------------------------------------------------------------
+# timeline — list closed findings by date (newest first).
+# ---------------------------------------------------------------------------
+cmd_timeline() {
+  local since=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --since) [ -z "${2:-}" ] && die "timeline: --since requires a date"
+               since="$2"; shift 2 ;;
+      *) die "timeline: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -d ".lattice/findings/closed" ] || { echo "[${PROG}] timeline: no closed findings"; return 0; }
+
+  shopt -s nullglob
+  local tmpfile; tmpfile="$(mktemp)"
+  for f in .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
+    [ -f "${f}" ] || continue
+    local closed_at date_part tier module rule reason
+    closed_at="$(yaml_field "${f}" "closed_at")"
+    date_part="${closed_at%%T*}"
+    [ -z "${date_part}" ] && date_part="unknown"
+    if [ -n "${since}" ] && [ "${date_part}" != "unknown" ] && [[ "${date_part}" < "${since}" ]]; then
+      continue
+    fi
+    tier="$(yaml_field "${f}" "tier")"
+    module="$(yaml_field "${f}" "module")"
+    rule="$(yaml_field "${f}" "rule")"
+    reason="$(yaml_field "${f}" "close_reason")"
+    printf '%s\t%s\t%s/%s\t[%s]\n' \
+      "${date_part}" "${tier}" "${module}" "${rule}" "${reason:-closed}" >> "${tmpfile}"
+  done
+
+  local count=0 prev_date=""
+  while IFS=$'\t' read -r date_part tier modrule reason; do
+    if [ "${date_part}" != "${prev_date}" ]; then
+      [ -n "${prev_date}" ] && echo ""
+      echo "${date_part}"
+      prev_date="${date_part}"
+    fi
+    printf '  %-9s %s  %s\n' "${tier}" "${modrule}" "${reason}"
+    count=$((count + 1))
+  done < <(sort -r "${tmpfile}")
+  rm -f "${tmpfile}"
+
+  [ "${count}" -gt 0 ] && echo ""
+  echo "[${PROG}] ${count} closed finding(s)${since:+ since ${since}}"
+}
+
+# ---------------------------------------------------------------------------
+# verify — print or run the simulate: steps for a finding.
+# ---------------------------------------------------------------------------
+cmd_verify() {
+  local run_mode=0
+  local find_id=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --run) run_mode=1; shift ;;
+      -*) die "verify: unknown flag: $1" ;;
+      *)  find_id="$1"; shift ;;
+    esac
+  done
+  [ -z "${find_id}" ] && die "verify: usage: lattice verify <id> [--run]"
+
+  local src
+  src="$(locate_finding_interactive "${find_id}")" || die "verify: not found or cancelled: ${find_id}"
+
+  local slug tier module rule title
+  slug="$(basename "${src}" .yml)"
+  tier="$(yaml_field "${src}" "tier")"
+  module="$(yaml_field "${src}" "module")"
+  rule="$(yaml_field "${src}" "rule")"
+  title="$(yaml_field "${src}" "title")"
+
+  local simulate_steps
+  simulate_steps="$(awk '/^simulate[[:space:]]*:/{found=1;next} found && /^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*:/{exit} found && /^[[:space:]]*-/{sub(/^[[:space:]]*-[[:space:]]*/,""); print}' "${src}" 2>/dev/null || true)"
+
+  echo "[${PROG}] verify: ${tier}  ${module}/${rule}"
+  [ -n "${title}" ] && echo "  ${title}"
+  echo ""
+
+  if [ -z "${simulate_steps}" ]; then
+    echo "[${PROG}] verify: no simulate: steps defined in ${slug}"
+    echo "[${PROG}] hint: add a 'simulate:' list to the YAML to enable this command"
+    return 0
+  fi
+
+  if [ "${run_mode}" -eq 0 ]; then
+    echo "Verification steps:"
+    local i=0
+    while IFS= read -r step; do
+      [ -z "${step}" ] && continue
+      i=$((i + 1))
+      printf '  %d. %s\n' "${i}" "${step}"
+    done <<< "${simulate_steps}"
+    echo ""
+    echo "[${PROG}] hint: pass --run to execute these steps"
+  else
+    echo "Running verification steps:"
+    local i=0 failed=0
+    while IFS= read -r step; do
+      [ -z "${step}" ] && continue
+      i=$((i + 1))
+      echo ""
+      echo "  [${i}] \$ ${step}"
+      if ! eval "${step}"; then
+        echo "  [FAIL] step ${i} exited non-zero"
+        failed=$((failed + 1))
+      fi
+    done <<< "${simulate_steps}"
+    echo ""
+    if [ "${failed}" -eq 0 ]; then
+      echo "[${PROG}] verify: all ${i} step(s) passed"
+    else
+      echo "[${PROG}] verify: ${failed}/${i} step(s) failed"
+      return 1
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# ci-check — exit 1 if any non-deferred CRITICAL or BLOCKER finding is open.
+# Designed for CI gates and pre-push hooks.
+# ---------------------------------------------------------------------------
+cmd_ci_check() {
+  local fail_tiers="CRITICAL BLOCKER"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tier) [ -z "${2:-}" ] && die "ci-check: --tier requires a value"
+              fail_tiers="$2"; shift 2 ;;
+      *) die "ci-check: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -d ".lattice/findings/open" ] || { echo "[${PROG}] ci-check: no open findings — clean"; return 0; }
+
+  shopt -s nullglob
+  local blockers=() total=0
+  for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
+    [ -f "${f}" ] || continue
+    total=$((total + 1))
+    local tier status
+    tier="$(yaml_field "${f}" "tier")"
+    status="$(yaml_field "${f}" "status")"
+    [ "${status}" = "deferred" ] && continue
+    [ "${status}" = "wont_fix" ]  && continue
+    for t in ${fail_tiers}; do
+      if [ "${tier}" = "${t}" ]; then
+        blockers+=("$(basename "${f}" .yml)  [${tier}]")
+        break
+      fi
+    done
+  done
+
+  echo "[${PROG}] ci-check: ${total} open finding(s), ${#blockers[@]} blocker(s)"
+  for entry in "${blockers[@]:-}"; do
+    [ -n "${entry}" ] && echo "  FAIL  ${entry}"
+  done
+  [ "${#blockers[@]}" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# pr-body — emit a Markdown PR section listing findings closed since <date>.
+# ---------------------------------------------------------------------------
+cmd_pr_body() {
+  local since=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --since) [ -z "${2:-}" ] && die "pr-body: --since requires a date"
+               since="$2"; shift 2 ;;
+      *) die "pr-body: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -d ".lattice/findings/closed" ] || { echo "[${PROG}] pr-body: no closed findings"; return 0; }
+
+  shopt -s nullglob
+  local fixed=() fp=() wontfix=() other_closures=()
+  for f in .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
+    [ -f "${f}" ] || continue
+    local closed_at date_part tier module rule reason
+    closed_at="$(yaml_field "${f}" "closed_at")"
+    date_part="${closed_at%%T*}"
+    if [ -n "${since}" ] && [ -n "${date_part}" ] && [[ "${date_part}" < "${since}" ]]; then
+      continue
+    fi
+    tier="$(yaml_field "${f}" "tier")"
+    module="$(yaml_field "${f}" "module")"
+    rule="$(yaml_field "${f}" "rule")"
+    reason="$(yaml_field "${f}" "close_reason")"
+    local entry="- \`${tier}\` ${module}/${rule}"
+    case "${reason}" in
+      fixed)          fixed+=("${entry}") ;;
+      false-positive) fp+=("${entry}") ;;
+      wont-fix)       wontfix+=("${entry}") ;;
+      *)              other_closures+=("${entry}") ;;
+    esac
+  done
+
+  local total=$(( ${#fixed[@]} + ${#fp[@]} + ${#wontfix[@]} + ${#other_closures[@]} ))
+  printf '## Lattice Audit Changes%s\n\n' "${since:+ (since ${since})}"
+  if [ "${#fixed[@]}" -gt 0 ]; then
+    printf '### Fixed\n'; printf '%s\n' "${fixed[@]}"; printf '\n'
+  fi
+  if [ "${#fp[@]}" -gt 0 ]; then
+    printf '### False-Positive\n'; printf '%s\n' "${fp[@]}"; printf '\n'
+  fi
+  if [ "${#wontfix[@]}" -gt 0 ]; then
+    printf "### Won't Fix\n"; printf '%s\n' "${wontfix[@]}"; printf '\n'
+  fi
+  if [ "${#other_closures[@]}" -gt 0 ]; then
+    printf '### Other Closures\n'; printf '%s\n' "${other_closures[@]}"; printf '\n'
+  fi
+  if [ "${total}" -eq 0 ]; then
+    printf '*(no findings closed%s)*\n' "${since:+ since ${since}}"
+  else
+    printf '_%d finding(s) closed%s_\n' "${total}" "${since:+ since ${since}}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -800,6 +1161,12 @@ case "${sub}" in
   triage)             cmd_triage "$@" ;;
   cluster)            cmd_cluster "$@" ;;
   bulk-close)         cmd_bulk_close "$@" ;;
+  handoff)            cmd_handoff "$@" ;;
+  next)               cmd_next "$@" ;;
+  timeline)           cmd_timeline "$@" ;;
+  verify)             cmd_verify "$@" ;;
+  ci-check)           cmd_ci_check "$@" ;;
+  pr-body)            cmd_pr_body "$@" ;;
   validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
   sweep-id)           cmd_sweep_id ;;

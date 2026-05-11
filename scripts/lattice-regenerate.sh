@@ -374,15 +374,45 @@ body += `<!-- Source of truth: .lattice/findings/open/ — to triage, run \`latt
 // --- Open (actionable) ---
 const openItems = byStatus.open;
 body += `## Open findings (${openItems.length} actionable)\n\n`;
-const openGroups = groupByTier(openItems);
-for (const tier of TIER_ORDER) {
-  const items = openGroups[tier];
-  if (!items || items.length === 0) continue;
-  body += `### ${tier} (${items.length})\n`;
-  for (const f of items.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
-    body += renderFindingLine(f) + '\n';
+// F7/U3: group by module_owner when any finding has one set; fall back to tier grouping.
+const hasOwners = openItems.some(f => f.module_owner);
+if (hasOwners) {
+  const byOwner = {};
+  for (const f of openItems) {
+    const owner = f.module_owner || '(unassigned)';
+    if (!byOwner[owner]) byOwner[owner] = [];
+    byOwner[owner].push(f);
   }
-  body += '\n';
+  const ownerKeys = Object.keys(byOwner).sort((a, b) => {
+    if (a === '(unassigned)') return 1;
+    if (b === '(unassigned)') return -1;
+    return a.localeCompare(b);
+  });
+  for (const owner of ownerKeys) {
+    const ownerItems = byOwner[owner];
+    body += `### @${owner} (${ownerItems.length})\n\n`;
+    const ownerTierGroups = groupByTier(ownerItems);
+    for (const tier of TIER_ORDER) {
+      const items = ownerTierGroups[tier];
+      if (!items || items.length === 0) continue;
+      body += `#### ${tier} (${items.length})\n`;
+      for (const f of items.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
+        body += renderFindingLine(f) + '\n';
+      }
+      body += '\n';
+    }
+  }
+} else {
+  const openGroups = groupByTier(openItems);
+  for (const tier of TIER_ORDER) {
+    const items = openGroups[tier];
+    if (!items || items.length === 0) continue;
+    body += `### ${tier} (${items.length})\n`;
+    for (const f of items.sort((a, b) => (a.module || '').localeCompare(b.module || ''))) {
+      body += renderFindingLine(f) + '\n';
+    }
+    body += '\n';
+  }
 }
 
 // --- In progress (partial fixes) ---
