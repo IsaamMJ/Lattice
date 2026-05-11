@@ -7,7 +7,7 @@ set -euo pipefail
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
 COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit")
-SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "migrate.sh" "migrate-status.sh")
+SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
 DEST="${HOME}/.claude/commands"
@@ -74,3 +74,11 @@ echo ""
 echo "[lattice] then run \`lattice help\` from any project root."
 echo ""
 echo "[lattice] docs: ${REPO}#readme"
+echo ""
+echo "[lattice] tab completion (optional):"
+echo "[lattice]   bash: echo 'source ${SCRIPT_DEST}/lattice-completion.bash' >> ~/.bashrc"
+echo "[lattice]   zsh:  echo 'source ${SCRIPT_DEST}/lattice-completion.zsh'  >> ~/.zshrc"
+echo ""
+echo "[lattice] v0.7 migration (if upgrading from v0.6):"
+echo "[lattice]   bash ${SCRIPT_DEST}/migrate-v0.7.sh --dry-run   # preview"
+echo "[lattice]   bash ${SCRIPT_DEST}/migrate-v0.7.sh             # apply"
