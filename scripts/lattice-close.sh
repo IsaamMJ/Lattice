@@ -95,6 +95,13 @@ if [ -z "${COMMIT}" ]; then
   fi
 fi
 
+# Validate reason enum (v0.7)
+REASON="${REASON:-fixed}"
+case "${REASON}" in
+  fixed|false-positive|wont-fix|out-of-scope|duplicate) ;;
+  *) echo "[lattice-close] error: invalid reason '${REASON}'. Valid: fixed|false-positive|wont-fix|out-of-scope|duplicate" >&2; exit 2 ;;
+esac
+
 # v0.6.3: normalize to 7-char short SHA
 SHORT_SHA="${COMMIT:0:7}"
 if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]; then

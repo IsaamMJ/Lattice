@@ -121,6 +121,8 @@ previously_closed_in: <7-char-sha>                  # the commit that originally
 closed_at: <ISO timestamp>          # only present in findings/closed/
 closed_by_commit: <7-char-sha>      # only present in findings/closed/ (v0.6.3: 7-char short)
 closed_by_pr: <PR number or url>    # optional
+close_reason: fixed | false-positive | wont-fix | out-of-scope | duplicate   # v0.7; default: fixed
+closure_rationale: "<one-line rationale>"   # v0.7; required for non-fixed reasons; optional for fixed
 
 # Conditional fields (required per dimension + tier)
 

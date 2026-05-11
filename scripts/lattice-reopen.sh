@@ -48,6 +48,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ -z "${REASON}" ] && {
+  echo "[lattice-reopen] error: --reason is required. Provide context for the regression." >&2
+  echo "[lattice-reopen] usage: lattice reopen <id> --reason \"<why this regressed>\"" >&2
+  exit 2
+}
+
 FIND="${FIND%.yml}"
 
 # Already open? Check flat (v0.7) and legacy date-nested
