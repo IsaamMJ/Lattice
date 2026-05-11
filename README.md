@@ -2,14 +2,15 @@
 
 > **Audit framework for keeping docs aligned with code.** Doc-vs-code drift, scale risks, security exposures — every finding grounded in a `file:line` citation.
 
-Lattice ships four slash commands for Claude Code:
+Lattice ships five slash commands for Claude Code:
 
 | Command | Catches |
 |---|---|
 | `/audit <doc-path>` | Doc-vs-code drift; rewrites docs in contract format |
 | `/scale-audit <module-path>` | Horizontal-scaling killers (in-memory state, `setInterval` crons, in-process rate limiters) |
 | `/security-audit <module-path>` | Auth gaps, signature bypass, secret leaks, IDOR, OWASP Top 10 |
-| `/audit-sweep <project-root>` | Runs all three across every module via one dispatch per module; aggregates into one report |
+| `/flow-audit <module-path>` | Customer-flow gaps for conversational AI and multi-step request flows |
+| `/audit-sweep <project-root>` | Runs the in-scope dimensions across every module via one dispatch per module; aggregates into one manifest |
 
 Every finding cites a file and line. Every verdict requires evidence. Audits stop at human-approval gates — Lattice never auto-applies fixes or auto-commits.
 
@@ -43,7 +44,7 @@ Expected output:
 [SWEEP] Module 1/5 complete: src/modules/payments — audit=12OK/3DRIFT scale=0B/2R security=1C/4H
 [SWEEP] Module 2/5 starting: src/modules/admin ...
 ...
-Lattice sweep complete. Findings: .lattice/findings/sweep-20260502-060500.md
+Lattice sweep complete. Manifest: .lattice/findings/sweeps/<sweep_id>.yml
 ```
 
 ---
@@ -70,7 +71,7 @@ If your doc says module X exports function Y, Lattice greps for Y. If Y doesn't 
 curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/install.sh | bash
 ```
 
-This copies `commands/*.md` to `~/.claude/commands/`. Commands appear bare: `/audit`, `/scale-audit`, `/security-audit`, `/audit-sweep`.
+This copies `commands/*.md` to `~/.claude/commands/`. Commands appear bare: `/audit`, `/scale-audit`, `/security-audit`, `/flow-audit`, `/audit-sweep`.
 
 ### Option 2 — Claude Code plugin marketplace
 
