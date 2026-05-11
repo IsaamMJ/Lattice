@@ -151,6 +151,104 @@ locate_finding() {
   printf '%s\n' "${sorted[0]}"
 }
 
+# ---------------------------------------------------------------------------
+# locate_finding_all — return ALL matches (newline-separated) for a given id/slug.
+# Supports flat (v0.7) and legacy nested layouts.
+# ---------------------------------------------------------------------------
+locate_finding_all() {
+  local raw="${1%.yml}"
+  # Strip leading path prefixes so users can paste full YAML paths (U4)
+  raw="${raw#.lattice/findings/open/}"
+  raw="${raw#.lattice/findings/closed/}"
+  # Strip one level of date/ or sha/ subdir if it looks like a prefix
+  if [[ "${raw}" == */* ]]; then
+    local maybe_stripped="${raw#*/}"
+    if [[ "${maybe_stripped}" =~ ^(CRITICAL|HIGH|MEDIUM|LOW|BLOCKER|RISK|WATCH|DRIFT|INTENTIONAL|UNVERIFIABLE|OK)- ]]; then
+      raw="${maybe_stripped}"
+    fi
+  fi
+
+  shopt -s nullglob
+  local matches=()
+
+  # 1) Exact filename match — flat first, then legacy nested
+  for f in ".lattice/findings/open/${raw}.yml" .lattice/findings/open/*/"${raw}.yml" \
+            ".lattice/findings/closed/${raw}.yml" .lattice/findings/closed/*/"${raw}.yml"; do
+    [ -f "${f}" ] && matches+=("${f}")
+  done
+
+  # 2) <module>/<rule> form
+  if [ "${#matches[@]}" -eq 0 ] && [[ "${raw}" == */* ]]; then
+    local f mod rule
+    for f in ".lattice/findings/open"/*.yml .lattice/findings/open/*/*.yml \
+              ".lattice/findings/closed"/*.yml .lattice/findings/closed/*/*.yml; do
+      [ -f "${f}" ] || continue
+      mod="$(yaml_field "${f}" "module")"
+      rule="$(yaml_field "${f}" "rule")"
+      [ "${mod}/${rule}" = "${raw}" ] && matches+=("${f}")
+    done
+  fi
+
+  # 3) Substring match on basename
+  if [ "${#matches[@]}" -eq 0 ]; then
+    local f base
+    for f in ".lattice/findings/open"/*.yml .lattice/findings/open/*/*.yml \
+              ".lattice/findings/closed"/*.yml .lattice/findings/closed/*/*.yml; do
+      [ -f "${f}" ] || continue
+      base="$(basename "${f}" .yml)"
+      [[ "${base}" == *"${raw}"* ]] && matches+=("${f}")
+    done
+  fi
+
+  [ "${#matches[@]}" -eq 0 ] && return 1
+  printf '%s\n' "${matches[@]}" | sort
+}
+
+# Resolve interactively when multiple matches. Echoes the chosen path.
+# If exactly 1 match: echoes it. If >1 and TTY: prompts. If no TTY: prints list and exits non-zero.
+locate_finding_interactive() {
+  local raw="$1"
+  local all_matches=()
+  while IFS= read -r line; do
+    [ -n "${line}" ] && all_matches+=("${line}")
+  done < <(locate_finding_all "${raw}" 2>/dev/null || true)
+
+  if [ "${#all_matches[@]}" -eq 0 ]; then
+    return 1
+  fi
+  if [ "${#all_matches[@]}" -eq 1 ]; then
+    printf '%s\n' "${all_matches[0]}"
+    return 0
+  fi
+
+  # Multiple matches
+  if [ ! -t 0 ]; then
+    echo "[${PROG}] error: '${raw}' matches ${#all_matches[@]} findings; use exact slug" >&2
+    for m in "${all_matches[@]}"; do echo "  - $(basename "${m}" .yml)"; done >&2
+    return 2
+  fi
+
+  echo "[${PROG}] '${raw}' matches ${#all_matches[@]} findings:" >&2
+  local i=0
+  for m in "${all_matches[@]}"; do
+    i=$((i + 1))
+    local tier; tier="$(yaml_field "${m}" "tier")"
+    local mod; mod="$(yaml_field "${m}" "module")"
+    echo "  ${i}) $(basename "${m}" .yml)  [${tier}  ${mod}]" >&2
+  done
+  printf "[${PROG}] select [1-${#all_matches[@]}] (or q to cancel): " >&2
+  local choice
+  read -r choice </dev/tty || { echo "" >&2; return 2; }
+  case "${choice}" in
+    q|Q) echo "[${PROG}] cancelled" >&2; return 2 ;;
+    ''|*[!0-9]*) echo "[${PROG}] invalid choice" >&2; return 2 ;;
+  esac
+  if [ "${choice}" -lt 1 ] || [ "${choice}" -gt "${#all_matches[@]}" ]; then
+    echo "[${PROG}] out of range" >&2; return 2
+  fi
+  printf '%s\n' "${all_matches[$((choice - 1))]}"
+}
+
 # Read a top-level scalar field from a YAML file (single-line values only).
 # Echo empty if absent. Strips surrounding quotes.
 yaml_field() {
@@ -231,7 +329,7 @@ cmd_defer() {
   [[ "${until}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "defer: --until must be YYYY-MM-DD (got: ${until})"
 
   local src
-  src="$(locate_finding "${find_id}")" || die "defer: not found: ${find_id}.yml"
+  src="$(locate_finding_interactive "${find_id}")" || die "defer: not found or cancelled: ${find_id}"
   if [[ "${src}" == .lattice/findings/closed/* ]]; then
     die "defer: ${find_id} is closed; reopen first if it needs deferring"
   fi
@@ -342,13 +440,25 @@ cmd_list() {
 cmd_show() {
   [ "$#" -ge 1 ] || die "show: usage: lattice show <id>"
   local find_id="$1"
-  local src
-  src="$(locate_finding "${find_id}")" || die "show: not found: ${find_id}.yml"
-  local where="open"
-  [[ "${src}" == .lattice/findings/closed/* ]] && where="closed"
-  echo "[${PROG}] ${src} (${where})"
-  echo "----------------------------------------------------------------------"
-  cat "${src}"
+  local all_matches=()
+  while IFS= read -r line; do
+    [ -n "${line}" ] && all_matches+=("${line}")
+  done < <(locate_finding_all "${find_id}" 2>/dev/null || true)
+  [ "${#all_matches[@]}" -eq 0 ] && die "show: not found: ${find_id}.yml"
+
+  local idx=0
+  for src in "${all_matches[@]}"; do
+    idx=$((idx + 1))
+    local where="open"
+    [[ "${src}" == .lattice/findings/closed/* ]] && where="closed"
+    if [ "${#all_matches[@]}" -gt 1 ]; then
+      echo ""
+      echo "--- [${idx}/${#all_matches[@]}] ---"
+    fi
+    echo "[${PROG}] ${src} (${where})"
+    echo "----------------------------------------------------------------------"
+    cat "${src}"
+  done
 }
 
 # ---------------------------------------------------------------------------
