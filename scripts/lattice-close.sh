@@ -2,7 +2,7 @@
 # lattice-close — mark a finding closed (or partially closed) by updating its YAML.
 #
 # Usage:
-#   bash scripts/lattice-close.sh <finding-id-or-filename> [--commit <sha>] [--pr <num-or-url>]
+#   bash scripts/lattice-close.sh <finding-id-or-filename> --reason <reason> [--commit <sha>] [--pr <num-or-url>]
 #   bash scripts/lattice-close.sh <finding-id-or-filename> --partial "what's still unfixed" [--commit <sha>]
 #
 # Examples:
@@ -13,7 +13,7 @@
 #
 # Behavior:
 #   - SHA is normalized to 7-char short SHA (v0.6.3 convention).
-#   - WITHOUT --partial: moves YAML from open/ to closed/<7-char-sha>/, sets closed_at + closed_by_commit.
+#   - WITHOUT --partial: moves YAML from open/ to closed/<slug>.yml, sets closed_at + closed_by_commit.
 #   - WITH    --partial: keeps YAML in open/, sets status: in_progress, appends to partial_commits, sets remaining.
 #   - REPLACES (not appends) closed_at + closed_by_commit + closed_by_pr fields on full close.
 #   - For --partial, partial_commits APPENDS each invocation, remaining is overwritten.
@@ -26,9 +26,21 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<USAGE
-usage: bash scripts/lattice-close.sh <finding-id-or-filename> [--commit <sha>] [--pr <num-or-url>]
+usage: bash scripts/lattice-close.sh <finding-id-or-filename> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>] [--pr <num-or-url>]
        bash scripts/lattice-close.sh <finding-id-or-filename> --partial "<remaining text>" [--commit <sha>]
 USAGE
+}
+
+yaml_scalar() {
+  local key="$1" value="$2"
+  if [[ "${value}" == *$'\n'* ]]; then
+    printf "%s: |\n" "${key}"
+    printf "%s\n" "${value}" | sed 's/^/  /'
+  else
+    local esc
+    esc="$(printf "%s" "${value}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    printf "%s: \"%s\"\n" "${key}" "${esc}"
+  fi
 }
 
 if [ "$#" -lt 1 ]; then
@@ -95,8 +107,13 @@ if [ -z "${COMMIT}" ]; then
   fi
 fi
 
-# Validate reason enum (v0.7)
-REASON="${REASON:-fixed}"
+# Validate reason enum (v0.7). Partial closes are still open work and do not
+# require close_reason; full closes do.
+if [ "${PARTIAL_MODE}" -eq 0 ] && [ -z "${REASON}" ]; then
+  echo "[lattice-close] error: --reason is required for full close. Valid: fixed|false-positive|wont-fix|out-of-scope|duplicate" >&2
+  exit 2
+fi
+[ -z "${REASON}" ] && REASON="fixed"
 case "${REASON}" in
   fixed|false-positive|wont-fix|out-of-scope|duplicate) ;;
   *) echo "[lattice-close] error: invalid reason '${REASON}'. Valid: fixed|false-positive|wont-fix|out-of-scope|duplicate" >&2; exit 2 ;;
@@ -110,8 +127,16 @@ if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]; then
 fi
 COMMIT="${SHORT_SHA}"
 
-# Strip .yml if present
+# Normalize accepted input forms to a filename slug.
 FIND="${FIND%.yml}"
+FIND="${FIND#.lattice/findings/open/}"
+FIND="${FIND#.lattice/findings/closed/}"
+if [[ "${FIND}" == */* ]]; then
+  maybe="${FIND#*/}"
+  if [[ "${maybe}" =~ ^(CRITICAL|HIGH|MEDIUM|LOW|BLOCKER|RISK|WATCH|DRIFT|INTENTIONAL|UNVERIFIABLE|OK)- ]]; then
+    FIND="${maybe}"
+  fi
+fi
 
 # Find ALL matching files under open/ — support flat (v0.7) and date-nested (legacy)
 shopt -s nullglob
@@ -171,8 +196,7 @@ if [ "${PARTIAL_MODE}" -eq 1 ]; then
       printf "remaining: |\n"
       printf "%s\n" "${PARTIAL}" | sed 's/^/  /'
     else
-      esc_remaining="$(printf "%s" "${PARTIAL}" | sed 's/"/\\"/g')"
-      printf "remaining: \"%s\"\n" "${esc_remaining}"
+      yaml_scalar "remaining" "${PARTIAL}"
     fi
   } >> "${SRC}"
 
@@ -216,8 +240,7 @@ mv "${tmp}" "${DEST}"
     printf "closed_by_pr: %s\n" "${PR}"
   fi
   if [ -n "${RATIONALE}" ]; then
-    esc_rat="$(printf "%s" "${RATIONALE}" | sed 's/"/\\"/g')"
-    printf "closure_rationale: \"%s\"\n" "${esc_rat}"
+    yaml_scalar "closure_rationale" "${RATIONALE}"
   fi
 } >> "${DEST}"
 

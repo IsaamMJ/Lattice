@@ -16,7 +16,7 @@
 - New `status:` field on open YAMLs: `open | in_progress | deferred | wont_fix` (default: `open`)
 - Partial fixes stay in `open/` with `status: in_progress` + `partial_commits: [<sha>]` + `remaining:` text — they are NOT moved to `closed/` until fully fixed
 - New `previously_closed_in: <sha>` field on reopened findings
-- **Short-SHA convention:** all SHA references — `closed/<sha>/` directory names, `closed_by_commit:`, `partial_commits:`, `previously_closed_in:` — use **7-char short SHA**. The closer truncates to 7 automatically; existing full-SHA dirs are tolerated for backward compat but new closes always emit 7-char.
+- **Short-SHA convention:** all SHA references — `closed/` directory names, `closed_by_commit:`, `partial_commits:`, `previously_closed_in:` — use **7-char short SHA**. The closer truncates to 7 automatically; existing full-SHA dirs are tolerated for backward compat but new closes always emit 7-char.
 - CLAUDE.md regen is now CI-enforced: `scripts/validate.sh` runs `lattice-regenerate.sh --check` and fails the build if the markered block in CLAUDE.md differs from what regen would produce. **Manual edits to the markered section will not land.**
 
 ## Why this redesign
@@ -29,7 +29,7 @@ v0.5 wrote findings as one Markdown file per audit (e.g. `security-payments-2026
 4. **Cross-dimension dupes** — same defect could surface in security + scale + audit with different wording, no dedupe
 5. **No commit linkage** — PRs reference findings ("closes CRITICAL #1") but findings don't track which commit fixed them
 
-v0.6 fixes 1-3 and 5 directly via the schema. v0.7 adds `lattice diff`. v0.8 adds cross-dimension dedupe.
+v0.6 fixed 1-3 and 5 directly via the schema. v0.7 flattened finding paths, stabilized IDs, and added closure taxonomy plus workflow commands.
 
 ## File layout (v0.7 — flat)
 
@@ -49,8 +49,7 @@ v0.6 fixes 1-3 and 5 directly via the schema. v0.7 adds `lattice diff`. v0.8 add
 
 **v0.7 change:** No more `open/<date>/` or `closed/<sha>/` subdirectories. Date info moves
 into `first_seen_sweep:` YAML field. SHA stays in `closed_by_commit:` YAML field.
-Legacy nested layout is still read by all scripts for backward compat; new writes use flat.
-Run `scripts/migrate-v0.7.sh` to migrate existing findings.
+Legacy nested layout is migration input only. Run `scripts/migrate-v0.7.sh` to flatten existing findings; `lattice validate` fails while nested finding YAMLs remain.
 
 **Status lives in the `status:` field:**
 - `findings/open/...yml` with `status: open` — actively being worked / unaddressed
@@ -61,11 +60,11 @@ Run `scripts/migrate-v0.7.sh` to migrate existing findings.
 
 **Why both path AND field?** The path is the coarse filter (open vs closed). The `status` field is the triage filter (which open findings are actually actionable). Without it, deferred and in_progress findings hide among actionable ones.
 
-**Closing a finding** = `bash scripts/lattice-close.sh <slug>` → moves to `closed/<7-char-sha>/`, sets `closed_at` + `closed_by_commit`.
+**Closing a finding** = `lattice close <slug> --reason fixed` → moves to `closed/<slug>.yml`, sets `closed_at`, `closed_by_commit`, and `close_reason`.
 
 **Partially closing a finding (v0.6.3)** = `bash scripts/lattice-close.sh <slug> --partial "what's still left"` → keeps the file in `open/`, sets `status: in_progress`, appends to `partial_commits:`, sets `remaining:`. The finding does NOT move to `closed/` until fully fixed.
 
-**Reopening a closed finding (v0.6.3)** = `bash scripts/lattice-reopen.sh <slug>` → moves from `closed/<sha>/` back to `open/<today>/`, sets `status: open`, adds `previously_closed_in: <original-sha>`. Used when a regression reintroduces a previously-fixed defect.
+**Reopening a closed finding (v0.7)** = `lattice reopen <slug> --reason "<why this regressed>"` → moves from `closed/<slug>.yml` back to `open/<slug>.yml`, sets `status: open`, adds `previously_closed_in: <original-sha>`. Used when a regression reintroduces a previously-fixed defect.
 
 ## Filename slug format
 
@@ -211,7 +210,7 @@ CLAUDE.md is a **read-only view** of the YAML truth. Authored by `scripts/lattic
 ## Open findings (<count> total)
 
 ### CRITICAL (<n>)
-- [ ] `<module>` / `<rule>` — `<file>:<line>` — fix: `<fix>` — `.lattice/findings/open/<date>/CRITICAL-<module>-<rule>.yml`
+- [ ] `<module>` / `<rule>` — `<file>:<line>` — fix: `<fix>` — `.lattice/findings/open/CRITICAL-<module>-<rule>.yml`
 
 ### HIGH (<n>)
 - [ ] ...

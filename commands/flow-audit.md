@@ -84,7 +84,7 @@ For each, evidence is concrete: a `file:line` showing the gap.
 - **Read**: context for every hit before assigning a verdict; load CLAUDE.md / TTD / flow diagram first
 - **Glob**: enumerate handlers, services, state stores in the module
 - **Bash**: only for `git log` if checking when a flow gap was introduced
-- **Write**: only for the findings file in `.lattice/findings/open/<sweep-date>/`
+- **Write**: only for the findings file in `.lattice/findings/open/`
 
 ## Methodology
 
@@ -165,9 +165,9 @@ False positives erode trust faster than missed drift catches. When in doubt: UNV
 
 **OK-finding discipline (v0.6.7+):** Every flow audit MUST emit at least one `tier: OK` finding per major flow stage that was checked-and-found-clean. These are first-class output: knowing what was verified-clean changes how readers triage the rest. Examples: `OK-payments-credit-pack-branch-clean`, `OK-payments-dedup-key-stable`, `OK-lumi-consent-step-complete`. Each requires `intentional_citation` per the schema.
 
-### Step 6 — Write findings (v0.6 YAML schema)
+### Step 6 — Write findings (v0.7 YAML schema)
 
-Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
+Emit **one YAML file per finding** to `.lattice/findings/open/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
 
 For flow dimension, `<rule-slug>` is a kebab-case pattern name: `happy-path-incomplete`, `error-handling-missing`, `state-validation-gap`, `type-checking-missing`, `no-exit-path`, `no-abandonment-timeout`, `no-cleanup`, `state-change-silent`, `context-loss`, `race-condition-on-state`, etc.
 
@@ -248,7 +248,7 @@ Output the YAML directory path + the manifest path + the verdict counts + the dr
 ```
 ✅ Flow audit complete: <module-path or scope>
 
-Findings:  .lattice/findings/open/<sweep_date>/
+Findings:  .lattice/findings/open/
 Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
 Verdicts:  <N> CRITICAL, <N> HIGH, <N> MEDIUM, <N> LOW, <N> OK
 Cross-cut: <N> dimension: audit findings (DRIFT/UNVERIFIABLE) emitted from Step 4

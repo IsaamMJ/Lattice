@@ -2,15 +2,15 @@
 # lattice-reopen — reopen a closed finding (regression handling).
 #
 # Usage:
-#   bash scripts/lattice-reopen.sh <finding-id-or-filename> [--reason "<text>"]
+#   bash scripts/lattice-reopen.sh <finding-id-or-filename> --reason "<text>"
 #
 # Behavior:
-#   - Locates the YAML under .lattice/findings/closed/<sha>/<file>.yml
-#   - Moves it to .lattice/findings/open/<today>/<file>.yml
+#   - Locates the YAML under .lattice/findings/closed/<slug>.yml
+#   - Moves it to .lattice/findings/open/<slug>.yml
 #   - Strips closed_at / closed_by_commit / closed_by_pr lines
 #   - Sets status: open
 #   - Adds previously_closed_in: <original-sha> (preserves what supposedly fixed it)
-#   - Adds optional reopen_reason: "<text>" if --reason given
+#   - Adds reopen_reason: "<text>" from required --reason
 #   - Idempotent — already-open findings are reported, not re-opened.
 #
 # When to use: someone reverts a fix, refactors break a previously-fixed defect,
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: bash scripts/lattice-reopen.sh <finding-id-or-filename> [--reason \"<text>\"]" >&2
+  echo "usage: bash scripts/lattice-reopen.sh <finding-id-or-filename> --reason \"<text>\"" >&2
 }
 
 if [ "$#" -lt 1 ]; then

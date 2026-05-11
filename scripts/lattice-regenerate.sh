@@ -258,10 +258,22 @@ function readDirRecursive(dir) {
 // fail-fast like before (process.exit(2)).
 const validateErrors = [];
 
+function isLegacyNestedFinding(filePath, kind) {
+  const normalized = filePath.replace(/\\/g, '/');
+  const marker = kind === 'open' ? '/open/' : '/closed/';
+  const idx = normalized.indexOf(marker);
+  if (idx < 0) return false;
+  const rest = normalized.slice(idx + marker.length);
+  return rest.split('/').length > 1;
+}
+
 function loadAll(files, kind /* 'open' | 'closed' */) {
   const loaded = [];
   for (const f of files) {
     try {
+      if (validateMode && isLegacyNestedFinding(f, kind)) {
+        throw new Error(`legacy nested v0.6 layout is not valid in v0.7: ${f}; run scripts/migrate-v0.7.sh`);
+      }
       const parsed = parseYaml(fs.readFileSync(f, 'utf8'));
       // v0.6.6.1: auto-derive closed_by_commit from path for legacy closed
       // YAMLs that pre-date the field. Path is .lattice/findings/closed/<sha>/<slug>.yml

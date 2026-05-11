@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.7.0)
+# lattice — unified CLI dispatcher (v0.7.1)
 #
 # Discoverability layer over the lifecycle helpers. Wraps the existing
 # scripts/lattice-*.sh + scripts/lattice-regenerate.sh so users have one
 # command to learn instead of five script paths.
 #
 # Subcommands:
-#   lattice close <id> [--commit <sha>] [--pr <num>] [--partial "<text>"]
-#   lattice reopen <id> [--reason "<text>"]
+#   lattice close <id> --reason <reason> [--commit <sha>] [--pr <num>]
+#   lattice close <id> --partial "<text>" [--commit <sha>]
+#   lattice reopen <id> --reason "<text>"
 #   lattice sync [--check]                 # alias: regenerate
 #   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
 #   lattice list [--module X] [--tier Y] [--status Z] [--dimension D] [--due-for-review]
@@ -36,8 +37,9 @@ usage() {
 lattice — Lattice findings CLI (v0.7)
 
 Usage:
-  lattice close <id> [--commit <sha>] [--pr <num>] [--partial "<text>"]
-  lattice reopen <id> [--reason "<text>"]
+  lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>] [--pr <num>]
+  lattice close <id> --partial "<text>" [--commit <sha>]
+  lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
   lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review]
@@ -50,6 +52,9 @@ Usage:
   lattice verify <id> [--run]
   lattice ci-check [--tier <TIERS>]
   lattice pr-body [--since <YYYY-MM-DD>]
+  lattice usage [--since <days>] [--unused <days>] [--json]
+  lattice update --check|--self|--enable-auto|--disable-auto
+  lattice config init
   lattice cluster <id>
   lattice validate
   lattice sweeps
@@ -75,6 +80,9 @@ Subcommands:
   verify      print (or --run) the simulate: steps for a finding
   ci-check    exit 1 if any non-deferred CRITICAL/BLOCKER finding is open
   pr-body     emit a Markdown PR section of findings closed since <date>
+  usage       summarize local command usage from .lattice/usage/events.jsonl
+  update      check for or apply Lattice updates using .lattice/config.yml
+  config      create a project-local .lattice/config.yml
   cluster     walk the relates_to graph BFS from a root finding
   validate    scan every YAML, report per-file parse/schema errors
               (does not touch CLAUDE.md; exits 2 if any error found)
@@ -102,6 +110,158 @@ die() {
 require_helper() {
   local h="$1"
   [ -x "${h}" ] || [ -f "${h}" ] || die "missing helper: ${h}"
+}
+
+current_version() {
+  local plugin="${SELF_DIR}/../.claude-plugin/plugin.json"
+  local v=""
+  if [ -f "${plugin}" ]; then
+    v="$(grep -oE '"version"\s*:\s*"[^"]+"' "${plugin}" | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/')"
+  fi
+  if [ -z "${v}" ] && [ -f "${HOME}/.claude/lattice/VERSION" ]; then
+    v="$(cat "${HOME}/.claude/lattice/VERSION" 2>/dev/null || true)"
+  fi
+  [ -n "${v}" ] && printf "%s" "${v}" || printf "unknown"
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/ }"
+  s="${s//$'\r'/ }"
+  printf "%s" "${s}"
+}
+
+config_get() {
+  local section="$1" key="$2" default="$3"
+  local cfg=".lattice/config.yml"
+  [ -f "${cfg}" ] || { printf "%s" "${default}"; return; }
+  local val
+  val="$(awk -v section="${section}" -v key="${key}" '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    /^[^[:space:]][^:]*:[[:space:]]*$/ {
+      cur=$1; sub(/:.*/, "", cur); next
+    }
+    cur == section {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      split(line, parts, ":")
+      if (parts[1] == key) {
+        sub(/^[^:]*:[[:space:]]*/, "", line)
+        gsub(/^["'\'']|["'\'']$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "${cfg}" 2>/dev/null || true)"
+  [ -n "${val}" ] && printf "%s" "${val}" || printf "%s" "${default}"
+}
+
+ensure_project_dirs() {
+  mkdir -p ".lattice/usage" ".lattice/cache" 2>/dev/null || true
+}
+
+args_shape() {
+  local out=()
+  for arg in "$@"; do
+    case "${arg}" in
+      --*) out+=("${arg}") ;;
+      -*) out+=("${arg}") ;;
+    esac
+  done
+  printf "%s" "${out[*]:-}"
+}
+
+log_usage_event() {
+  local command="$1"; shift || true
+  local enabled
+  enabled="$(config_get usage enabled true)"
+  case "${enabled}" in
+    false|off|0|no) return 0 ;;
+  esac
+  ensure_project_dirs
+  local ts ver shape project
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ver="$(current_version)"
+  shape="$(args_shape "$@")"
+  project="$(basename "$(pwd)")"
+  {
+    printf '{"ts":"%s","version":"%s","command":"%s","args_shape":"%s","project":"%s"}\n' \
+      "$(json_escape "${ts}")" \
+      "$(json_escape "${ver}")" \
+      "$(json_escape "${command}")" \
+      "$(json_escape "${shape}")" \
+      "$(json_escape "${project}")"
+  } >> ".lattice/usage/events.jsonl" 2>/dev/null || true
+}
+
+latest_remote_version() {
+  if [ -n "${LATTICE_TEST_LATEST_VERSION:-}" ]; then
+    printf "%s" "${LATTICE_TEST_LATEST_VERSION}"
+    return 0
+  fi
+  local raw="https://raw.githubusercontent.com/IsaamMJ/Lattice/main/.claude-plugin/plugin.json"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${raw}" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/'
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "${raw}" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/'
+  else
+    return 1
+  fi
+}
+
+version_newer() {
+  local latest="$1" current="$2"
+  [ "${latest}" = "${current}" ] && return 1
+  node -e '
+    const latest = process.argv[1].replace(/^v/, "").split(".").map(Number);
+    const current = process.argv[2].replace(/^v/, "").split(".").map(Number);
+    for (let i = 0; i < Math.max(latest.length, current.length); i++) {
+      const a = latest[i] || 0, b = current[i] || 0;
+      if (a > b) process.exit(0);
+      if (a < b) process.exit(1);
+    }
+    process.exit(1);
+  ' "${latest}" "${current}" 2>/dev/null
+}
+
+maybe_update_check() {
+  local command="$1"
+  case "${command}" in
+    update|config|version|--version|-v|help|--help|-h) return 0 ;;
+  esac
+  [ -f ".lattice/config.yml" ] || return 0
+  local mode interval now last cache current latest
+  mode="$(config_get updates mode notify)"
+  case "${mode}" in off|pinned) return 0 ;; esac
+  interval="$(config_get updates check_interval_hours 24)"
+  [[ "${interval}" =~ ^[0-9]+$ ]] || interval=24
+  ensure_project_dirs
+  cache=".lattice/cache/update-check.env"
+  now="$(date +%s)"
+  last=0
+  [ -f "${cache}" ] && . "${cache}" 2>/dev/null || true
+  last="${checked_at:-0}"
+  if [ $((now - last)) -lt $((interval * 3600)) ]; then
+    return 0
+  fi
+  current="$(current_version)"
+  latest="$(latest_remote_version || true)"
+  [ -z "${latest}" ] && return 0
+  {
+    printf "checked_at=%s\n" "${now}"
+    printf "current_version=%q\n" "${current}"
+    printf "latest_version=%q\n" "${latest}"
+  } > "${cache}" 2>/dev/null || true
+  if version_newer "${latest}" "${current}"; then
+    if [ "${mode}" = "auto" ]; then
+      echo "[${PROG}] update: ${current} -> ${latest} (auto mode)"
+      cmd_update --self || true
+    else
+      echo "[${PROG}] update available: ${current} -> ${latest}. Run: lattice update --self" >&2
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -281,8 +441,44 @@ yaml_field() {
 # ---------------------------------------------------------------------------
 cmd_close() {
   require_helper "${HELPER_CLOSE}"
+  [ "$#" -ge 1 ] || die "close: usage: lattice close <id> --reason <reason> [--commit <sha>] [--pr <num>] [--partial <text>]"
+  local find_id="$1"; shift
+  local matches=() src
+  while IFS= read -r line; do
+    [[ "${line}" == .lattice/findings/open/* ]] && matches+=("${line}")
+  done < <(locate_finding_all "${find_id}" 2>/dev/null || true)
+  if [ "${#matches[@]}" -eq 0 ]; then
+    src="$(locate_finding "${find_id}" 2>/dev/null || true)"
+    if [[ "${src}" == .lattice/findings/closed/* ]]; then
+      echo "[${PROG}] already closed: ${src}"
+      return 0
+    fi
+    die "close: not found: ${find_id}"
+  fi
+  if [ "${#matches[@]}" -gt 1 ]; then
+    if [ ! -t 0 ]; then
+      echo "[${PROG}] error: '${find_id}' matches ${#matches[@]} findings; use exact slug" >&2
+      for src in "${matches[@]}"; do echo "  - $(basename "${src}" .yml)" >&2; done
+      return 2
+    fi
+    echo "[${PROG}] '${find_id}' matches ${#matches[@]} open findings:" >&2
+    local i=0 choice
+    for src in "${matches[@]}"; do
+      i=$((i + 1))
+      echo "  ${i}) $(basename "${src}" .yml)" >&2
+    done
+    printf "[${PROG}] select [1-${#matches[@]}] (or q to cancel): " >&2
+    read -r choice </dev/tty || return 2
+    [[ "${choice}" =~ ^[0-9]+$ ]] || return 2
+    [ "${choice}" -ge 1 ] && [ "${choice}" -le "${#matches[@]}" ] || return 2
+    src="${matches[$((choice - 1))]}"
+  else
+    src="${matches[0]}"
+  fi
+  local slug
+  slug="$(basename "${src}" .yml)"
   local rc=0
-  bash "${HELPER_CLOSE}" "$@" || rc=$?
+  bash "${HELPER_CLOSE}" "${slug}" "$@" || rc=$?
   return "${rc}"
 }
 
@@ -366,9 +562,14 @@ cmd_defer() {
     printf "defer_until: %s\n" "${until}"
     printf "deferred_at: %s\n" "${now}"
     if [ -n "${reason}" ]; then
-      local esc_reason
-      esc_reason="$(printf "%s" "${reason}" | sed 's/"/\\"/g')"
-      printf "defer_reason: \"%s\"\n" "${esc_reason}"
+      if [[ "${reason}" == *$'\n'* ]]; then
+        printf "defer_reason: |\n"
+        printf "%s\n" "${reason}" | sed 's/^/  /'
+      else
+        local esc_reason
+        esc_reason="$(printf "%s" "${reason}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        printf "defer_reason: \"%s\"\n" "${esc_reason}"
+      fi
     fi
   } >> "${src}"
 
@@ -1027,6 +1228,8 @@ cmd_verify() {
       i=$((i + 1))
       echo ""
       echo "  [${i}] \$ ${step}"
+      step="${step#\"}"; step="${step%\"}"
+      step="${step#\'}"; step="${step%\'}"
       if ! eval "${step}"; then
         echo "  [FAIL] step ${i} exited non-zero"
         failed=$((failed + 1))
@@ -1059,15 +1262,29 @@ cmd_ci_check() {
   [ -d ".lattice/findings/open" ] || { echo "[${PROG}] ci-check: no open findings — clean"; return 0; }
 
   shopt -s nullglob
-  local blockers=() total=0
+  local blockers=() missing_files=() closed_bad=() dupes=() seen=() total=0
   for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
     [ -f "${f}" ] || continue
     total=$((total + 1))
-    local tier status
+    local tier status file_field module rule key
     tier="$(yaml_field "${f}" "tier")"
     status="$(yaml_field "${f}" "status")"
+    file_field="$(yaml_field "${f}" "file")"
+    module="$(yaml_field "${f}" "module")"
+    rule="$(yaml_field "${f}" "rule")"
     [ "${status}" = "deferred" ] && continue
     [ "${status}" = "wont_fix" ]  && continue
+    if [ -n "${file_field}" ] && [ ! -e "${file_field%%:*}" ]; then
+      missing_files+=("$(basename "${f}" .yml)  file=${file_field}")
+    fi
+    key="${module}|${rule}"
+    for prior in "${seen[@]:-}"; do
+      if [ "${prior}" = "${key}" ]; then
+        dupes+=("${module}/${rule}")
+        break
+      fi
+    done
+    seen+=("${key}")
     for t in ${fail_tiers}; do
       if [ "${tier}" = "${t}" ]; then
         blockers+=("$(basename "${f}" .yml)  [${tier}]")
@@ -1076,11 +1293,25 @@ cmd_ci_check() {
     done
   done
 
-  echo "[${PROG}] ci-check: ${total} open finding(s), ${#blockers[@]} blocker(s)"
+  for f in .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
+    [ -f "${f}" ] || continue
+    sha="$(yaml_field "${f}" "closed_by_commit")"
+    [ -z "${sha}" ] && { closed_bad+=("$(basename "${f}" .yml)  missing closed_by_commit"); continue; }
+    if git rev-parse --verify --quiet "${sha}^{commit}" >/dev/null 2>&1; then
+      :
+    else
+      closed_bad+=("$(basename "${f}" .yml)  closed_by_commit=${sha} not in git")
+    fi
+  done
+
+  echo "[${PROG}] ci-check: ${total} open finding(s), ${#blockers[@]} blocker(s), ${#missing_files[@]} missing file ref(s), ${#closed_bad[@]} bad closure ref(s), ${#dupes[@]} duplicate rule/module pair(s)"
   for entry in "${blockers[@]:-}"; do
     [ -n "${entry}" ] && echo "  FAIL  ${entry}"
   done
-  [ "${#blockers[@]}" -eq 0 ]
+  for entry in "${missing_files[@]:-}"; do [ -n "${entry}" ] && echo "  FAIL  missing-file  ${entry}"; done
+  for entry in "${closed_bad[@]:-}"; do [ -n "${entry}" ] && echo "  FAIL  closed-ref  ${entry}"; done
+  for entry in "${dupes[@]:-}"; do [ -n "${entry}" ] && echo "  FAIL  duplicate-rule-module  ${entry}"; done
+  [ "${#blockers[@]}" -eq 0 ] && [ "${#missing_files[@]}" -eq 0 ] && [ "${#closed_bad[@]}" -eq 0 ] && [ "${#dupes[@]}" -eq 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1374,208 @@ cmd_pr_body() {
 }
 
 # ---------------------------------------------------------------------------
+# usage — summarize repo-local command usage events.
+# ---------------------------------------------------------------------------
+cmd_usage() {
+  local since_days=30 unused_days=90 json=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --since)  [ -z "${2:-}" ] && die "usage: --since requires days"; since_days="$2"; shift 2 ;;
+      --unused) [ -z "${2:-}" ] && die "usage: --unused requires days"; unused_days="$2"; shift 2 ;;
+      --json)   json=1; shift ;;
+      *) die "usage: unknown arg: $1" ;;
+    esac
+  done
+  [[ "${since_days}" =~ ^[0-9]+$ ]] || die "usage: --since must be a day count"
+  [[ "${unused_days}" =~ ^[0-9]+$ ]] || die "usage: --unused must be a day count"
+
+  local events=".lattice/usage/events.jsonl"
+  if [ ! -f "${events}" ]; then
+    if [ "${json}" -eq 1 ]; then
+      echo '{"events":0,"commands":[],"unused":[]}'
+    else
+      echo "[${PROG}] usage: no events yet (${events})"
+      echo "[${PROG}] usage logging is local and controlled by .lattice/config.yml"
+    fi
+    return 0
+  fi
+
+  node --input-type=module - "${events}" "${since_days}" "${unused_days}" "${json}" <<'NODE'
+import fs from 'node:fs';
+
+const [eventsPath, sinceDaysRaw, unusedDaysRaw, jsonRaw] = process.argv.slice(2);
+const sinceDays = Number(sinceDaysRaw);
+const unusedDays = Number(unusedDaysRaw);
+const jsonMode = jsonRaw === '1';
+const known = [
+  'close','reopen','sync','regenerate','defer','list','ls','show','cat','triage',
+  'cluster','bulk-close','handoff','next','timeline','verify','ci-check','pr-body',
+  'validate','sweeps','sweep-id','id-gen','usage','update','config','version'
+];
+const now = Date.now();
+const sinceCutoff = now - sinceDays * 86400_000;
+const unusedCutoff = now - unusedDays * 86400_000;
+const rows = fs.readFileSync(eventsPath, 'utf8')
+  .split(/\r?\n/)
+  .filter(Boolean)
+  .map(line => {
+    try { return JSON.parse(line); } catch { return null; }
+  })
+  .filter(Boolean);
+const filtered = rows.filter(r => {
+  const t = Date.parse(r.ts || '');
+  return Number.isFinite(t) && t >= sinceCutoff;
+});
+const counts = new Map();
+const lastSeen = new Map();
+for (const r of rows) {
+  const cmd = r.command || 'unknown';
+  const t = Date.parse(r.ts || '');
+  if (Number.isFinite(t)) {
+    if (!lastSeen.has(cmd) || t > lastSeen.get(cmd)) lastSeen.set(cmd, t);
+  }
+}
+for (const r of filtered) {
+  const cmd = r.command || 'unknown';
+  const item = counts.get(cmd) || { command: cmd, count: 0, last_seen: null, versions: new Map() };
+  item.count += 1;
+  const t = Date.parse(r.ts || '');
+  if (Number.isFinite(t) && (!item.last_seen || t > Date.parse(item.last_seen))) {
+    item.last_seen = new Date(t).toISOString();
+  }
+  const v = r.version || 'unknown';
+  item.versions.set(v, (item.versions.get(v) || 0) + 1);
+  counts.set(cmd, item);
+}
+const commands = [...counts.values()].sort((a, b) => b.count - a.count || a.command.localeCompare(b.command))
+  .map(x => ({...x, versions: Object.fromEntries(x.versions)}));
+const unused = known.filter(cmd => !lastSeen.has(cmd) || lastSeen.get(cmd) < unusedCutoff)
+  .map(cmd => ({
+    command: cmd,
+    last_seen: lastSeen.has(cmd) ? new Date(lastSeen.get(cmd)).toISOString() : null,
+  }));
+if (jsonMode) {
+  console.log(JSON.stringify({ events: rows.length, since_days: sinceDays, commands, unused_days: unusedDays, unused }, null, 2));
+} else {
+  console.log(`[lattice] usage: ${filtered.length} event(s) in last ${sinceDays} day(s), ${rows.length} total`);
+  console.log('');
+  console.log('Most used commands:');
+  if (commands.length === 0) console.log('  (none in window)');
+  for (const item of commands.slice(0, 12)) {
+    console.log(`  ${String(item.count).padStart(4)}  ${item.command}  last=${item.last_seen || 'unknown'}`);
+  }
+  console.log('');
+  console.log(`Unused candidates (${unusedDays}+ days or never used):`);
+  for (const item of unused.slice(0, 20)) {
+    console.log(`  - ${item.command}${item.last_seen ? ` (last ${item.last_seen})` : ' (never)'}`);
+  }
+}
+NODE
+}
+
+# ---------------------------------------------------------------------------
+# update — check for or apply Lattice updates.
+# ---------------------------------------------------------------------------
+cmd_update() {
+  local action="--check"
+  [ "$#" -gt 0 ] && action="$1"
+  case "${action}" in
+    --check)
+      ensure_project_dirs
+      local current latest now cache
+      current="$(current_version)"
+      latest="$(latest_remote_version || true)"
+      [ -z "${latest}" ] && { echo "[${PROG}] update: could not check latest version" >&2; return 1; }
+      now="$(date +%s)"
+      cache=".lattice/cache/update-check.env"
+      {
+        printf "checked_at=%s\n" "${now}"
+        printf "current_version=%q\n" "${current}"
+        printf "latest_version=%q\n" "${latest}"
+      } > "${cache}" 2>/dev/null || true
+      if version_newer "${latest}" "${current}"; then
+        echo "[${PROG}] update available: ${current} -> ${latest}"
+        echo "[${PROG}] run: lattice update --self"
+        return 1
+      fi
+      echo "[${PROG}] up to date: ${current}"
+      ;;
+    --self)
+      local updater="${SELF_DIR}/update.sh"
+      [ -f "${updater}" ] || die "update: missing ${updater}"
+      bash "${updater}"
+      ;;
+    --enable-auto)
+      cmd_config init >/dev/null
+      awk '
+        BEGIN { in_updates=0; done=0 }
+        /^updates:[[:space:]]*$/ { print; in_updates=1; next }
+        in_updates && /^[^[:space:]][^:]*:/ {
+          if (!done) { print "  mode: auto"; done=1 }
+          in_updates=0
+        }
+        in_updates && /^[[:space:]]+mode:/ { if (!done) { print "  mode: auto"; done=1 } ; next }
+        { print }
+        END { if (in_updates && !done) print "  mode: auto" }
+      ' .lattice/config.yml > .lattice/config.yml.tmp && mv .lattice/config.yml.tmp .lattice/config.yml
+      echo "[${PROG}] updates.mode=auto"
+      ;;
+    --disable-auto)
+      cmd_config init >/dev/null
+      awk '
+        BEGIN { in_updates=0; done=0 }
+        /^updates:[[:space:]]*$/ { print; in_updates=1; next }
+        in_updates && /^[^[:space:]][^:]*:/ {
+          if (!done) { print "  mode: notify"; done=1 }
+          in_updates=0
+        }
+        in_updates && /^[[:space:]]+mode:/ { if (!done) { print "  mode: notify"; done=1 } ; next }
+        { print }
+        END { if (in_updates && !done) print "  mode: notify" }
+      ' .lattice/config.yml > .lattice/config.yml.tmp && mv .lattice/config.yml.tmp .lattice/config.yml
+      echo "[${PROG}] updates.mode=notify"
+      ;;
+    *) die "update: usage: lattice update --check|--self|--enable-auto|--disable-auto" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# config — project-local Lattice config.
+# ---------------------------------------------------------------------------
+cmd_config() {
+  local action="${1:-}"
+  case "${action}" in
+    init)
+      mkdir -p .lattice
+      if [ -f .lattice/config.yml ]; then
+        echo "[${PROG}] config exists: .lattice/config.yml"
+        return 0
+      fi
+      cat > .lattice/config.yml <<'YML'
+usage:
+  enabled: true
+
+updates:
+  # notify | auto | pinned | off
+  mode: notify
+  channel: stable
+  check_interval_hours: 24
+  pinned_version:
+YML
+      echo "[${PROG}] wrote .lattice/config.yml"
+      ;;
+    show)
+      if [ -f .lattice/config.yml ]; then
+        cat .lattice/config.yml
+      else
+        echo "[${PROG}] no .lattice/config.yml (defaults: usage.enabled=true, updates.mode=notify)"
+      fi
+      ;;
+    *) die "config: usage: lattice config init|show" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -1151,6 +1584,11 @@ if [ "$#" -eq 0 ]; then
 fi
 
 sub="$1"; shift || true
+maybe_update_check "${sub}" || true
+case "${sub}" in
+  help|--help|-h|version|--version|-v) ;;
+  *) log_usage_event "${sub}" "$@" || true ;;
+esac
 case "${sub}" in
   close)              cmd_close "$@" ;;
   reopen)             cmd_reopen "$@" ;;
@@ -1167,6 +1605,9 @@ case "${sub}" in
   verify)             cmd_verify "$@" ;;
   ci-check)           cmd_ci_check "$@" ;;
   pr-body)            cmd_pr_body "$@" ;;
+  usage)              cmd_usage "$@" ;;
+  update)             cmd_update "$@" ;;
+  config)             cmd_config "$@" ;;
   validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
   sweep-id)           cmd_sweep_id ;;

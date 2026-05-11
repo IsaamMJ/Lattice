@@ -5,7 +5,7 @@
 
 _lattice_subcommands=(
   close reopen sync regenerate defer list ls show cat triage cluster
-  bulk-close handoff next timeline verify ci-check pr-body validate
+  bulk-close handoff next timeline verify ci-check pr-body usage update config validate
   sweeps sweep-id id-gen version help
 )
 
@@ -60,6 +60,15 @@ _lattice_complete() {
       ;;
     pr-body|timeline)
       COMPREPLY=( $(compgen -W "--since" -- "${cur}") )
+      ;;
+    usage)
+      COMPREPLY=( $(compgen -W "--since --unused --json" -- "${cur}") )
+      ;;
+    update)
+      COMPREPLY=( $(compgen -W "--check --self --enable-auto --disable-auto" -- "${cur}") )
+      ;;
+    config)
+      COMPREPLY=( $(compgen -W "init show" -- "${cur}") )
       ;;
     verify)
       COMPREPLY=( $(compgen -W "--run" -- "${cur}") )

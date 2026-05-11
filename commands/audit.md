@@ -131,9 +131,9 @@ False positives erode trust. When in doubt: UNVERIFIABLE, not DRIFT.
 
 **OK-finding discipline (v0.6.7+):** For every claim that verified cleanly, emit a `tier: OK` finding with `intentional_citation: <file:line>`. These are first-class output — knowing what was checked-and-clean prevents future sessions from re-raising the same false positives.
 
-### Step 8 — Write findings (v0.6 YAML schema)
+### Step 8 — Write findings (v0.7 YAML schema)
 
-Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
+Emit **one YAML file per finding** to `.lattice/findings/open/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
 
 For audit dimension, `<rule-slug>` should be a kebab-case description of the claim type, e.g. `missing-export-userservice`, `stale-route-spec`, `orphan-file-lumi-agent-service`.
 
@@ -217,7 +217,7 @@ Output the unified diff between the original doc and the proposed rewrite. **Do 
 
 ```
 Audit complete.
-Findings:  .lattice/findings/open/<sweep_date>/
+Findings:  .lattice/findings/open/
 Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
 Verdicts:  <n> OK, <n> DRIFT, <n> INTENTIONAL, <n> UNVERIFIABLE
 

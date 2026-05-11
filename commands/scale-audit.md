@@ -107,9 +107,9 @@ If the module's TTD has a Decision saying "uses setInterval — do NOT migrate" 
 
 **OK-finding discipline (v0.6.7+):** Emit `tier: OK` findings for patterns checked-and-found-safe (e.g. `OK-payments-rate-limiter-uses-valkey`, `OK-payments-cron-leader-elected`). These are first-class output — they prevent future audits from re-raising the same patterns and signal which scale risks have been deliberately addressed. Each OK requires `intentional_citation` per the schema.
 
-### Step 6 — Write findings (v0.6 YAML schema)
+### Step 6 — Write findings (v0.7 YAML schema)
 
-Emit **one YAML file per finding** to `.lattice/findings/open/<sweep-date>/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
+Emit **one YAML file per finding** to `.lattice/findings/open/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
 
 For scale dimension, `<rule-slug>` is a kebab-case pattern name: `setinterval-cron`, `in-memory-rate-limiter`, `local-file-write`, `unbounded-promise-all`, etc.
 
@@ -179,7 +179,7 @@ Output the findings file path + the verdict counts + the drafted checklist block
 
 ```
 Scale audit complete.
-Findings:  .lattice/findings/open/<sweep_date>/
+Findings:  .lattice/findings/open/
 Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
 Verdicts:  <n> BLOCKER, <n> RISK, <n> WATCH, <n> OK
 Skipped:   <n>

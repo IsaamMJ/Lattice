@@ -10,7 +10,7 @@
       "name": "lattice",
       "source": "./",
       "description": "Audit framework — doc-vs-code drift, scale risks, security exposures with file:line evidence, YAML-per-finding lifecycle.",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "category": "quality",
       "tags": ["audit", "documentation", "drift", "scale", "security"]
     }

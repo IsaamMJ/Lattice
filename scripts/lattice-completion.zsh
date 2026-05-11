@@ -50,6 +50,9 @@ _lattice() {
         'verify:print or run simulate: steps'
         'ci-check:exit 1 if any CRITICAL/BLOCKER finding is open'
         'pr-body:emit PR body section of closed findings'
+        'usage:summarize local command usage'
+        'update:check for or apply Lattice updates'
+        'config:create or show project-local config'
         'validate:scan every YAML for parse/schema errors'
         'sweeps:list sweep manifests'
         'sweep-id:generate a sweep ID'
@@ -92,6 +95,19 @@ _lattice() {
           _arguments '--tier[space-separated tiers to fail on]:tiers:' ;;
         pr-body|timeline)
           _arguments '--since[only include findings closed after this date]:date:' ;;
+        usage)
+          _arguments \
+            '--since[lookback window in days]:days:' \
+            '--unused[unused threshold in days]:days:' \
+            '--json[emit JSON]' ;;
+        update)
+          _arguments \
+            '--check[check latest version]' \
+            '--self[run installed updater]' \
+            '--enable-auto[set updates.mode auto]' \
+            '--disable-auto[set updates.mode notify]' ;;
+        config)
+          _arguments '1:action:(init show)' ;;
       esac
       ;;
   esac

@@ -2,6 +2,20 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-05-11
+
+Usage telemetry + project-aware update checks.
+
+### Added
+- **Repo-local usage analytics.** Every Lattice command appends a private event to `.lattice/usage/events.jsonl` unless disabled by `.lattice/config.yml`. Events record command name, flag shape, version, timestamp, and project basename; they do not record finding slugs or file paths.
+- **`lattice usage [--since <days>] [--unused <days>] [--json]`.** Reports most-used commands and candidates unused for a threshold window.
+- **Project config.** `lattice config init|show` manages `.lattice/config.yml` with `usage.enabled` and `updates.mode`.
+- **Update checks.** `lattice update --check|--self|--enable-auto|--disable-auto` checks the latest GitHub version, runs the installed updater on request, and can opt a project into automatic updates.
+- **Automatic update notices.** Projects with `.lattice/config.yml` and `updates.mode: notify` check at the configured interval and print a drift warning. `updates.mode: auto` runs `lattice update --self` when a newer stable version is available.
+
+### Hardened
+- v0.7 regression tests now cover usage logging, config creation, and update drift checks without requiring network access.
+
 ## [0.7.0] — 2026-05-11
 
 Major release. Flat finding layout, stable id algorithm, close-reason taxonomy, and six new CLI commands. Driven by real-use feedback from 36 findings / 29 closed / 8 commits on jiive Lumi.

@@ -223,12 +223,12 @@ for helper in lattice lattice-close.sh lattice-regenerate.sh lattice-reopen.sh; 
   fi
 done
 
-# --- 8. Schema doc declares v0.6 YAML format ---------------------------
-note "checking schema doc declares v0.6 YAML format"
+# --- 8. Schema doc declares v0.7 YAML format ---------------------------
+note "checking schema doc declares v0.7 YAML format"
 if grep -qE 'one YAML file per finding' "${ROOT}/docs/finding-schema.md" 2>/dev/null; then
-  ok "schema declares v0.6 YAML format"
+  ok "schema declares v0.7 YAML format"
 else
-  warn "docs/finding-schema.md does not declare 'one YAML file per finding' (v0.6 contract)"
+  warn "docs/finding-schema.md does not declare 'one YAML file per finding' (v0.7 contract)"
 fi
 
 # --- 8a. CLAUDE.md drift gate (v0.6.3) --------------------------------

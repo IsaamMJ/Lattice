@@ -24,14 +24,15 @@ curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/instal
 # 2. cd into the project you want to audit, then in Claude Code:
 /audit-sweep .
 
-# 3. Findings land in .lattice/findings/open/<sweep-date>/<TIER>-<module>-<rule>.yml
+# 3. Findings land in .lattice/findings/open/<TIER>-<module>-<rule>.yml
 
-# 4. Triage with the lattice CLI (v0.6.5+):
+# 4. Triage with the lattice CLI:
 ~/.claude/lattice/scripts/lattice list                    # see open findings
 ~/.claude/lattice/scripts/lattice show <id>               # inspect one
-~/.claude/lattice/scripts/lattice close <id> --commit HEAD
+~/.claude/lattice/scripts/lattice close <id> --reason fixed --commit HEAD
 ~/.claude/lattice/scripts/lattice defer <id> --until 2026-07-01 --reason "blocked on backend"
 ~/.claude/lattice/scripts/lattice sync                    # regenerate CLAUDE.md from YAML
+~/.claude/lattice/scripts/lattice usage                   # see local feature usage
 
 # (alias `lattice=~/.claude/lattice/scripts/lattice` in your shell rc to drop the path)
 ```
@@ -103,19 +104,42 @@ bash scripts/migrate.sh   # moves legacy findings to .lattice/findings/
 
 ---
 
-## Architecture (v0.6)
+## Architecture (v0.7)
 
 **Findings as a structured YAML database.** Each finding is one file:
-- Open: `.lattice/findings/open/<sweep-date>/<TIER>-<module>-<rule>.yml`
-- Closed: `.lattice/findings/closed/<commit-sha>/<TIER>-<module>-<rule>.yml`
+- Open: `.lattice/findings/open/<TIER>-<module>-<rule>.yml`
+- Closed: `.lattice/findings/closed/<TIER>-<module>-<rule>.yml`
 
-Status lives in the path. Operate via the `lattice` CLI: `lattice close <id> --commit <sha>`, `lattice reopen <id>`, `lattice defer <id> --until <date>`, `lattice list`, `lattice show <id>`, `lattice sync`. Run `lattice help` for the full surface. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
+Open/closed lives in the path; triage status and lifecycle details live in YAML fields. Operate via the `lattice` CLI: `lattice close <id> --reason fixed --commit <sha>`, `lattice reopen <id> --reason <text>`, `lattice defer <id> --until <date>`, `lattice list`, `lattice show <id>`, `lattice sync`. Run `lattice help` for the full surface. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
 
 **Module-scoped dispatch (from v0.5).** `/audit-sweep` sends one Sonnet sub-agent per module that runs all in-scope dimensions inline. A 5-module sweep = 5 dispatches (not 15). Anthropic prompt caching reuses the methodology library across module dispatches at ~90% discount.
 
 **Standalone.** Works without `oh-my-claudecode` — same methodology, same verdict quality, slightly more tokens.
 
 See `docs/finding-schema.md` for the YAML schema every skill conforms to.
+
+---
+
+## Usage tracking and updates
+
+Lattice keeps usage analytics local to each audited project. Command events are appended to `.lattice/usage/events.jsonl` and record command name, flag shape, timestamp, Lattice version, and project basename. They do not record finding slugs or file paths.
+
+```bash
+lattice usage
+lattice usage --since 30 --unused 90
+lattice usage --json
+```
+
+Project behavior is controlled by `.lattice/config.yml`:
+
+```bash
+lattice config init
+lattice config show
+lattice update --check
+lattice update --enable-auto   # opt this project into automatic updates
+```
+
+Default update mode is `notify` after config is initialized. Use `updates.mode: auto` for your own active projects, and `notify`, `pinned`, or `off` for client or production-sensitive repos.
 
 ---
 
@@ -148,11 +172,12 @@ See `docs/finding-schema.md` for the YAML schema every skill conforms to.
 - **v0.6.4.1** — installer/updater now ship `/flow-audit`; structural drift gate (validate.sh greps installer COMMANDS+SCRIPTS arrays against actual repo files); regen enforces dimension enum and dimension+tier required fields (security HIGH/CRITICAL needs OWASP, scale BLOCKER/RISK needs failure_mode, flow HIGH/CRITICAL needs impact); audit-sweep documents flow + coverage as opt-in dimensions
 - **v0.6.5** — `scripts/lattice` unified CLI dispatcher (`close`/`reopen`/`sync`/`defer`/`list`/`show`/`sweeps`/`version`/`help`); `defer_until` + `defer_reason` + `deferred_at` fields formalize v0.6.3's `status: deferred`; `lattice list --due-for-review` surfaces past-due deferred findings; installer/updater + validate.sh track the dispatcher
 - **v0.6.6** — bug fixes from first day of real use + two requested subcommands. `lattice show` resolves slug / `<module>/<rule>` / substring forms. `lattice list --module` does substring match. `lattice sync` / `--check` now use distinct exit codes (0=clean, 1=drift, 2=fatal). Dimension allowlist expanded to accept `configuration | quality | product`. New: `lattice triage` (interactive [c/d/s/e/v/q] walk) and `lattice bulk-close --pattern <glob>`
-- **v0.6.6.1** — same-day patch from v0.6.6 retest. `lattice sync` (no `--check`) now exits 2 on parse error (was relying on `set -e` propagation through the dispatcher function, unreliable on Git Bash). Legacy closed YAMLs without `closed_by_commit` no longer block sync — regen auto-derives the SHA from the `closed/<sha>/` parent dir when the field is missing
+- **v0.6.6.1** — same-day patch from v0.6.6 retest. `lattice sync` (no `--check`) now exits 2 on parse error (was relying on `set -e` propagation through the dispatcher function, unreliable on Git Bash). Legacy closed YAMLs without `closed_by_commit` no longer block sync — regen auto-derived the SHA from the legacy `closed/<sha>/` parent dir when the field was missing
 - **v0.6.6.2** — regenerated CLAUDE.md hint comment now points at the `lattice` CLI (`lattice help`) instead of the non-existent `scripts/lattice-close.sh` path. Distribution-bug fix from a flow-audit debrief.
 - **v0.6.6.3** — parser robustness from a heavy-use review. Strips leading UTF-8 BOM (PowerShell 5.1 cause), tolerates `---` document separator, line-1 errors include a fix hint. New `lattice validate` subcommand collects all per-file parse/schema errors instead of fail-fast.
 - **v0.6.7** — audit-skill rewrite. Killed the `.lattice/findings/sweep-<ts>.md` markdown summary (dual source of truth was the bug). New sweep manifest at `.lattice/findings/sweeps/<sweep_id>.yml` with `auditor_model` / `duration_ms` / `skipped` / `runtime_warnings[]`. New `lattice sweep-id` generates deterministic `<YYYYMMDD><6-hex>` IDs. `/flow-audit --scope a,b,c` for multi-module flows. New optional `relates_to: [slug, ...]` finding field. TTD-silent → code is ground truth; DRIFT only on explicit contradictions; OK-finding emission required.
-- **v0.7.0** (current) — major release from real-use feedback (36 findings / 29 closed / 8 commits on jiive Lumi). Flat layout (`open/<slug>.yml`, `closed/<slug>.yml`); stable `id:` algorithm SHA1(dim:rule:file:ctx)[:12] surviving line shifts; `close_reason:` enum + `closure_rationale:`; `cluster_root:` + `lattice cluster` BFS walk; `module_owner:` + `related_files:` fields; `lattice sync` groups CLAUDE.md by owner when set. Six new CLI commands: `handoff`, `next`, `timeline`, `verify`, `ci-check`, `pr-body`. Fuzzy match with interactive disambiguation; `show` prints all matches. Bash + zsh tab completion. `prepare-commit-msg` hook warns on open blockers. One-shot `migrate-v0.7.sh` migration script.
+- **v0.7.1** (current) — repo-local usage analytics (`lattice usage`), project config (`lattice config init|show`), and update checks/auto-update controls (`lattice update --check|--self|--enable-auto|--disable-auto`). Usage events stay local in `.lattice/usage/events.jsonl` and record command/flag shape, not finding slugs or file paths.
+- **v0.7.0** — major release from real-use feedback (36 findings / 29 closed / 8 commits on jiive Lumi). Flat layout (`open/<slug>.yml`, `closed/<slug>.yml`); stable `id:` algorithm SHA1(dim:rule:file:ctx)[:12] surviving line shifts; `close_reason:` enum + `closure_rationale:`; `cluster_root:` + `lattice cluster` BFS walk; `module_owner:` + `related_files:` fields; `lattice sync` groups CLAUDE.md by owner when set. Six new CLI commands: `handoff`, `next`, `timeline`, `verify`, `ci-check`, `pr-body`. Fuzzy match with interactive disambiguation; `show` prints all matches. Bash + zsh tab completion. `prepare-commit-msg` hook warns on open blockers. One-shot `migrate-v0.7.sh` migration script.
 - **v0.8** — cross-dimension dedupe by fingerprint + rule (one finding, one report); `Closes-Lattice: <id>` commit-message convention; bundle/related-finding linking; JSON Schema for finding YAML validation
 - **v1.0** — pre-push hook blocking on open CRITICAL, spec written after v0.8 real usage
 

@@ -103,7 +103,7 @@ Hard rules across all dimensions:
 - Never auto-apply fixes
 - Use Grep, Read, Glob — never Bash grep (Windows path issues)
 
-Write findings to .lattice/findings/open/<sweep-date>/ using the v0.6 YAML schema (docs/finding-schema.md).
+Write findings to .lattice/findings/open/ using the v0.7 YAML schema (docs/finding-schema.md).
 One YAML file per finding — never write monolithic markdown audit reports.
 Filename pattern: <TIER>-<module-slug>-<rule-slug>.yml
 Example: HIGH-payments-missing-rate-limit.yml
@@ -199,7 +199,7 @@ totals:
   OK: <n>
 
 # Slugs (basenames without .yml) of findings:
-opened: [<slug>, ...]              # new in this sweep (not present in any prior open/<date>/)
+opened: [<slug>, ...]              # new in this sweep (not present in any prior open/)
 unchanged: [<slug>, ...]           # already in open/, no fields changed
 closed_since_last: [<slug>, ...]   # were in open/ at sweep start, now in closed/
 regressed: [<slug>, ...]           # were in closed/ at sweep start, this sweep created same slug in open/
@@ -222,7 +222,7 @@ Scan all findings across all modules for repeated defect classes. Any pattern ap
 
 ### Step 5 — Regenerate CLAUDE.md checklist from YAML truth (v0.6)
 
-After all module dispatches complete, the `.lattice/findings/open/<sweep-date>/` directory contains one YAML file per finding (per the v0.6 schema in `docs/finding-schema.md`). The CLAUDE.md checklist is now a **read-only view** of this YAML truth.
+After all module dispatches complete, the `.lattice/findings/open/` directory contains one YAML file per finding (per the v0.7 schema in `docs/finding-schema.md`). The CLAUDE.md checklist is now a **read-only view** of this YAML truth.
 
 Run the regenerator via the dispatcher:
 ```
