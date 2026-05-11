@@ -129,6 +129,8 @@ sweep_id: <id from Step 1>           # MUST embed this in every YAML you write
 sweep_date: <YYYY-MM-DD>             # MUST embed this in every YAML you write
 ```
 
+**Finding id (v0.7):** Generate the `id:` field via `lattice id-gen <dimension> <rule> <file> "<line_content>"` where `<line_content>` is the exact source text of the flagged line, whitespace-collapsed. Do NOT include the line number in the hash — the id must survive line shifts.
+
 **OK-finding discipline (v0.6.7+):** Each per-module dispatch MUST explicitly enumerate the patterns it checked-and-found-clean as `OK` findings — these are first-class output, not a side-effect. Two of the most useful 2026-05-09 findings on jiive Lumi were `OK-payments-credit-pack-branch-clean` and `OK-payments-dedup-key-stable`; knowing what was verified clean changed how the rest were triaged. Subagent prompts must list "what was checked but is fine" with the same `file:line` discipline as DRIFT/CRITICAL findings.
 
 **DRIFT threshold (audit dimension only, v0.6.7+):** DRIFT is reserved for **explicit contradictions** between TTD and code that grep can verify both sides of. Specifically:

@@ -75,8 +75,11 @@ The slug is the **stable ID** — a finding for the same rule + same module on a
 ## YAML schema (one finding)
 
 ```yaml
-# Identity
-id: <stable hash — sha1(rule + module + file + line) truncated 12 chars>
+# Identity (v0.7: survives line shifts — line number excluded from hash)
+# Algorithm: sha1(dimension + ":" + rule + ":" + file + ":" + code_context_normalized)[:12]
+# code_context_normalized = the finding's flagged source line, whitespace-collapsed.
+# Generate via: lattice id-gen <dimension> <rule> <file> "<code_context>"
+id: <12-char hex>
 rule: <kebab-case rule slug, matches filename>
 dimension: audit | scale | security | flow | coverage | configuration | quality | product
 # flow + coverage added v0.6.4; configuration + quality + product added v0.6.5.1

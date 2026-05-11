@@ -47,6 +47,7 @@ Usage:
   lattice validate
   lattice sweeps
   lattice sweep-id
+  lattice id-gen <dimension> <rule> <file> <code_context>
   lattice version
   lattice help
 
@@ -551,6 +552,32 @@ cmd_bulk_close() {
 }
 
 # ---------------------------------------------------------------------------
+# id-gen — compute stable v0.7 finding id from dimension, rule, file, code_context.
+# Usage: lattice id-gen <dimension> <rule> <file> <code_context...>
+# Algorithm: sha1(dimension:rule:file:code_context_normalized)[:12]
+# The id survives line shifts because no line number is included in the hash.
+# ---------------------------------------------------------------------------
+cmd_id_gen() {
+  [ "$#" -ge 4 ] || die "id-gen: usage: lattice id-gen <dimension> <rule> <file> <code_context>"
+  local dimension="$1" rule="$2" file="$3"
+  shift 3
+  local code_context="$*"
+  # Normalize: collapse all whitespace runs to single space, strip leading/trailing
+  local normalized
+  normalized="$(printf '%s' "${code_context}" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+  local input="${dimension}:${rule}:${file}:${normalized}"
+  local hash
+  if command -v sha1sum >/dev/null 2>&1; then
+    hash="$(printf '%s' "${input}" | sha1sum | cut -c1-12)"
+  elif command -v shasum >/dev/null 2>&1; then
+    hash="$(printf '%s' "${input}" | shasum -a 1 | cut -c1-12)"
+  else
+    die "id-gen: sha1sum or shasum is required but not found"
+  fi
+  printf '%s\n' "${hash}"
+}
+
+# ---------------------------------------------------------------------------
 # sweep-id — emit <YYYYMMDD><6-hex>. Used by audit skills to tag findings
 # and the sweep manifest with a stable, sortable, collision-resistant ID.
 # ---------------------------------------------------------------------------
@@ -605,6 +632,7 @@ case "${sub}" in
   validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
   sweep-id)           cmd_sweep_id ;;
+  id-gen)             cmd_id_gen "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;
