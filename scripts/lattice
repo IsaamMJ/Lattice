@@ -278,6 +278,8 @@ cmd_list() {
       *) die "list: unknown arg: $1" ;;
     esac
   done
+  # Normalize "partial" alias → "in_progress" (B2)
+  [ "${filter_status}" = "partial" ] && filter_status="in_progress"
 
   [ -d ".lattice/findings/open" ] || { echo "[${PROG}] no .lattice/findings/open/ in cwd" >&2; return 0; }
 
