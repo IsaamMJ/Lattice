@@ -454,7 +454,10 @@ yaml_field() {
   local line
   line=$(grep -E "^${key}[[:space:]]*:" "${file}" 2>/dev/null | head -n1 || true)
   [ -z "${line}" ] && return 0
-  printf '%s' "${line}" | sed -E "s/^${key}[[:space:]]*:[[:space:]]*//; s/^\"//; s/\"$//; s/^'//; s/'$//"
+  # Strip quotes only when they wrap the entire value (matched pair). Previous
+  # form stripped a trailing " independently of a leading one, which truncated
+  # titles like: `code points at "lattice help"` to `code points at "lattice help`.
+  printf '%s' "${line}" | sed -E "s/^${key}[[:space:]]*:[[:space:]]*//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
 }
 
 # ---------------------------------------------------------------------------

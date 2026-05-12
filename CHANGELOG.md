@@ -2,6 +2,22 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] — 2026-05-12
+
+Schema-doc self-audit + handoff bug found via Haiku dogfood loop.
+
+### Dogfooded
+- Ran `/audit docs/finding-schema.md` on Lattice itself.
+- 3 DRIFTs surfaced + 1 OK; all 3 DRIFTs auto-fixed by Haiku subagent via `lattice handoff <id>` brief → Agent dispatch → independent verify → close cycle. Each fix: ~9s, ~35K tokens, 2 tool uses (Read + Edit). 3-for-3 clean on single-line PATCH_DOC fixes.
+
+### Fixed — docs/finding-schema.md
+- Title updated from "(v0.6 / v0.6.3 / v0.6.4)" → "(v0.7+)" (doc body already covered v0.7 fields)
+- Regenerated CLAUDE.md preamble marker reference: `scripts/lattice-close.sh` → `\`lattice help\`` (the actual emitted text since v0.6.6.2)
+- "Open findings (<count> total)" → "Open findings (<count> actionable)" (code has emitted "actionable" for several minor versions)
+
+### Fixed — `lattice handoff` truncation
+- `yaml_field` was stripping a trailing `"` independently of a leading `"`, truncating any field value that ended in a double-quoted phrase. A title like `code points at "lattice help"` became `code points at "lattice help`. Now strips only matched-pair quotes via `s/^"(.*)"$/\1/`.
+
 ## [0.7.2] — 2026-05-11
 
 Self-audit pass. `/audit` was run against Lattice's own README + scripts. Two P0 bugs and two HIGH bugs surfaced; all four fixed before tag.

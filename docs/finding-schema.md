@@ -1,4 +1,4 @@
-# Lattice finding schema (v0.6 / v0.6.3 / v0.6.4)
+# Lattice finding schema (v0.7+)
 
 **Breaking change from v0.5:** findings are now one YAML file per finding (not one Markdown file per audit). Status lives in the file path AND in a `status:` field (added v0.6.3). CLAUDE.md is regenerated from YAML, not authored by hand — and v0.6.3 adds a CI check that enforces this.
 
@@ -205,9 +205,9 @@ CLAUDE.md is a **read-only view** of the YAML truth. Authored by `scripts/lattic
 ```markdown
 <!-- lattice:checklist:start -->
 <!-- Generated <ISO timestamp> from sweep <sweep_id> — DO NOT EDIT BY HAND -->
-<!-- Source of truth: .lattice/findings/open/ — to triage, run scripts/lattice-close.sh -->
+<!-- Source of truth: .lattice/findings/open/ — to triage, run `lattice help` (CLI installed via Lattice's install.sh) -->
 
-## Open findings (<count> total)
+## Open findings (<count> actionable)
 
 ### CRITICAL (<n>)
 - [ ] `<module>` / `<rule>` — `<file>:<line>` — fix: `<fix>` — `.lattice/findings/open/CRITICAL-<module>-<rule>.yml`
