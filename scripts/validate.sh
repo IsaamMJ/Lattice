@@ -259,6 +259,31 @@ else
   warn "missing scripts/test-lifecycle.sh (lifecycle protection layer)"
 fi
 
+# --- 10. Self-audit gate (v0.7.2+) -------------------------------------
+# Refuse to validate if Lattice has open CRITICAL/HIGH findings against
+# itself. Run `/audit README.md` (or any /audit invocation pointed at
+# Lattice's own code) to populate .lattice/findings/open/; any tier
+# CRITICAL or HIGH there blocks the release.
+note "self-audit gate (v0.7.2+)"
+fail_findings=()
+if [ -d "${ROOT}/.lattice/findings/open" ]; then
+  shopt -s nullglob
+  for f in "${ROOT}/.lattice/findings/open"/*.yml; do
+    if grep -qE '^tier:[[:space:]]*(CRITICAL|HIGH)([[:space:]]|$)' "${f}" 2>/dev/null; then
+      fail_findings+=("${f}")
+    fi
+  done
+fi
+if [ "${#fail_findings[@]}" -gt 0 ]; then
+  warn "self-audit gate: open CRITICAL/HIGH findings against Lattice:"
+  for f in "${fail_findings[@]}"; do
+    printf "[validate]   %s\n" "${f}" >&2
+  done
+  printf "[validate]   close or downgrade before tagging: lattice list\n" >&2
+else
+  ok "self-audit gate clean"
+fi
+
 # --- Result ------------------------------------------------------------
 if [ "${fail}" -ne 0 ]; then
   printf "[validate] FAILED\n" >&2
