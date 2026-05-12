@@ -116,7 +116,7 @@ For scale dimension, `<rule-slug>` is a kebab-case pattern name: `setinterval-cr
 YAML body per finding (scale dimension):
 
 ```yaml
-id: <12-char hash of rule + module + file + line>
+id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via `lattice id-gen`>
 rule: <kebab-case pattern slug>
 dimension: scale
 tier: BLOCKER | RISK | WATCH | OK
@@ -126,7 +126,7 @@ line: <integer>
 title: <one-line risk summary>
 fix: <one-sentence recommended migration>
 sweep_date: <YYYY-MM-DD>
-sweep_id: <12-char hex>
+sweep_id: <14-char: YYYYMMDD + 6-hex, generate via `lattice sweep-id`>
 auditor: claude-code/scale-audit
 # Required if tier in [BLOCKER, RISK]:
 failure_mode: <one sentence — what breaks at instance #2>

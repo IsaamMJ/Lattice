@@ -172,7 +172,7 @@ For security dimension, `<rule-slug>` is a kebab-case pattern name: `webhook-tim
 YAML body per finding (security dimension):
 
 ```yaml
-id: <12-char hash of rule + module + file + line>
+id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via `lattice id-gen`>
 rule: <kebab-case pattern slug>
 dimension: security
 tier: CRITICAL | HIGH | MEDIUM | LOW | OK
@@ -182,7 +182,7 @@ line: <integer>
 title: <one-line risk summary>
 fix: <one-sentence recommended remediation>
 sweep_date: <YYYY-MM-DD>
-sweep_id: <12-char hex>
+sweep_id: <14-char: YYYYMMDD + 6-hex, generate via `lattice sweep-id`>
 auditor: claude-code/security-audit
 # Required if tier in [CRITICAL, HIGH]:
 owasp: A01..A10

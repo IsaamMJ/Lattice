@@ -140,7 +140,7 @@ For audit dimension, `<rule-slug>` should be a kebab-case description of the cla
 YAML body per finding (audit dimension):
 
 ```yaml
-id: <12-char hash of rule + module + file + line>
+id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via `lattice id-gen`>
 rule: <kebab-case rule slug>
 dimension: audit
 tier: DRIFT | INTENTIONAL | OK | UNVERIFIABLE
@@ -150,7 +150,7 @@ line: <integer>
 title: <one-line summary>
 fix: PATCH_DOC | NO_ACTION | NEEDS_HUMAN <details>
 sweep_date: <YYYY-MM-DD>
-sweep_id: <12-char hex>
+sweep_id: <14-char: YYYYMMDD + 6-hex, generate via `lattice sweep-id`>
 auditor: claude-code/audit
 # Required if tier=INTENTIONAL:
 intentional_citation: <commit-hash or CLAUDE.md:line>

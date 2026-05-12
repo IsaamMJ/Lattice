@@ -174,7 +174,7 @@ For flow dimension, `<rule-slug>` is a kebab-case pattern name: `happy-path-inco
 YAML body per finding (flow dimension):
 
 ```yaml
-id: <12-char hash of rule + module + file + line>
+id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via `lattice id-gen`>
 rule: <kebab-case pattern slug>
 dimension: flow
 tier: CRITICAL | HIGH | MEDIUM | LOW | OK
@@ -184,7 +184,7 @@ line: <integer>
 title: <one-line gap summary>
 fix: <one-sentence recommended fix>
 sweep_date: <YYYY-MM-DD>
-sweep_id: <12-char hex>
+sweep_id: <14-char: YYYYMMDD + 6-hex, generate via `lattice sweep-id`>
 auditor: claude-code/flow-audit
 status: open
 # Required if tier in [CRITICAL, HIGH]:

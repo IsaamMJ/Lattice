@@ -2,6 +2,35 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] — 2026-05-12
+
+Parallel `/lattice-fix` scale test + cross-file drift sweep across all 4 audit skills.
+
+### Fixed (all auto-applied by Haiku via parallel `/lattice-fix` dispatch)
+Identical drift in YAML examples of all four audit skills — pre-v0.7 `id:` algorithm and stale `sweep_id` length annotation:
+
+- `commands/audit.md` L143, L153 (v0.7.4 dogfood)
+- `commands/scale-audit.md` L119, L129
+- `commands/security-audit.md` L175, L185
+- `commands/flow-audit.md` L177, L187
+
+Old: `id: <12-char hash of rule + module + file + line>` (pre-v0.7; included line)
+New: `id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via \`lattice id-gen\`>` (v0.7 — excludes line so id survives line shifts)
+
+Old: `sweep_id: <12-char hex>`
+New: `sweep_id: <14-char: YYYYMMDD + 6-hex, generate via \`lattice sweep-id\`>` (matches actual `lattice sweep-id` output)
+
+### Scale-tested
+- 6 Haiku subagents dispatched in parallel across 3 files / 6 lines simultaneously. All 6 produced correct edits, all 6 verified independently, all 6 closed.
+- Tokens per agent: 35-42K. Time per agent: 9-22s. Higher tool-use counts (3-5 vs 2) when the agent had to search for content — `old_string` content-match recovered even when auditor line numbers were off by ±5.
+
+### Brief-template learning captured (`.lattice/handoff-feedback/_brief-template-notes.md`)
+- Line numbers in finding YAML are hints, not truth — Haiku should match on `old_string` content and abort if non-unique.
+- No `simulate:` steps means Haiku can't self-verify — orchestrator independence is mandatory.
+
+### Cumulative Haiku dogfood (v0.7.3 → v0.7.5)
+12-for-12 clean on single-line PATCH_DOC fixes across `docs/finding-schema.md`, `commands/audit-sweep.md`, `commands/audit.md`, `commands/scale-audit.md`, `commands/security-audit.md`, `commands/flow-audit.md`. ~$0.05 total Haiku cost.
+
 ## [0.7.4] — 2026-05-12
 
 First auto-fix lane shipped.
