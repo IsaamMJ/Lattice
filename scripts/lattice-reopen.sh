@@ -94,9 +94,23 @@ if [[ "${SRC}" == .lattice/findings/closed/*/* ]]; then
   rmdir "$(dirname "${SRC}")" 2>/dev/null || true
 fi
 
-# Strip closed lifecycle fields + any prior status/reopen tracking, then append canonical reopen block.
+# Strip closed lifecycle fields + close_reason + closure_rationale (with its
+# block-scalar continuation) + prior reopen tracking. The grep-only form missed
+# close_reason / closure_rationale and orphaned indented continuation lines
+# after a stripped `closure_rationale: |`, corrupting subsequent sync.
 tmp="$(mktemp)"
-grep -v -E '^(closed_at|closed_by_commit|closed_by_pr|status|previously_closed_in|reopen_reason|reopened_at)[[:space:]]*:|^# Lifecycle \(set by lattice-close\.sh\)$|^# Reopen \(set by lattice-reopen\.sh\)$' "${DEST}" > "${tmp}" || true
+awk '
+  BEGIN { skip_block=0 }
+  /^(closure_rationale|remaining)[[:space:]]*:[[:space:]]*[|>]/ { skip_block=1; next }
+  skip_block && /^[[:space:]]/ { next }
+  skip_block && /^$/ { next }
+  skip_block { skip_block=0 }
+  /^(closed_at|closed_by_commit|closed_by_pr|close_reason|closure_rationale|status|partial_commits|remaining|previously_closed_in|reopen_reason|reopened_at)[[:space:]]*:/ { next }
+  /^# Lifecycle \(set by lattice-close\.sh\)$/ { next }
+  /^# Triage \(set by lattice-close\.sh --partial\)$/ { next }
+  /^# Reopen \(set by lattice-reopen\.sh\)$/ { next }
+  { print }
+' "${DEST}" > "${tmp}"
 mv "${tmp}" "${DEST}"
 
 {

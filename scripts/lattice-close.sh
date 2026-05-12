@@ -51,6 +51,13 @@ fi
 FIND="$1"
 shift
 
+# Reject empty / whitespace-only id (v0.7.2 — empty substring used to match all)
+if [ -z "${FIND// }" ]; then
+  echo "[lattice-close] error: <finding-id> is required (empty arg)" >&2
+  usage
+  exit 2
+fi
+
 COMMIT=""
 PR=""
 PARTIAL=""
@@ -119,10 +126,14 @@ case "${REASON}" in
   *) echo "[lattice-close] error: invalid reason '${REASON}'. Valid: fixed|false-positive|wont-fix|out-of-scope|duplicate" >&2; exit 2 ;;
 esac
 
-# v0.6.3: normalize to 7-char short SHA
+# v0.7.2: resolve --commit through git rev-parse so HEAD, branch names, tags,
+# and short SHAs all work uniformly (README quickstart promises `--commit HEAD`).
+if RESOLVED="$(git rev-parse --short "${COMMIT}" 2>/dev/null)"; then
+  COMMIT="${RESOLVED}"
+fi
 SHORT_SHA="${COMMIT:0:7}"
 if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]; then
-  echo "[lattice-close] error: --commit must be a hex SHA (got: ${COMMIT})" >&2
+  echo "[lattice-close] error: --commit must be a git ref or hex SHA (got: ${COMMIT})" >&2
   exit 2
 fi
 COMMIT="${SHORT_SHA}"
@@ -226,9 +237,22 @@ fi
 
 mv "${SRC}" "${DEST}"
 
-# Strip stale lifecycle/triage lines, append canonical close block.
+# Strip stale lifecycle/triage/reopen lines including block-scalar continuations
+# (v0.7.2 — without awk state machine, indented block-scalar lines after a
+# stripped `closure_rationale: |` were orphaned, corrupting the YAML).
 tmp="$(mktemp)"
-grep -v -E '^(status|partial_commits|remaining|closed_at|closed_by_commit|closed_by_pr|close_reason|closure_rationale)[[:space:]]*:|^# Lifecycle \(set by lattice-close\.sh\)$|^# Triage \(set by lattice-close\.sh --partial\)$' "${DEST}" > "${tmp}" || true
+awk '
+  BEGIN { skip_block=0 }
+  /^(closure_rationale|remaining)[[:space:]]*:[[:space:]]*[|>]/ { skip_block=1; next }
+  skip_block && /^[[:space:]]/ { next }
+  skip_block && /^$/ { next }
+  skip_block { skip_block=0 }
+  /^(status|partial_commits|remaining|closed_at|closed_by_commit|closed_by_pr|close_reason|closure_rationale|previously_closed_in|reopened_at|reopen_reason)[[:space:]]*:/ { next }
+  /^# Lifecycle \(set by lattice-close\.sh\)$/ { next }
+  /^# Triage \(set by lattice-close\.sh --partial\)$/ { next }
+  /^# Reopen \(set by lattice-reopen\.sh\)$/ { next }
+  { print }
+' "${DEST}" > "${tmp}"
 mv "${tmp}" "${DEST}"
 
 {

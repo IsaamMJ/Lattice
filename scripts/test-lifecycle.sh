@@ -181,6 +181,65 @@ else
   fi
 fi
 
+note "Test 12: close \"\" rejects empty id (data-loss guard)"
+new_fixture t12
+write_yaml .lattice/findings/open/LOW-empty-arg.yml empty-arg LOW
+if "${LATTICE}" close "" --reason fixed --commit abcdef1 >/tmp/lattice-t12.out 2>&1; then
+  fail "close with empty id should not succeed"
+else
+  if [ -f .lattice/findings/open/LOW-empty-arg.yml ] && grep -q "empty arg\|is required" /tmp/lattice-t12.out; then
+    ok "close empty id rejected, finding preserved"
+  else
+    fail "empty close did not surface error or destroyed finding: $(cat /tmp/lattice-t12.out)"
+  fi
+fi
+
+note "Test 13: close --commit HEAD resolves through git rev-parse"
+new_fixture t13
+write_yaml .lattice/findings/open/LOW-head-ref.yml head-ref LOW
+if "${LATTICE}" close LOW-head-ref --reason fixed --commit HEAD >/tmp/lattice-t13.out 2>&1; then
+  if [ -f .lattice/findings/closed/LOW-head-ref.yml ] && grep -qE "^closed_by_commit: [0-9a-f]{7}$" .lattice/findings/closed/LOW-head-ref.yml; then
+    ok "close --commit HEAD resolves to short SHA"
+  else
+    fail "close HEAD succeeded but YAML lacks short SHA"
+  fi
+else
+  fail "close --commit HEAD rejected: $(cat /tmp/lattice-t13.out)"
+fi
+
+note "Test 14: close -> reopen -> close cycle with multi-line rationale keeps sync clean"
+new_fixture t14
+write_yaml .lattice/findings/open/MEDIUM-cycle.yml cycle MEDIUM
+"${LATTICE}" close MEDIUM-cycle --reason wont-fix --rationale "$(printf 'line one\nline two: with colons')" --commit abcdef1 >/dev/null
+"${LATTICE}" reopen MEDIUM-cycle --reason "regression test" >/dev/null
+# Open YAML must NOT carry close lifecycle fields anymore
+if grep -qE '^(close_reason|closure_rationale|closed_at|closed_by_commit)[[:space:]]*:' .lattice/findings/open/MEDIUM-cycle.yml; then
+  fail "reopen left close lifecycle fields in open/ YAML"
+fi
+"${LATTICE}" close MEDIUM-cycle --reason fixed --commit fedcba1 >/dev/null
+if "${LATTICE}" validate >/tmp/lattice-t14.out 2>&1; then
+  ok "close -> reopen -> close YAML stays parseable"
+else
+  fail "validate failed after cycle: $(cat /tmp/lattice-t14.out)"
+fi
+
+note "Test 15: usage --global aggregates across projects"
+new_fixture t15
+# Force a clean global to avoid contamination from real local usage
+export HOME="${ROOT_TMP}/t15-home"
+mkdir -p "${HOME}/.claude/lattice/usage"
+write_yaml .lattice/findings/open/LOW-global.yml global LOW
+"${LATTICE}" list >/dev/null
+"${LATTICE}" show LOW-global >/dev/null
+if [ -f "${HOME}/.claude/lattice/usage/global.jsonl" ] \
+   && "${LATTICE}" usage --global --json | grep -q '"command": "show"'; then
+  ok "global usage aggregates across projects"
+else
+  fail "global usage aggregate missing or empty"
+fi
+unset HOME
+export HOME="$(cd ~ && pwd)"
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

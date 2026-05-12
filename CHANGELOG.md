@@ -2,6 +2,26 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — 2026-05-11
+
+Self-audit pass. `/audit` was run against Lattice's own README + scripts. Two P0 bugs and two HIGH bugs surfaced; all four fixed before tag.
+
+### Fixed — P0 / data integrity
+- **`lattice close ""` no longer silently destroys data.** The empty-string substring matcher was closing the first-sorting open finding without prompt or error. A scripted invocation with an unset `$ID` would quietly destroy work. `lattice-close.sh` now rejects empty / whitespace-only `<id>` at top of validation.
+- **`close → reopen → close` cycle no longer corrupts YAML.** `lattice-reopen.sh` was only stripping a subset of close lifecycle fields and never handled `closure_rationale: |` block-scalar continuation, orphaning indented lines into the open YAML. A subsequent close then appended a second lifecycle block. After one cycle, every `lattice sync` failed with "malformed YAML at line N". The strip logic in both `lattice-reopen.sh` and `lattice-close.sh` is now an awk state machine that handles block-scalar continuations correctly.
+
+### Fixed — HIGH
+- **`lattice close --commit HEAD` now works** (README quickstart promise). The hex-SHA regex was rejecting all git ref forms; `--commit` is now resolved through `git rev-parse --short` first, so `HEAD`, branch names, tags, and short SHAs all work uniformly.
+- **`lattice-reopen.sh` strips `close_reason` and `closure_rationale`** when moving a finding back to open/. Previously the open YAML stayed internally inconsistent (directory says open, body says `closed_at: ...`).
+
+### Added — global usage aggregate
+- Every `lattice` invocation now also appends to `~/.claude/lattice/usage/global.jsonl` (in addition to the per-project `.lattice/usage/events.jsonl`). This is the maintainer dashboard data — **deliberately not surfaced into client Claude sessions**.
+- `lattice usage --global` reads the global aggregate. Use it to decide what to deprecate across all projects you've used Lattice in.
+- Opt out of global logging with `usage.global: false` in `.lattice/config.yml` (the local log respects the existing `usage.enabled` toggle).
+
+### Hardened — regression tests
+- `test-lifecycle.sh` grows from 11 → 15 tests covering: close empty id, `--commit HEAD` resolution, full close→reopen→close cycle stays sync-clean, global usage aggregation.
+
 ## [0.7.1] - 2026-05-11
 
 Usage telemetry + project-aware update checks.

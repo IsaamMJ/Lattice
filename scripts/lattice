@@ -181,11 +181,13 @@ log_usage_event() {
     false|off|0|no) return 0 ;;
   esac
   ensure_project_dirs
-  local ts ver shape project
+  local ts ver shape project cwd
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   ver="$(current_version)"
   shape="$(args_shape "$@")"
   project="$(basename "$(pwd)")"
+  cwd="$(pwd)"
+  # Local per-project log (debug-friendly, gitignored)
   {
     printf '{"ts":"%s","version":"%s","command":"%s","args_shape":"%s","project":"%s"}\n' \
       "$(json_escape "${ts}")" \
@@ -194,6 +196,25 @@ log_usage_event() {
       "$(json_escape "${shape}")" \
       "$(json_escape "${project}")"
   } >> ".lattice/usage/events.jsonl" 2>/dev/null || true
+  # Global aggregate (v0.7.2): every invocation across every project. This is
+  # the maintainer dashboard data — NOT surfaced into client Claude sessions.
+  # Disabled by setting usage.global=false in .lattice/config.yml.
+  local global_enabled
+  global_enabled="$(config_get usage global true)"
+  case "${global_enabled}" in
+    false|off|0|no) return 0 ;;
+  esac
+  local global_dir="${HOME}/.claude/lattice/usage"
+  mkdir -p "${global_dir}" 2>/dev/null || true
+  {
+    printf '{"ts":"%s","version":"%s","command":"%s","args_shape":"%s","project":"%s","cwd":"%s"}\n' \
+      "$(json_escape "${ts}")" \
+      "$(json_escape "${ver}")" \
+      "$(json_escape "${command}")" \
+      "$(json_escape "${shape}")" \
+      "$(json_escape "${project}")" \
+      "$(json_escape "${cwd}")"
+  } >> "${global_dir}/global.jsonl" 2>/dev/null || true
 }
 
 latest_remote_version() {
@@ -442,6 +463,9 @@ yaml_field() {
 cmd_close() {
   require_helper "${HELPER_CLOSE}"
   [ "$#" -ge 1 ] || die "close: usage: lattice close <id> --reason <reason> [--commit <sha>] [--pr <num>] [--partial <text>]"
+  # Guard against empty <id> (Git Bash strips "" between bash→bash invocations,
+  # so the helper alone is not sufficient; substring-matcher otherwise hits all).
+  [ -z "${1// }" ] && die "close: <finding-id> is required (empty arg)"
   local find_id="$1"; shift
   local matches=() src
   while IFS= read -r line; do
@@ -487,6 +511,10 @@ cmd_close() {
 # ---------------------------------------------------------------------------
 cmd_reopen() {
   require_helper "${HELPER_REOPEN}"
+  if [ "$#" -eq 0 ] || [ -z "${1// }" ]; then
+    echo "[${PROG}] error: reopen: <finding-id> is required" >&2
+    return 2
+  fi
   local rc=0
   bash "${HELPER_REOPEN}" "$@" || rc=$?
   return "${rc}"
@@ -1377,25 +1405,32 @@ cmd_pr_body() {
 # usage — summarize repo-local command usage events.
 # ---------------------------------------------------------------------------
 cmd_usage() {
-  local since_days=30 unused_days=90 json=0
+  local since_days=30 unused_days=90 json=0 global_mode=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --since)  [ -z "${2:-}" ] && die "usage: --since requires days"; since_days="$2"; shift 2 ;;
       --unused) [ -z "${2:-}" ] && die "usage: --unused requires days"; unused_days="$2"; shift 2 ;;
       --json)   json=1; shift ;;
+      --global) global_mode=1; shift ;;
       *) die "usage: unknown arg: $1" ;;
     esac
   done
   [[ "${since_days}" =~ ^[0-9]+$ ]] || die "usage: --since must be a day count"
   [[ "${unused_days}" =~ ^[0-9]+$ ]] || die "usage: --unused must be a day count"
 
-  local events=".lattice/usage/events.jsonl"
+  local events
+  if [ "${global_mode}" -eq 1 ]; then
+    events="${HOME}/.claude/lattice/usage/global.jsonl"
+  else
+    events=".lattice/usage/events.jsonl"
+  fi
   if [ ! -f "${events}" ]; then
     if [ "${json}" -eq 1 ]; then
       echo '{"events":0,"commands":[],"unused":[]}'
     else
       echo "[${PROG}] usage: no events yet (${events})"
-      echo "[${PROG}] usage logging is local and controlled by .lattice/config.yml"
+      [ "${global_mode}" -eq 0 ] && echo "[${PROG}] usage logging is local and controlled by .lattice/config.yml"
+      [ "${global_mode}" -eq 1 ] && echo "[${PROG}] global aggregate is at ${events} — populated as you run lattice across projects"
     fi
     return 0
   fi
