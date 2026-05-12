@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
-COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit")
+COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix")
 SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
@@ -63,7 +63,7 @@ echo ""
 echo "[lattice] restart Claude Code to load commands, then try:"
 echo "[lattice]   /audit-sweep ."
 echo ""
-echo "[lattice] CLI dispatcher (v0.7.3) installed at:"
+echo "[lattice] CLI dispatcher (v0.7.4) installed at:"
 echo "[lattice]   ${SCRIPT_DEST}/lattice"
 echo ""
 echo "[lattice] add to PATH (one-time, copy whichever fits your shell):"

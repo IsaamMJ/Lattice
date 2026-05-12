@@ -2,15 +2,16 @@
 
 > **Audit framework for keeping docs aligned with code.** Doc-vs-code drift, scale risks, security exposures — every finding grounded in a `file:line` citation.
 
-Lattice ships five slash commands for Claude Code:
+Lattice ships six slash commands for Claude Code:
 
-| Command | Catches |
+| Command | Does |
 |---|---|
 | `/audit <doc-path>` | Doc-vs-code drift; rewrites docs in contract format |
 | `/scale-audit <module-path>` | Horizontal-scaling killers (in-memory state, `setInterval` crons, in-process rate limiters) |
 | `/security-audit <module-path>` | Auth gaps, signature bypass, secret leaks, IDOR, OWASP Top 10 |
 | `/flow-audit <module-path>` | Customer-flow gaps for conversational AI and multi-step request flows |
 | `/audit-sweep <project-root>` | Runs the in-scope dimensions across every module via one dispatch per module; aggregates into one manifest |
+| `/lattice-fix <finding-id>` | Auto-fixes one low-risk PATCH_DOC finding by dispatching a Haiku subagent, verifying, closing — gated against CRITICAL/HIGH/BLOCKER, security, and cluster findings |
 
 Every finding cites a file and line. Every verdict requires evidence. Audits stop at human-approval gates — Lattice never auto-applies fixes or auto-commits.
 
@@ -177,7 +178,8 @@ Default update mode is `notify` after config is initialized. Use `updates.mode: 
 - **v0.6.6.2** — regenerated CLAUDE.md hint comment now points at the `lattice` CLI (`lattice help`) instead of the non-existent `scripts/lattice-close.sh` path. Distribution-bug fix from a flow-audit debrief.
 - **v0.6.6.3** — parser robustness from a heavy-use review. Strips leading UTF-8 BOM (PowerShell 5.1 cause), tolerates `---` document separator, line-1 errors include a fix hint. New `lattice validate` subcommand collects all per-file parse/schema errors instead of fail-fast.
 - **v0.6.7** — audit-skill rewrite. Killed the `.lattice/findings/sweep-<ts>.md` markdown summary (dual source of truth was the bug). New sweep manifest at `.lattice/findings/sweeps/<sweep_id>.yml` with `auditor_model` / `duration_ms` / `skipped` / `runtime_warnings[]`. New `lattice sweep-id` generates deterministic `<YYYYMMDD><6-hex>` IDs. `/flow-audit --scope a,b,c` for multi-module flows. New optional `relates_to: [slug, ...]` finding field. TTD-silent → code is ground truth; DRIFT only on explicit contradictions; OK-finding emission required.
-- **v0.7.3** (current) — schema-doc self-audit + first Haiku auto-fix dogfood. Ran `/audit docs/finding-schema.md` on Lattice itself, surfaced 3 DRIFTs + 1 OK, auto-fixed all 3 DRIFTs by dispatching a Haiku subagent per finding via `lattice handoff <id>` brief → Agent dispatch → independent verify → close cycle (3-for-3 clean, ~9s and ~35K tokens each on single-line PATCH_DOC). Also fixed a `lattice handoff` bug where `yaml_field` stripped trailing `"` independently of a leading one (truncated titles ending in quoted phrases like `code points at "lattice help"`).
+- **v0.7.4** (current) — first auto-fix lane shipped. `/lattice-fix <finding-id>` slash command auto-fixes one low-risk Lattice finding via Haiku subagent dispatch with eligibility gate (refuses CRITICAL/HIGH/BLOCKER, security, cluster findings, non-PATCH_DOC), independent verify-before-close, and failure-feedback log under `.lattice/handoff-feedback/<rule>.md` for refining the handoff brief template over time. Dogfooded on first real run: 1 DRIFT auto-fixed in 8s / 35K tokens / 2 tool uses (cumulative 4-for-4 clean on single-line PATCH_DOC across the v0.7.3/v0.7.4 dogfood).
+- **v0.7.3** — schema-doc self-audit + first Haiku auto-fix dogfood. Ran `/audit docs/finding-schema.md` on Lattice itself, surfaced 3 DRIFTs + 1 OK, auto-fixed all 3 DRIFTs by dispatching a Haiku subagent per finding via `lattice handoff <id>` brief → Agent dispatch → independent verify → close cycle (3-for-3 clean, ~9s and ~35K tokens each on single-line PATCH_DOC). Also fixed a `lattice handoff` bug where `yaml_field` stripped trailing `"` independently of a leading one (truncated titles ending in quoted phrases like `code points at "lattice help"`).
 - **v0.7.2** — self-audit pass. `/audit` run against Lattice's own README + scripts surfaced 2 P0 and 2 HIGH bugs; all fixed before tag. P0: `lattice close ""` no longer silently destroys data; `close → reopen → close` cycle no longer corrupts YAML (awk-based block-scalar continuation strip in both close.sh and reopen.sh). HIGH: `--commit HEAD` now resolves through `git rev-parse`; reopen strips `close_reason`/`closure_rationale` too. New: `lattice usage --global` reads `~/.claude/lattice/usage/global.jsonl` aggregated across every project — maintainer dashboard, never surfaced into client Claude sessions. Test suite 11 → 15.
 - **v0.7.1** — repo-local usage analytics (`lattice usage`), project config (`lattice config init|show`), and update checks/auto-update controls (`lattice update --check|--self|--enable-auto|--disable-auto`). Usage events stay local in `.lattice/usage/events.jsonl` and record command/flag shape, not finding slugs or file paths.
 - **v0.7.0** — major release from real-use feedback (36 findings / 29 closed / 8 commits on jiive Lumi). Flat layout (`open/<slug>.yml`, `closed/<slug>.yml`); stable `id:` algorithm SHA1(dim:rule:file:ctx)[:12] surviving line shifts; `close_reason:` enum + `closure_rationale:`; `cluster_root:` + `lattice cluster` BFS walk; `module_owner:` + `related_files:` fields; `lattice sync` groups CLAUDE.md by owner when set. Six new CLI commands: `handoff`, `next`, `timeline`, `verify`, `ci-check`, `pr-body`. Fuzzy match with interactive disambiguation; `show` prints all matches. Bash + zsh tab completion. `prepare-commit-msg` hook warns on open blockers. One-shot `migrate-v0.7.sh` migration script.

@@ -2,6 +2,23 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] — 2026-05-12
+
+First auto-fix lane shipped.
+
+### Added
+- **`/lattice-fix <finding-id>` slash command.** Auto-fixes one low-risk Lattice finding by dispatching a Haiku subagent with the `lattice handoff` brief, verifying the change independently, and closing the finding — or logging the failure for brief refinement under `.lattice/handoff-feedback/<rule>.md`.
+- **Eligibility gate.** Refuses to dispatch when tier ∈ {CRITICAL, BLOCKER, HIGH}, when `fix:` is not PATCH_DOC, when `relates_to:` has any entry, when `cluster_root: true`, or when `dimension: security`. The gate keeps the lane safe; humans handle anything outside it.
+- **Verify-before-close discipline.** The orchestrator re-reads the changed line independently of the agent's success report. No close happens on Haiku's word alone.
+- **Failure-feedback log.** On verification failure, the brief + Haiku's diff + the verification mismatch is appended to `.lattice/handoff-feedback/<rule>.md` — accumulated input for refining the handoff brief template over time.
+
+### Dogfooded
+- Ran `/audit commands/audit-sweep.md`, surfaced 1 DRIFT (`stale-coverage-audit-skill-ref` — `/coverage-audit` is not a real slash command, only a dimension). Auto-fixed via `/lattice-fix` slash invocation: 8s, 35K tokens, 2 tool uses, line-26 change verified clean.
+
+### Cumulative Haiku auto-fix tally (v0.7.3 + v0.7.4)
+- 4-for-4 clean on single-line PATCH_DOC fixes across `docs/finding-schema.md` and `commands/audit-sweep.md`.
+- Average: ~9s wall, ~35K tokens, 2 tool uses per fix. Roughly 6× cheaper than equivalent main-session Opus work.
+
 ## [0.7.3] — 2026-05-12
 
 Schema-doc self-audit + handoff bug found via Haiku dogfood loop.

@@ -23,7 +23,7 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 **Dimension filtering**:
 - If NO dimension token is present, run **audit + scale + security** (default — flow / coverage are opt-in).
 - If any of `audit` / `scale` / `security` / `flow` / `coverage` are present, run ONLY those.
-- `flow` and `coverage` are v0.6.4 dimensions and are NOT in the default sweep yet — explicitly include them when you want flow / coverage findings mixed into sweep output (`/audit-sweep . flow` or `/audit-sweep . security flow`). They invoke the same methodology as `/flow-audit` and `/coverage-audit` respectively, just dispatched per-module.
+- `flow` and `coverage` are v0.6.4 dimensions and are NOT in the default sweep yet — explicitly include them when you want flow / coverage findings mixed into sweep output (`/audit-sweep . flow` or `/audit-sweep . security flow`). They invoke the same methodology as `/flow-audit` (coverage has no separate skill — its patterns run inline), just dispatched per-module.
 
 **Module filtering**: If one or more `src/modules/X` paths are given, audit ONLY those modules. If none given, auto-discover via `Glob src/modules/*/`.
 
