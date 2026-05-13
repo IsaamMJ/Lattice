@@ -65,4 +65,28 @@ printf "%s\n" "${VERSION}" > "${HOME}/.claude/lattice/VERSION"
 echo ""
 echo "[lattice] updated ${#COMMANDS[@]} commands + ${#SCRIPTS[@]} scripts + ${#DOCS[@]} docs."
 echo "[lattice] ${PREV} -> ${VERSION}"
+
+# v0.7.7: detect project-local copy of scripts/ in CWD. Projects sometimes
+# pin a copy (e.g. jiive-backend keeps scripts/lattice next to its source) —
+# these get stale because update.sh only writes to ${SCRIPT_DEST}. Offer to
+# sync them, but don't force — pinning may be intentional.
+if [ -d "./scripts" ] && [ -f "./scripts/lattice" ]; then
+  echo ""
+  echo "[lattice] detected project-local ./scripts/lattice in $(pwd)."
+  echo "[lattice] update.sh only refreshed the global install at ${SCRIPT_DEST}."
+  if [ "${LATTICE_SYNC_PROJECT_LOCAL:-0}" = "1" ]; then
+    echo "[lattice] LATTICE_SYNC_PROJECT_LOCAL=1 — syncing project-local copies"
+    for s in "${SCRIPTS[@]}"; do
+      if [ -f "./scripts/${s}" ]; then
+        cp "${SCRIPT_DEST}/${s}" "./scripts/${s}"
+        chmod +x "./scripts/${s}" 2>/dev/null || true
+        echo "[lattice]   synced ./scripts/${s}"
+      fi
+    done
+  else
+    echo "[lattice] to sync them too: LATTICE_SYNC_PROJECT_LOCAL=1 bash scripts/update.sh"
+    echo "[lattice] (or leave pinned if that's intentional)"
+  fi
+fi
+
 echo "[lattice] restart Claude Code to pick up command changes."

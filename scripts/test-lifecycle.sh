@@ -432,6 +432,30 @@ else
   fail "100-finding regen too slow: ${DUR_MS}ms"
 fi
 
+note "Test 30: OK findings render under Acknowledged, not Open actionable (v0.7.7)"
+new_fixture t30
+write_yaml .lattice/findings/open/OK-confirmed-safe.yml confirmed-safe OK
+write_yaml .lattice/findings/open/DRIFT-real-work.yml real-work DRIFT
+"${LATTICE}" sync >/tmp/lattice-t30.out 2>&1
+if [ -f CLAUDE.md ] \
+   && grep -q "Open findings (1 actionable)" CLAUDE.md \
+   && grep -q "## Acknowledged (1)" CLAUDE.md; then
+  ok "OK findings filtered out of actionable count, shown under Acknowledged"
+else
+  fail "OK findings still in actionable section: $(grep -E '^## (Open findings|Acknowledged)' CLAUDE.md)"
+fi
+
+note "Test 31: lattice show accepts hex id from YAML (v0.7.7)"
+new_fixture t31
+write_yaml .lattice/findings/open/LOW-hex-lookup.yml hex-lookup LOW
+# YAML's id field is "hex-lookup-id" per write_yaml. Use a real hex by overwriting.
+sed -i 's/^id: hex-lookup-id$/id: a1b2c3d4e5f6/' .lattice/findings/open/LOW-hex-lookup.yml
+if "${LATTICE}" show a1b2c3d4e5f6 >/tmp/lattice-t31.out 2>&1 && grep -q "hex-lookup" /tmp/lattice-t31.out; then
+  ok "show <hex-id> resolves to slug"
+else
+  fail "show <hex-id> not found: $(cat /tmp/lattice-t31.out)"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

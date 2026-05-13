@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.7.1)
+# lattice — unified CLI dispatcher (v0.7.7)
+#
+# Version banner above is informational only — runtime version is read from
+# .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
+# globally). Keep this comment in sync via release checklist.
 #
 # Discoverability layer over the lifecycle helpers. Wraps the existing
 # scripts/lattice-*.sh + scripts/lattice-regenerate.sh so users have one
@@ -384,6 +388,19 @@ locate_finding_all() {
       mod="$(yaml_field "${f}" "module")"
       rule="$(yaml_field "${f}" "rule")"
       [ "${mod}/${rule}" = "${raw}" ] && matches+=("${f}")
+    done
+  fi
+
+  # 2.5) Hex id field match (v0.7.7) — the `id:` field is the first thing in YAML
+  # and natural for users to copy. Match when raw looks like 8-40 hex chars and
+  # no other strategy hit. Scans `id:` field of every YAML.
+  if [ "${#matches[@]}" -eq 0 ] && [[ "${raw}" =~ ^[0-9a-fA-F]{8,40}$ ]]; then
+    local f fid
+    for f in ".lattice/findings/open"/*.yml .lattice/findings/open/*/*.yml \
+              ".lattice/findings/closed"/*.yml .lattice/findings/closed/*/*.yml; do
+      [ -f "${f}" ] || continue
+      fid="$(yaml_field "${f}" "id")"
+      [ "${fid}" = "${raw}" ] && matches+=("${f}")
     done
   fi
 

@@ -2,6 +2,27 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] — 2026-05-13
+
+Real-usage bug-fix release. Issues surfaced by a second project actively using Lattice for a week. Features-as-requested-by-that-session **rejected** as scope creep (turning Lattice into Linear). Bugs-as-flagged **accepted** and fixed in batch.
+
+### Fixed
+- **`lattice show <hex-id>` now works.** Previously `show` only accepted slug forms; the `id:` field (first line of every YAML, natural to copy) wasn't a lookup key. New strategy: when the input looks like 8-40 hex chars, scan every YAML's `id:` field. Falls through to substring match if no hex match found.
+- **OK findings no longer counted as "actionable".** `lattice sync` rendered `## Open findings (N actionable)` where N included OK-tier findings (audited and confirmed safe). They now render under a separate `## Acknowledged (N)` section. The `actionable` count is the real work-to-do count.
+- **Script header version banner.** `scripts/lattice` line 2 said "v0.7.1" inside a v0.7.6 file — embarrassing on inspection. Now reads "v0.7.7" with a note that runtime version comes from plugin.json/VERSION sentinel.
+- **`update.sh` detects project-local script copies.** Some projects pin a copy of `scripts/lattice*` next to their source. `update.sh` previously only refreshed `~/.claude/lattice/scripts/`, leaving project-local copies stale. Now detects `./scripts/lattice` and prints a sync hint; opt-in via `LATTICE_SYNC_PROJECT_LOCAL=1 bash scripts/update.sh` to actually overwrite them.
+- **Regen-marker warning strengthened.** Added an explicit `<!-- WARNING: anything inside these markers is regenerated... -->` comment so hand-edits inside the `lattice:checklist:start/end` block are visibly transient. The fix is "edit YAML, not CLAUDE.md."
+
+### Known limitations (documented, not bugs)
+- **Auto-update only triggers on CLI invocation.** If no one runs `lattice ...` for a week, the version-check loop sleeps with it. Mitigation: enable `lattice update --enable-auto` for silent auto-pulls when checks do fire. Daemon-mode is not planned — adds OS-specific complexity for a problem solved by occasional invocation.
+- **Hand-edits inside regen markers are not merged.** Regen overwrites by design — markers are a generated-only zone. To add notes to a finding, edit the YAML under `.lattice/findings/open/<slug>.yml` (the `notes:` field) — that survives regen and shows up in `lattice show`.
+
+### Feature requests considered and rejected
+The same session asked for: finding categories (`feature`/`dependency`/`decision`), `epic_id`/`milestone`/`blocked_by` fields, markdown export, sequencing/work-order, decision records. **Rejected as scope creep.** Lattice's value is narrow focus on code-anchored findings with commit-SHA lifecycle. Absorbing product-strategy work turns Lattice into a mediocre Linear/Jira clone. Boundary rule retained: *"If it has `file:line`, it goes in Lattice. Otherwise it stays in your product/strategy doc."*
+
+### Tests
+30 → 31 regression tests. New: OK-findings-not-actionable, hex-id lookup. All 31 pass.
+
 ## [0.7.6] — 2026-05-13
 
 Stress-hardened release. Pre-deployment gauntlet across CLI dispatcher, YAML parser, lifecycle helpers, and regen pipeline. Expanded `scripts/test-lifecycle.sh` from 15 → 29 regression tests (+93% coverage). All 29 pass.
