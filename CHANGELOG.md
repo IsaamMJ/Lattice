@@ -2,6 +2,23 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.8] — 2026-05-13
+
+Discoverability + stakeholder export. First Tier-2 features — both small, both immediately useful, neither blurs the Lattice/strategy boundary.
+
+### Added
+- **`lattice doctor`** — first-run UX. Diagnoses repo setup with PASS/WARN/FAIL per check across Environment (git, node, repo), `.lattice/` tree, CLAUDE.md integration, open-finding YAML health, and version/update-check freshness. Each failure ships with a one-line fix hint ("run `lattice config init`"). Exits non-zero if any FAIL, zero otherwise. Solves the "I don't know if this repo is set up correctly" first-run problem.
+- **`lattice export --format markdown [--tier T] [--dimension D] [--module M] [--closed]`** — stakeholder-readable markdown render. Outputs a tier-grouped table (`| State | Module | Rule | Where | Title |`) suitable for sharing with non-CLI humans (CEO, designers, legal). Pipe-in-field escape so titles with `|` don't break tables. Filters compose. `--closed` includes closed findings for "what shipped" exports.
+
+### Fixed
+- `log_usage_event` no longer fires for `doctor` invocations. It was auto-creating `.lattice/usage/` and `.lattice/cache/` directories before `cmd_doctor` ran, making the "is `.lattice/` initialized?" check always pass. Doctor now sees the true initial state.
+
+### Tests
+31 → 35. New cases: doctor reports on clean setup, doctor fails when `.lattice/` missing (with helpful message), export renders tiered tables, export `--tier` filter excludes non-matching tiers.
+
+### Boundary check
+Both features are read-only renders over existing data. No schema changes. No new finding types. Still narrow on code-anchored findings with commit-SHA lifecycle.
+
 ## [0.7.7] — 2026-05-13
 
 Real-usage bug-fix release. Issues surfaced by a second project actively using Lattice for a week. Features-as-requested-by-that-session **rejected** as scope creep (turning Lattice into Linear). Bugs-as-flagged **accepted** and fixed in batch.

@@ -456,6 +456,56 @@ else
   fail "show <hex-id> not found: $(cat /tmp/lattice-t31.out)"
 fi
 
+note "Test 32: lattice doctor reports clean setup (v0.7.8)"
+new_fixture t32
+write_yaml .lattice/findings/open/LOW-doctor.yml doctor LOW
+if "${LATTICE}" doctor >/tmp/lattice-t32.out 2>&1; then
+  if grep -q "passed" /tmp/lattice-t32.out && grep -q "Environment" /tmp/lattice-t32.out; then
+    ok "doctor runs and reports sections"
+  else
+    fail "doctor missing expected sections: $(cat /tmp/lattice-t32.out)"
+  fi
+else
+  fail "doctor returned non-zero on clean setup: $(cat /tmp/lattice-t32.out)"
+fi
+
+note "Test 33: lattice doctor fails when .lattice/ missing (v0.7.8)"
+new_fixture t33
+rm -rf .lattice
+if "${LATTICE}" doctor >/tmp/lattice-t33.out 2>&1; then
+  fail "doctor should fail when .lattice/ missing"
+else
+  grep -q "missing" /tmp/lattice-t33.out && ok "doctor fails with helpful message when uninitialized" || fail "doctor failure message unclear"
+fi
+
+note "Test 34: lattice export --format markdown renders table (v0.7.8)"
+new_fixture t34
+write_yaml .lattice/findings/open/HIGH-exp1.yml exp1 HIGH
+write_yaml .lattice/findings/open/LOW-exp2.yml exp2 LOW
+if "${LATTICE}" export --format markdown >/tmp/lattice-t34.out 2>&1; then
+  if grep -q "## HIGH (1)" /tmp/lattice-t34.out \
+     && grep -q "## LOW (1)" /tmp/lattice-t34.out \
+     && grep -q "| open |" /tmp/lattice-t34.out \
+     && grep -q "Total: 2" /tmp/lattice-t34.out; then
+    ok "export renders tiered markdown tables"
+  else
+    fail "export output missing expected structure: $(head -20 /tmp/lattice-t34.out)"
+  fi
+else
+  fail "export failed: $(cat /tmp/lattice-t34.out)"
+fi
+
+note "Test 35: lattice export --tier filter (v0.7.8)"
+new_fixture t35
+write_yaml .lattice/findings/open/HIGH-keep.yml keep HIGH
+write_yaml .lattice/findings/open/LOW-drop.yml drop LOW
+"${LATTICE}" export --format markdown --tier HIGH >/tmp/lattice-t35.out 2>&1
+if grep -q "## HIGH" /tmp/lattice-t35.out && ! grep -q "## LOW" /tmp/lattice-t35.out; then
+  ok "export --tier filters out non-matching tiers"
+else
+  fail "export --tier did not filter correctly: $(cat /tmp/lattice-t35.out)"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

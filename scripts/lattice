@@ -64,6 +64,8 @@ Usage:
   lattice sweeps
   lattice sweep-id
   lattice id-gen <dimension> <rule> <file> <code_context>
+  lattice doctor
+  lattice export --format markdown [--tier T] [--dimension D] [--module M] [--closed]
   lattice version
   lattice help
 
@@ -1631,6 +1633,233 @@ YML
 }
 
 # ---------------------------------------------------------------------------
+# doctor — diagnose Lattice setup in the current repo. First-run UX.
+# Output: PASS / WARN / FAIL per check, with fix hints.
+# Exit code: 0 if no FAIL, 1 if any FAIL.
+# ---------------------------------------------------------------------------
+cmd_doctor() {
+  local fails=0 warns=0 passes=0
+  local check_name fix_hint
+  _check_pass() { printf "  [PASS] %s\n" "$1"; passes=$((passes+1)); }
+  _check_warn() { printf "  [WARN] %s — %s\n" "$1" "$2"; warns=$((warns+1)); }
+  _check_fail() { printf "  [FAIL] %s — %s\n" "$1" "$2"; fails=$((fails+1)); }
+
+  echo "[${PROG}] doctor: diagnosing Lattice setup in $(pwd)"
+  echo ""
+
+  echo "## Environment"
+  if command -v git >/dev/null 2>&1; then
+    _check_pass "git available"
+  else
+    _check_fail "git not found" "install git — required for close --commit and lifecycle stamping"
+  fi
+  if command -v node >/dev/null 2>&1; then
+    _check_pass "node available (used by lattice-regenerate.sh)"
+  else
+    _check_fail "node not found" "install node ≥18 — required for lattice sync"
+  fi
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    _check_pass "inside a git repo"
+  else
+    _check_warn "not in a git repo" "lattice close --commit will require explicit SHA arg outside git"
+  fi
+  echo ""
+
+  echo "## .lattice/ tree"
+  if [ -d ".lattice" ]; then
+    _check_pass ".lattice/ directory exists"
+  else
+    _check_fail ".lattice/ missing" "run any lattice command in this repo to initialize (or: mkdir -p .lattice/findings/open .lattice/findings/closed)"
+    echo ""
+    echo "  doctor: bailing — nothing else to check without .lattice/"
+    return 1
+  fi
+  for sub in findings/open findings/closed; do
+    if [ -d ".lattice/${sub}" ]; then
+      _check_pass ".lattice/${sub}/ exists"
+    else
+      _check_warn ".lattice/${sub}/ missing" "will be auto-created on first close/sync"
+    fi
+  done
+  if [ -f ".lattice/config.yml" ]; then
+    _check_pass ".lattice/config.yml present"
+  else
+    _check_warn ".lattice/config.yml not initialized" "run: lattice config init  (enables usage tracking + update check tuning)"
+  fi
+  echo ""
+
+  echo "## CLAUDE.md integration"
+  if [ -f "CLAUDE.md" ]; then
+    if grep -q "lattice:checklist:start" CLAUDE.md && grep -q "lattice:checklist:end" CLAUDE.md; then
+      _check_pass "CLAUDE.md has lattice markers"
+    else
+      _check_warn "CLAUDE.md exists but no lattice markers" "run: lattice sync  (will append markers at end)"
+    fi
+  else
+    _check_warn "CLAUDE.md missing" "lattice sync will create one on first run"
+  fi
+  echo ""
+
+  echo "## Open findings"
+  shopt -s nullglob
+  local open_count=0 malformed=0
+  for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+    [ -f "${f}" ] || continue
+    open_count=$((open_count + 1))
+    # Cheap parse check — required fields
+    if ! grep -qE '^rule[[:space:]]*:' "${f}"; then malformed=$((malformed+1)); fi
+  done
+  if [ ${open_count} -eq 0 ]; then
+    _check_pass "no open findings (clean slate)"
+  elif [ ${malformed} -gt 0 ]; then
+    _check_fail "${open_count} open findings, ${malformed} malformed" "run: lattice validate  (shows per-file errors)"
+  else
+    _check_pass "${open_count} open findings parse cleanly"
+  fi
+  echo ""
+
+  echo "## Version + updates"
+  local cur lat
+  cur="$(current_version 2>/dev/null || echo unknown)"
+  _check_pass "running ${PROG} ${cur}"
+  if [ -f .lattice/cache/update-check.env ]; then
+    local cache_age=0
+    cache_age=$(($(date +%s) - $(stat -c %Y .lattice/cache/update-check.env 2>/dev/null || stat -f %m .lattice/cache/update-check.env 2>/dev/null || echo 0)))
+    if [ ${cache_age} -lt 86400 ]; then
+      _check_pass "update-check cache fresh (< 24h)"
+    else
+      _check_warn "update-check cache stale" "next lattice invocation will refresh"
+    fi
+  else
+    _check_warn "no update-check cache" "first run — will be created next invocation"
+  fi
+  echo ""
+
+  echo "## Summary"
+  echo "  ${passes} passed, ${warns} warnings, ${fails} failures"
+  if [ ${fails} -gt 0 ]; then
+    echo "  doctor: setup has issues — see [FAIL] lines above"
+    return 1
+  fi
+  if [ ${warns} -gt 0 ]; then
+    echo "  doctor: setup is functional — see [WARN] lines for optional improvements"
+  else
+    echo "  doctor: setup is clean"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# export — render findings as stakeholder-readable markdown.
+# Usage:
+#   lattice export --format markdown [--tier T] [--dimension D] [--module M] [--closed]
+# Output: markdown table-grouped by tier, suitable for sharing with non-CLI users.
+# ---------------------------------------------------------------------------
+cmd_export() {
+  local format="markdown"
+  local filter_tier="" filter_dim="" filter_module="" include_closed=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --format)    [ -z "${2:-}" ] && die "export: --format requires a value"
+                   format="$2"; shift 2 ;;
+      --tier)      [ -z "${2:-}" ] && die "export: --tier requires a value"
+                   filter_tier="${2^^}"; shift 2 ;;
+      --dimension) [ -z "${2:-}" ] && die "export: --dimension requires a value"
+                   filter_dim="${2,,}"; shift 2 ;;
+      --module)    [ -z "${2:-}" ] && die "export: --module requires a value"
+                   filter_module="$2"; shift 2 ;;
+      --closed)    include_closed=1; shift ;;
+      *) die "export: unknown arg: $1" ;;
+    esac
+  done
+
+  case "${format}" in
+    markdown|md) ;;
+    *) die "export: unsupported format '${format}' (supported: markdown)" ;;
+  esac
+
+  [ -d ".lattice/findings/open" ] || { echo "[${PROG}] export: no findings directory"; return 0; }
+
+  shopt -s nullglob
+  local items=()
+  for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+    [ -f "${f}" ] || continue
+    items+=("open|${f}")
+  done
+  if [ ${include_closed} -eq 1 ]; then
+    for f in .lattice/findings/closed/*.yml .lattice/findings/closed/*/*.yml; do
+      [ -f "${f}" ] || continue
+      items+=("closed|${f}")
+    done
+  fi
+
+  if [ ${#items[@]} -eq 0 ]; then
+    echo "_No findings to export._"
+    return 0
+  fi
+
+  # Tier ordering for grouping
+  local tier_order="CRITICAL BLOCKER HIGH RISK DRIFT MEDIUM WATCH LOW INTENTIONAL UNVERIFIABLE OK"
+
+  # Header
+  echo "# Findings export"
+  echo ""
+  echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local filter_summary=""
+  [ -n "${filter_tier}" ]    && filter_summary="${filter_summary} tier=${filter_tier}"
+  [ -n "${filter_dim}" ]     && filter_summary="${filter_summary} dimension=${filter_dim}"
+  [ -n "${filter_module}" ]  && filter_summary="${filter_summary} module=${filter_module}"
+  [ ${include_closed} -eq 1 ] && filter_summary="${filter_summary} include=closed"
+  if [ -n "${filter_summary}" ]; then
+    echo "Filters:${filter_summary}"
+  fi
+  echo ""
+
+  local total=0
+  for tier in ${tier_order}; do
+    local tier_items=()
+    for entry in "${items[@]}"; do
+      local state="${entry%%|*}" f="${entry#*|}"
+      local t m d mod
+      t="$(yaml_field "${f}" "tier" | tr '[:lower:]' '[:upper:]')"
+      [ "${t}" = "${tier}" ] || continue
+      [ -n "${filter_tier}" ] && [ "${t}" != "${filter_tier}" ] && continue
+      d="$(yaml_field "${f}" "dimension" | tr '[:upper:]' '[:lower:]')"
+      [ -n "${filter_dim}" ] && [ "${d}" != "${filter_dim}" ] && continue
+      mod="$(yaml_field "${f}" "module")"
+      if [ -n "${filter_module}" ]; then
+        [[ "${mod,,}" == *"${filter_module,,}"* ]] || continue
+      fi
+      tier_items+=("${state}|${f}")
+    done
+    [ ${#tier_items[@]} -eq 0 ] && continue
+
+    echo "## ${tier} (${#tier_items[@]})"
+    echo ""
+    echo "| State | Module | Rule | Where | Title |"
+    echo "|-------|--------|------|-------|-------|"
+    for entry in "${tier_items[@]}"; do
+      local state="${entry%%|*}" f="${entry#*|}"
+      local mod rule file line title
+      mod="$(yaml_field "${f}" "module")"
+      rule="$(yaml_field "${f}" "rule")"
+      file="$(yaml_field "${f}" "file")"
+      line="$(yaml_field "${f}" "line")"
+      title="$(yaml_field "${f}" "title")"
+      # Escape pipes in fields to avoid breaking the table
+      title="${title//|/\\|}"
+      mod="${mod//|/\\|}"
+      rule="${rule//|/\\|}"
+      printf "| %s | %s | %s | %s:%s | %s |\n" "${state}" "${mod}" "${rule}" "${file}" "${line}" "${title}"
+      total=$((total + 1))
+    done
+    echo ""
+  done
+
+  echo "_Total: ${total} finding(s)._"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -1641,7 +1870,7 @@ fi
 sub="$1"; shift || true
 maybe_update_check "${sub}" || true
 case "${sub}" in
-  help|--help|-h|version|--version|-v) ;;
+  help|--help|-h|version|--version|-v|doctor) ;;
   *) log_usage_event "${sub}" "$@" || true ;;
 esac
 case "${sub}" in
@@ -1667,6 +1896,8 @@ case "${sub}" in
   sweeps)             cmd_sweeps "$@" ;;
   sweep-id)           cmd_sweep_id ;;
   id-gen)             cmd_id_gen "$@" ;;
+  doctor)             cmd_doctor "$@" ;;
+  export)             cmd_export "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;
