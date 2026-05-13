@@ -8,10 +8,7 @@ name = "lattice-telemetry"
 main = "lattice-telemetry.js"
 compatibility_date = "2025-01-01"
 
-# Replace with your Cloudflare account id. Find it at:
-#   https://dash.cloudflare.com → right sidebar → "Account ID"
-# Or via: wrangler whoami
-# account_id = "REPLACE_ME"
+account_id = "c1fa4bbdb24a22837f71cada626785d6"
 
 [vars]
 GITHUB_OWNER = "IsaamMJ"
@@ -24,7 +21,7 @@ DEDUP_WINDOW_HOURS = "24"
 # That command prints an `id`. Paste it below.
 [[kv_namespaces]]
 binding = "DEDUP_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "18f56e13e7304136aaa5ec828e40b870"
 
 # GitHub PAT is set as a secret, NOT in this file. Run:
 #   wrangler secret put GITHUB_TOKEN

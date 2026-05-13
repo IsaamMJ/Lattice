@@ -59,7 +59,7 @@ Usage:
   lattice pr-body [--since <YYYY-MM-DD>]
   lattice usage [--since <days>] [--unused <days>] [--json]
   lattice update --check|--self|--enable-auto|--disable-auto
-  lattice config init
+  lattice config init|show|telemetry on|off|show
   lattice cluster <id>
   lattice validate
   lattice sweeps
@@ -289,6 +289,118 @@ maybe_update_check() {
       cmd_update --self || true
     else
       echo "[${PROG}] update available: ${current} -> ${latest}. Run: lattice update --self" >&2
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Telemetry — sanitized error reports to lattice-telemetry Worker.
+#
+# Sends ONLY on failed lattice invocations. Wire format spec:
+#   docs/telemetry-protocol.md
+# Worker source:
+#   worker/lattice-telemetry.js
+# Server-side audit (every issue is public, label = telemetry):
+#   https://github.com/IsaamMJ/Lattice/issues?q=is%3Aissue+label%3Atelemetry
+#
+# Disable: lattice config telemetry off  OR  export LATTICE_TELEMETRY=0
+# Debug:   export LATTICE_TELEMETRY_DEBUG=1   (prints payload, does not send)
+# ---------------------------------------------------------------------------
+
+_LATTICE_TELEMETRY_URL="${LATTICE_TELEMETRY_URL:-https://lattice-telemetry.isaam-mj.workers.dev}"
+
+_telemetry_enabled() {
+  # Env var always wins
+  [ "${LATTICE_TELEMETRY:-1}" = "0" ] && return 1
+
+  # Project-local config
+  if [ -f .lattice/config.yml ] && grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml 2>/dev/null; then
+    return 1
+  fi
+  # Global config
+  if [ -f "${HOME}/.claude/lattice/config.yml" ] && grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then
+    return 1
+  fi
+
+  return 0
+}
+
+_maybe_show_telemetry_disclosure() {
+  local marker="${HOME}/.claude/lattice/.telemetry-acknowledged"
+  [ -f "${marker}" ] && return 0
+  _telemetry_enabled || return 0
+
+  cat >&2 <<DISCLOSURE
+[${PROG}] Anonymous error telemetry is ENABLED by default. On FAILED commands only,
+[${PROG}]   sends: version, exit code, command name, OS. NEVER sends: file paths,
+[${PROG}]   finding IDs, commit SHAs, source code, project/repo names, usernames.
+[${PROG}] Disable: lattice config telemetry off  (or LATTICE_TELEMETRY=0)
+[${PROG}] Audit:   github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry
+[${PROG}] Source:  worker/lattice-telemetry.js + docs/telemetry-protocol.md
+DISCLOSURE
+
+  mkdir -p "${HOME}/.claude/lattice" 2>/dev/null || true
+  touch "${marker}" 2>/dev/null || true
+}
+
+_send_telemetry() {
+  _telemetry_enabled || return 0
+
+  local exit_code="$1" command="$2"
+
+  # Skip on help/version/doctor/config — not real failures even if exit code != 0
+  case "${command}" in
+    help|--help|-h|version|--version|-v|doctor|config) return 0 ;;
+  esac
+
+  local version os timestamp fingerprint user_hash payload
+  version="$(current_version 2>/dev/null || echo 0.0.0)"
+
+  case "$(uname -s 2>/dev/null)" in
+    Linux*)   os="linux" ;;
+    Darwin*)  os="darwin" ;;
+    CYGWIN*|MINGW*|MSYS*|Windows*) os="windows" ;;
+    *)        os="linux" ;;
+  esac
+
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
+
+  # Fingerprint = sha256(command + ":" + exit_code). Stable across machines so
+  # the same failure dedupes to one issue regardless of who hits it.
+  fingerprint="$(printf '%s:%s' "${command}" "${exit_code}" | sha256sum 2>/dev/null | cut -d' ' -f1)"
+  [ -z "${fingerprint}" ] && return 0
+
+  # user_hash = sha256(hostname + home dir). Machine-stable, NOT
+  # personally identifiable to anyone but the user themselves.
+  user_hash="$(printf '%s:%s' "$(uname -n 2>/dev/null || echo unknown)" "${HOME:-}" | sha256sum 2>/dev/null | cut -d' ' -f1)"
+
+  payload="{\"version\":\"${version}\",\"command\":\"${command}\",\"exit_code\":${exit_code},\"os\":\"${os}\",\"msg_fingerprint\":\"${fingerprint}\",\"user_hash\":\"${user_hash}\",\"timestamp\":\"${timestamp}\"}"
+
+  if [ "${LATTICE_TELEMETRY_DEBUG:-0}" = "1" ]; then
+    {
+      echo "[${PROG}-telemetry] payload (would send):"
+      echo "${payload}"
+      echo "[${PROG}-telemetry] (debug mode — not sent)"
+    } >&2
+    return 0
+  fi
+
+  # 2s timeout. Silent failure — never surface telemetry errors to user.
+  curl -sS -X POST "${_LATTICE_TELEMETRY_URL}" \
+    -H "content-type: application/json" \
+    -d "${payload}" \
+    --max-time 2 \
+    >/dev/null 2>&1 || true
+}
+
+_on_telemetry_exit() {
+  local code=$?
+  if [ ${code} -ne 0 ] && [ -n "${sub:-}" ]; then
+    # Debug mode keeps stderr so the payload is visible; otherwise silent.
+    if [ "${LATTICE_TELEMETRY_DEBUG:-0}" = "1" ]; then
+      _send_telemetry "${code}" "${sub}" || true
+    else
+      _send_telemetry "${code}" "${sub}" >/dev/null 2>&1 || true
     fi
   fi
 }
@@ -1647,10 +1759,42 @@ YML
       if [ -f .lattice/config.yml ]; then
         cat .lattice/config.yml
       else
-        echo "[${PROG}] no .lattice/config.yml (defaults: usage.enabled=true, updates.mode=notify)"
+        echo "[${PROG}] no .lattice/config.yml (defaults: usage.enabled=true, updates.mode=notify, telemetry=on)"
       fi
       ;;
-    *) die "config: usage: lattice config init|show" ;;
+    telemetry)
+      local action="${2:-show}"
+      case "${action}" in
+        on|off)
+          ensure_project_dirs
+          local cfg=".lattice/config.yml"
+          local tmp; tmp="$(mktemp)"
+          if [ -f "${cfg}" ]; then
+            grep -v '^telemetry:' "${cfg}" > "${tmp}" || true
+          fi
+          printf "telemetry: %s\n" "${action}" >> "${tmp}"
+          mv "${tmp}" "${cfg}"
+          echo "[${PROG}] telemetry: ${action} (project-local)"
+          ;;
+        show|"")
+          local proj_state="on" global_state="on" env_state=""
+          [ -f .lattice/config.yml ] && grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml 2>/dev/null && proj_state="off"
+          [ -f "${HOME}/.claude/lattice/config.yml" ] && grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null && global_state="off"
+          [ "${LATTICE_TELEMETRY:-1}" = "0" ] && env_state=" (overridden OFF by LATTICE_TELEMETRY=0)"
+          echo "[${PROG}] telemetry status:"
+          echo "  project (.lattice/config.yml): ${proj_state}"
+          echo "  global  (~/.claude/lattice/config.yml): ${global_state}"
+          if _telemetry_enabled; then
+            echo "  effective: ON${env_state}"
+          else
+            echo "  effective: OFF${env_state}"
+          fi
+          echo "  endpoint: ${_LATTICE_TELEMETRY_URL}"
+          ;;
+        *) die "config telemetry: usage: lattice config telemetry on|off|show" ;;
+      esac
+      ;;
+    *) die "config: usage: lattice config init|show|telemetry <on|off|show>" ;;
   esac
 }
 
@@ -2062,6 +2206,8 @@ if [ "$#" -eq 0 ]; then
 fi
 
 sub="$1"; shift || true
+trap _on_telemetry_exit EXIT
+_maybe_show_telemetry_disclosure
 maybe_update_check "${sub}" || true
 case "${sub}" in
   help|--help|-h|version|--version|-v|doctor) ;;

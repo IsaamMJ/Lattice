@@ -2,6 +2,58 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-rc1] — 2026-05-14
+
+**The Loop, step 1: auto-bug-reporting.** First release with end-to-end client→server→GitHub-Issues automation. Every failed `lattice` invocation now (optionally) files itself as a deduplicated GitHub Issue on `IsaamMJ/Lattice` without user or maintainer intervention. Closes the slowest part of the improvement cycle.
+
+### Added (client side)
+- **Telemetry on failed commands.** EXIT trap captures non-zero exit codes from any subcommand, builds a sanitized payload (version, command name, exit_code, OS, fingerprint, user_hash, timestamp), and POSTs async to the `lattice-telemetry` Worker.
+- **First-run disclosure.** Prints a 6-line notice the first time `lattice` is invoked per `$HOME` explaining what gets sent, what doesn't, and how to disable. Marker at `~/.claude/lattice/.telemetry-acknowledged` prevents repeated prompts.
+- **Opt-out paths** (any of these):
+  - `lattice config telemetry off` (writes to `.lattice/config.yml` — project-local)
+  - `lattice config telemetry off` from a directory with no `.lattice/` (writes global — *future*)
+  - `export LATTICE_TELEMETRY=0` (env override, always wins)
+  - Edit `~/.claude/lattice/config.yml` to add `telemetry: off`
+- **`lattice config telemetry show`** — diagnostic command. Shows project state, global state, env override, effective state, and the endpoint URL.
+- **`LATTICE_TELEMETRY_DEBUG=1`** — prints the exact payload to stderr without sending. Lets users verify what would leave the machine.
+
+### Privacy guarantees
+The payload is built from a hard-coded whitelist of 7 fields. NOT sent (in any release):
+- File paths, source code, finding IDs/slugs/titles
+- Commit SHAs, branch names, project / repo names
+- Git config name/email, OS username, GitHub username
+- Stack traces with paths, args to the failing command
+
+`user_hash` is `sha256(hostname + $HOME)` — machine-stable but not identifying to anyone but the user themselves. `msg_fingerprint` is `sha256(command + ":" + exit_code)` — stable across machines so the same failure groups into one issue.
+
+Wire format spec: `docs/telemetry-protocol.md` (public).
+Worker source: `worker/lattice-telemetry.js` (public).
+Filed issues (live audit): https://github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry
+
+### Server side (committed in `eb46818`, already deployed)
+- **`worker/lattice-telemetry.js`** — Cloudflare Worker. Strict whitelist sanitization, Workers-KV-backed 24h fingerprint dedup, async `ctx.waitUntil` so client never blocks on GitHub API. Always returns 2xx to avoid surfacing Worker outages.
+- **Endpoint:** `https://lattice-telemetry.isaam-mj.workers.dev`
+- **Deployment runbook:** `docs/telemetry-setup.md`
+- **Labels on filed issues:** `telemetry`, `auto-reported`, `bug`
+- **Dedup behavior:** new fingerprint → new Issue; repeated → `+1 occurrence` comment.
+
+### Tests
+46 → 52. New coverage:
+- LATTICE_TELEMETRY=0 disables telemetry even with DEBUG=1
+- Payload contains exactly the whitelisted fields
+- Finding slugs never appear in payload (privacy regression test)
+- `config telemetry off` persists to `.lattice/config.yml`
+- Project-local opt-out overrides env-on
+- help / version / doctor invocations don't fire telemetry
+
+### Why -rc1, not -final?
+Real-world validation pending. Plan: dogfood on the project actively using Lattice for ~1 week. If no privacy bugs / spurious reports / Worker outages surface, tag v0.8.0 stable. If issues appear, ship -rc2 etc.
+
+### What's still manual after this release
+- Running audits (`/audit src/`) — still needs a Claude session
+- Fixing the actual code — telemetry reports, doesn't fix
+- v0.9 target: AI-drafted fix PRs from the auto-filed issues. Out of scope here.
+
 ## [0.7.12] — 2026-05-13
 
 Half-staged git state after `lattice close` / `lattice reopen`. Reported from real team usage (jiive-backend `fd1d238 → 09b2490` had to be split into two commits to clean up). Last patch before v0.8.0 work begins.

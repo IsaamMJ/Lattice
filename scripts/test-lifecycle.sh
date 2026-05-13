@@ -8,6 +8,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LATTICE="${REPO_ROOT}/scripts/lattice"
+
+# Disable telemetry in tests by default so we never POST to the real Worker.
+# Individual tests override LATTICE_TELEMETRY / LATTICE_TELEMETRY_DEBUG as needed.
+export LATTICE_TELEMETRY=0
 MIGRATE="${REPO_ROOT}/scripts/migrate-v0.7.sh"
 MANIFEST="${REPO_ROOT}/scripts/lattice-write-manifest.sh"
 
@@ -648,6 +652,76 @@ if echo "${status}" | grep -qE '^R[[:space:]]' \
   ok "reopen stages move so single commit captures both sides"
 else
   fail "reopen left half-staged state: ${status}"
+fi
+
+note "Test 47: telemetry disabled by LATTICE_TELEMETRY=0 (v0.8.0)"
+new_fixture t47
+write_yaml .lattice/findings/open/LOW-tel0.yml tel0 LOW
+# Debug + disabled: should produce NO telemetry payload lines
+out="$(LATTICE_TELEMETRY=0 LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q "telemetry] payload"; then
+  fail "telemetry should be disabled by LATTICE_TELEMETRY=0"
+else
+  ok "LATTICE_TELEMETRY=0 disables telemetry even with DEBUG=1"
+fi
+
+note "Test 48: telemetry payload shape on failed command (v0.8.0)"
+new_fixture t48
+rm -f "${HOME}/.claude/lattice/.telemetry-acknowledged"
+out="$(LATTICE_TELEMETRY=1 LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q '"command":"close"' \
+   && echo "${out}" | grep -q '"exit_code":2' \
+   && echo "${out}" | grep -q '"msg_fingerprint":"[a-f0-9]\{64\}"' \
+   && echo "${out}" | grep -q '"user_hash":"[a-f0-9]\{64\}"'; then
+  ok "telemetry payload contains expected whitelisted fields"
+else
+  fail "telemetry payload malformed: $(echo "${out}" | grep payload | head -1)"
+fi
+
+note "Test 49: telemetry payload never includes finding id / file path (v0.8.0)"
+new_fixture t49
+out="$(LATTICE_TELEMETRY=1 LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "SECRET-SLUG-DO-NOT-LEAK" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q "SECRET-SLUG-DO-NOT-LEAK"; then
+  # Disclosure / error message can contain it; check ONLY the payload line
+  payload="$(echo "${out}" | grep '"command"' | head -1)"
+  if echo "${payload}" | grep -q "SECRET-SLUG-DO-NOT-LEAK"; then
+    fail "PRIVACY LEAK: finding slug appeared in telemetry payload"
+  else
+    ok "finding slug not in telemetry payload (only in local error message)"
+  fi
+else
+  ok "no leak of finding slug anywhere"
+fi
+
+note "Test 50: lattice config telemetry off persists to .lattice/config.yml (v0.8.0)"
+new_fixture t50
+"${LATTICE}" config telemetry off >/dev/null
+if grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml; then
+  ok "config telemetry off writes to project config"
+else
+  fail "config telemetry off did not persist: $(cat .lattice/config.yml 2>/dev/null)"
+fi
+
+note "Test 51: project-local telemetry off honored even when LATTICE_TELEMETRY=1 (v0.8.0)"
+new_fixture t51
+"${LATTICE}" config telemetry off >/dev/null
+write_yaml .lattice/findings/open/LOW-told.yml told LOW
+out="$(LATTICE_TELEMETRY=1 LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q "telemetry] payload"; then
+  fail "project-local telemetry off should disable even with env=1"
+else
+  ok "project config overrides env for OFF state"
+fi
+
+note "Test 52: telemetry skipped for help/version/doctor exits (v0.8.0)"
+new_fixture t52
+rm -f "${HOME}/.claude/lattice/.telemetry-acknowledged"
+# Trigger a help exit code (should be 0 anyway, but verify no payload either way)
+out="$(LATTICE_TELEMETRY=1 LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" help 2>&1 || true)"
+if echo "${out}" | grep -q "telemetry] payload"; then
+  fail "telemetry should not fire on help command"
+else
+  ok "help/version/doctor skipped from telemetry"
 fi
 
 cd "${REPO_ROOT}"

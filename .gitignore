@@ -15,3 +15,8 @@ desktop.ini
 .idea/
 *.swp
 *~
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
