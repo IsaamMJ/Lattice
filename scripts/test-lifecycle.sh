@@ -550,6 +550,23 @@ else
   ok "changelog rejects non-ISO --since"
 fi
 
+note "Test 40: lattice list --milestone filters by milestone field (v0.7.10)"
+new_fixture t40
+write_yaml .lattice/findings/open/LOW-launch.yml launch LOW
+echo 'milestone: "p0-launch"' >> .lattice/findings/open/LOW-launch.yml
+write_yaml .lattice/findings/open/HIGH-later.yml later HIGH
+echo 'milestone: "post-launch"' >> .lattice/findings/open/HIGH-later.yml
+write_yaml .lattice/findings/open/MEDIUM-nofield.yml nofield MEDIUM
+out_p0="$("${LATTICE}" list --milestone p0-launch 2>/dev/null)"
+out_post="$("${LATTICE}" list --milestone post-launch 2>/dev/null)"
+if echo "${out_p0}" | grep -q "launch" && ! echo "${out_p0}" | grep -q "later" \
+   && ! echo "${out_p0}" | grep -q "nofield" \
+   && echo "${out_post}" | grep -q "later" && ! echo "${out_post}" | grep -q "launch"; then
+  ok "list --milestone partitions correctly, excludes findings without the field"
+else
+  fail "milestone filter mis-partitioned: p0=${out_p0} post=${out_post}"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

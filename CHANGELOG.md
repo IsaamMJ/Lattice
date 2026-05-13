@@ -2,6 +2,28 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.10] — 2026-05-13
+
+Milestone axis. Final Tier-2 feature for the day. v0.8.0 reserved for the planned bigger scope (cross-dimension dedupe + Closes-Lattice commit convention + JSON Schema validation).
+
+### Added
+- **`milestone:` optional finding field** — free-form string (`milestone: "p0-launch"`, `milestone: "v1.0"`, `milestone: "post-launch"`). Separate axis from `tier:` — a LOW finding can still be P0 for launch, a HIGH finding can be post-launch. No enum, no required-format.
+- **`lattice list --milestone <name>`** — filters open findings by exact milestone match. Excludes findings without the field. Lets you ask "what's left for the p0 launch?" without conflating launch priority with severity.
+
+### Tests
+39 → 40. New: list `--milestone` partitions correctly and excludes findings without the field.
+
+### Boundary check
+Same shape as `blocked_by` — annotation field on existing findings, not a new finding type. `milestone:` doesn't create a new tracking concept; it lets you tag findings that already exist for sequencing. Findings still require `file:line`.
+
+### What's NOT in this release (saving v0.8.0 for it)
+- Cross-dimension dedupe by fingerprint + rule (one finding, one report across audit/security/scale)
+- `Closes-Lattice: <id>` commit-message convention + auto-close on merge
+- Bundle/related-finding linking with cascade semantics
+- JSON Schema for finding YAML validation (replaces the ad-hoc `validateFinding`)
+
+That's the v0.8.0 scope. This release stays a patch bump.
+
 ## [0.7.9] — 2026-05-13
 
 Cross-finding state — release-note generation + external-blocker tracking. Second Tier-2 batch. Still narrow on code-anchored findings; `blocked_by` is an optional annotation, not a new finding type.

@@ -46,7 +46,7 @@ Usage:
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
-  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review] [--blocked|--unblocked]
+  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--milestone N] [--due-for-review] [--blocked|--unblocked]
   lattice show <id>
   lattice triage [--module M] [--tier T] [--status S] [--dimension D] [--cluster]
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
@@ -634,6 +634,7 @@ cmd_defer() {
 # ---------------------------------------------------------------------------
 cmd_list() {
   local filter_module="" filter_tier="" filter_status="" filter_dim=""
+  local filter_milestone=""
   local due_for_review=0
   local blocked_filter=""   # "" = no filter, "blocked" = only blocked, "unblocked" = only unblocked
   while [ "$#" -gt 0 ]; do
@@ -642,6 +643,7 @@ cmd_list() {
       --tier)      filter_tier="$2"; shift 2 ;;
       --status)    filter_status="$2"; shift 2 ;;
       --dimension) filter_dim="$2"; shift 2 ;;
+      --milestone) filter_milestone="$2"; shift 2 ;;
       --due-for-review) due_for_review=1; shift ;;
       --unblocked) blocked_filter="unblocked"; shift ;;
       --blocked)   blocked_filter="blocked"; shift ;;
@@ -690,6 +692,12 @@ cmd_list() {
         unblocked) [ -n "${blocked_by}" ] && continue ;;
         blocked)   [ -z "${blocked_by}" ] && continue ;;
       esac
+    fi
+
+    if [ -n "${filter_milestone}" ]; then
+      local milestone
+      milestone="$(yaml_field "${f}" "milestone")"
+      [ "${milestone}" = "${filter_milestone}" ] || continue
     fi
 
     if [ "${due_for_review}" -eq 1 ]; then
