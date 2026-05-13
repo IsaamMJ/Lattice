@@ -1,0 +1,31 @@
+# Cloudflare Workers config for lattice-telemetry.
+# Deploy: see ../docs/telemetry-setup.md
+#
+# Required: replace `account_id` below with your Cloudflare account id and the
+# `kv_namespaces.id` with the namespace id you create per the runbook.
+
+name = "lattice-telemetry"
+main = "lattice-telemetry.js"
+compatibility_date = "2025-01-01"
+
+# Replace with your Cloudflare account id. Find it at:
+#   https://dash.cloudflare.com → right sidebar → "Account ID"
+# Or via: wrangler whoami
+# account_id = "REPLACE_ME"
+
+[vars]
+GITHUB_OWNER = "IsaamMJ"
+GITHUB_REPO = "Lattice"
+ISSUE_LABELS = "telemetry,auto-reported,bug"
+DEDUP_WINDOW_HOURS = "24"
+
+# Workers KV namespace for fingerprint dedup. Create via:
+#   wrangler kv namespace create lattice_dedup
+# That command prints an `id`. Paste it below.
+[[kv_namespaces]]
+binding = "DEDUP_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# GitHub PAT is set as a secret, NOT in this file. Run:
+#   wrangler secret put GITHUB_TOKEN
+# Then paste your fine-grained PAT when prompted.
