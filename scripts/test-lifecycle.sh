@@ -240,6 +240,198 @@ fi
 unset HOME
 export HOME="$(cd ~ && pwd)"
 
+note "Test 16: close rejects whitespace-only id"
+new_fixture t16
+write_yaml .lattice/findings/open/LOW-whitespace.yml whitespace LOW
+if "${LATTICE}" close "   " --reason fixed --commit abcdef1 >/tmp/lattice-t16.out 2>&1; then
+  fail "close with whitespace-only id should fail"
+else
+  [ -f .lattice/findings/open/LOW-whitespace.yml ] && ok "whitespace id rejected, finding preserved" || fail "whitespace id close destroyed finding"
+fi
+
+note "Test 17: close rejects id with shell metachars (no injection)"
+new_fixture t17
+write_yaml .lattice/findings/open/LOW-shellsafe.yml shellsafe LOW
+rm -f /tmp/lattice-pwned-t17
+"${LATTICE}" close 'LOW-shellsafe; touch /tmp/lattice-pwned-t17' --reason fixed --commit abcdef1 >/dev/null 2>&1 || true
+if [ -f /tmp/lattice-pwned-t17 ]; then
+  rm -f /tmp/lattice-pwned-t17
+  fail "SECURITY: shell injection via close id arg"
+else
+  ok "no shell injection via close id"
+fi
+
+note "Test 18: regen rejects BOM-prefixed yaml gracefully OR parses it"
+new_fixture t18
+printf '\xef\xbb\xbfrule: bom-test\nmodule: m\nfile: README.md\nline: 1\ntier: DRIFT\ndimension: audit\nid: bom-id\nstatus: open\n' > .lattice/findings/open/DRIFT-bom.yml
+if "${LATTICE}" validate >/tmp/lattice-t18.out 2>&1; then
+  ok "BOM-prefixed yaml parses (BOM stripped)"
+else
+  grep -q "BOM\|UTF-8" /tmp/lattice-t18.out && ok "BOM-prefixed yaml rejected with helpful message" || fail "BOM yaml failed cryptically: $(cat /tmp/lattice-t18.out)"
+fi
+
+note "Test 19: regen rejects invalid dimension"
+new_fixture t19
+write_yaml .lattice/findings/open/DRIFT-baddim.yml baddim DRIFT
+sed -i 's/dimension: audit/dimension: made-up-thing/' .lattice/findings/open/DRIFT-baddim.yml
+if "${LATTICE}" validate >/tmp/lattice-t19.out 2>&1; then
+  fail "validate should reject invalid dimension"
+else
+  grep -q "dimension" /tmp/lattice-t19.out && ok "invalid dimension rejected" || fail "invalid dimension error unclear"
+fi
+
+note "Test 20: regen rejects non-integer line"
+new_fixture t20
+write_yaml .lattice/findings/open/DRIFT-badline.yml badline DRIFT
+sed -i 's/line: 1/line: not-a-number/' .lattice/findings/open/DRIFT-badline.yml
+if "${LATTICE}" validate >/tmp/lattice-t20.out 2>&1; then
+  fail "validate should reject non-integer line"
+else
+  grep -q "line" /tmp/lattice-t20.out && ok "non-integer line rejected" || fail "non-integer line error unclear"
+fi
+
+note "Test 21: regen rejects negative line"
+new_fixture t21
+write_yaml .lattice/findings/open/DRIFT-negline.yml negline DRIFT
+sed -i 's/line: 1/line: -5/' .lattice/findings/open/DRIFT-negline.yml
+if "${LATTICE}" validate >/tmp/lattice-t21.out 2>&1; then
+  fail "validate should reject negative line"
+else
+  ok "negative line rejected"
+fi
+
+note "Test 22: regen rejects empty yaml"
+new_fixture t22
+echo "" > .lattice/findings/open/DRIFT-empty.yml
+if "${LATTICE}" validate >/tmp/lattice-t22.out 2>&1; then
+  fail "validate should reject empty yaml"
+else
+  ok "empty yaml rejected"
+fi
+
+note "Test 23: regen tolerates markdown special chars in fields"
+new_fixture t23
+cat > .lattice/findings/open/DRIFT-md.yml <<'YML'
+id: md-id
+rule: md-test
+module: mod
+dimension: audit
+tier: DRIFT
+file: src/[weird](path).md
+line: 1
+title: has | pipe | and `backticks`
+fix: PATCH_DOC replace `foo` with `bar`
+sweep_date: 2026-05-11
+sweep_id: sw1
+auditor: test
+status: open
+YML
+if "${LATTICE}" sync >/tmp/lattice-t23.out 2>&1; then
+  if [ -f CLAUDE.md ] && grep -qF '\[weird\]' CLAUDE.md && grep -qF '\`foo\`' CLAUDE.md; then
+    ok "markdown special chars escaped in output"
+  else
+    fail "markdown special chars not properly escaped: $(grep 'weird\|backticks' CLAUDE.md | head -2)"
+  fi
+else
+  fail "sync failed on markdown special chars: $(cat /tmp/lattice-t23.out)"
+fi
+
+note "Test 24: regen rejects CLAUDE.md with duplicate start markers"
+new_fixture t24
+write_yaml .lattice/findings/open/LOW-dup.yml dup LOW
+cat > CLAUDE.md <<'MD'
+# Project
+<!-- lattice:checklist:start -->
+old block 1
+<!-- lattice:checklist:end -->
+filler
+<!-- lattice:checklist:start -->
+old block 2
+<!-- lattice:checklist:end -->
+MD
+if "${LATTICE}" sync >/tmp/lattice-t24.out 2>&1; then
+  fail "sync should refuse duplicate markers"
+else
+  grep -q "marker" /tmp/lattice-t24.out && ok "duplicate markers rejected" || fail "duplicate marker error unclear"
+fi
+
+note "Test 25: 5x close-reopen cycle preserves YAML integrity"
+new_fixture t25
+write_yaml .lattice/findings/open/LOW-cycle5.yml cycle5 LOW
+CYCLE_OK=1
+for i in 1 2 3 4 5; do
+  "${LATTICE}" close LOW-cycle5 --reason fixed --commit abcdef1 --rationale "$(printf 'iter %s\nwith newline' "$i")" >/dev/null 2>&1 || CYCLE_OK=0
+  "${LATTICE}" reopen LOW-cycle5 --reason "iter $i regress" >/dev/null 2>&1 || CYCLE_OK=0
+done
+if [ $CYCLE_OK -eq 1 ] && "${LATTICE}" validate >/tmp/lattice-t25.out 2>&1; then
+  ok "5x cycle preserves YAML integrity"
+else
+  fail "5x cycle broke YAML: $(cat /tmp/lattice-t25.out 2>/dev/null)"
+fi
+
+note "Test 26: reopen rejects missing --reason"
+new_fixture t26
+write_yaml .lattice/findings/open/LOW-r1.yml r1 LOW
+"${LATTICE}" close LOW-r1 --reason fixed --commit abcdef1 >/dev/null
+if "${LATTICE}" reopen LOW-r1 >/tmp/lattice-t26.out 2>&1; then
+  fail "reopen without --reason should fail"
+else
+  ok "reopen requires --reason"
+fi
+
+note "Test 27: lattice handoff produces brief with file/line"
+new_fixture t27
+write_yaml .lattice/findings/open/LOW-h.yml h LOW
+if "${LATTICE}" handoff LOW-h >/tmp/lattice-t27.out 2>&1; then
+  if grep -q "src/x.ts" /tmp/lattice-t27.out && grep -q ":1" /tmp/lattice-t27.out; then
+    ok "handoff includes file:line"
+  else
+    fail "handoff missing file:line: $(cat /tmp/lattice-t27.out | head -5)"
+  fi
+else
+  fail "handoff failed: $(cat /tmp/lattice-t27.out)"
+fi
+
+note "Test 28: id-gen is deterministic"
+new_fixture t28
+ID1=$("${LATTICE}" id-gen audit test-rule README.md "some code snippet" 2>&1)
+ID2=$("${LATTICE}" id-gen audit test-rule README.md "some code snippet" 2>&1)
+if [ "$ID1" = "$ID2" ] && [ ${#ID1} -ge 8 ]; then
+  ok "id-gen deterministic (id=$ID1)"
+else
+  fail "id-gen non-deterministic: '$ID1' vs '$ID2'"
+fi
+
+note "Test 29: 100-finding regen perf"
+new_fixture t29
+for i in $(seq 1 100); do
+  cat > ".lattice/findings/open/DRIFT-perf-$i.yml" <<YML
+id: perf-$i
+rule: perf
+module: mod
+dimension: audit
+tier: DRIFT
+file: src/x.ts
+line: $i
+title: perf-$i
+fix: fix
+sweep_date: 2026-05-11
+sweep_id: sw1
+auditor: test
+status: open
+YML
+done
+START_NS=$(date +%s%N 2>/dev/null || python -c "import time; print(int(time.time()*1e9))")
+"${LATTICE}" sync >/dev/null 2>&1
+END_NS=$(date +%s%N 2>/dev/null || python -c "import time; print(int(time.time()*1e9))")
+DUR_MS=$(( (END_NS - START_NS) / 1000000 ))
+echo "[test]   info: 100-finding sync = ${DUR_MS}ms"
+if [ $DUR_MS -lt 10000 ]; then
+  ok "100-finding regen under 10s (${DUR_MS}ms)"
+else
+  fail "100-finding regen too slow: ${DUR_MS}ms"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

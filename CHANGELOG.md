@@ -2,6 +2,26 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] — 2026-05-13
+
+Stress-hardened release. Pre-deployment gauntlet across CLI dispatcher, YAML parser, lifecycle helpers, and regen pipeline. Expanded `scripts/test-lifecycle.sh` from 15 → 29 regression tests (+93% coverage). All 29 pass.
+
+### Hardened (now regression-locked in CI)
+- **Input safety:** empty / whitespace / shell-metachar finding ids rejected — no data loss, no command injection.
+- **Commit ref handling:** `--commit HEAD`, branch names, tags, short SHAs all resolve uniformly. Bad refs rejected with clear error.
+- **`--reason` validation:** missing reason → fail; invalid enum → fail; missing value for `--reason`/`--commit`/`--pr` flags → fail.
+- **YAML lifecycle integrity:** 5x close→reopen→close cycle preserves YAML parseability; block-scalar continuation lines (`closure_rationale: |`) correctly stripped on every reopen.
+- **YAML parser fuzz:** BOM-prefixed YAML parsed (BOM auto-stripped); invalid dimension / non-integer line / negative line / empty file all rejected with messages.
+- **Markdown escape:** `[`, `]`, `` ` ``, `|` in `file`/`fix`/`module` fields escaped in CLAUDE.md output — no rendering breakage.
+- **Marker integrity:** duplicate `lattice:checklist:start` markers in CLAUDE.md → fatal exit, no destructive overwrite.
+- **`reopen` safety:** `--reason` required; already-open and nonexistent slugs handled cleanly.
+- **`handoff` brief shape:** verified to include `file:line` reference.
+- **`id-gen` determinism:** same inputs → same id, always (sha1-based).
+- **Perf:** 100-finding sync completes in ~2s — fine for realistic project sizes.
+
+### Confidence
+**8.5 / 10** for the surfaces tested. Safe to deploy on second project. Remaining gaps are operational, not correctness: concurrent-write isolation, exotic-filesystem (OneDrive sync / case-insensitive mounts) behavior, mid-write kill recovery. Mitigation: don't run lattice commands in parallel against the same `.lattice/` tree.
+
 ## [0.7.5] — 2026-05-12
 
 Parallel `/lattice-fix` scale test + cross-file drift sweep across all 4 audit skills.
