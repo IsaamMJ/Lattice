@@ -41,8 +41,9 @@ usage() {
 lattice — Lattice findings CLI (v0.7)
 
 Usage:
-  lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>] [--pr <num>]
+  lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>|--pending] [--pr <num>]
   lattice close <id> --partial "<text>" [--commit <sha>]
+  lattice resolve-pending [--commit <sha>]
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
@@ -2000,6 +2001,59 @@ cmd_changelog() {
 }
 
 # ---------------------------------------------------------------------------
+# resolve-pending — replace __PENDING__ placeholders with current HEAD short SHA.
+# Used after `lattice close --pending` followed by the fix commit. Scans all
+# closed YAMLs and rewrites in place.
+# Usage:
+#   lattice resolve-pending [--commit <sha>]    # default: HEAD
+# Exit: 0 if any changes (or none to do); 1 on git failure.
+# ---------------------------------------------------------------------------
+cmd_resolve_pending() {
+  local target_commit=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --commit) [ -z "${2:-}" ] && die "resolve-pending: --commit requires a value"
+                target_commit="$2"; shift 2 ;;
+      *) die "resolve-pending: unknown arg: $1" ;;
+    esac
+  done
+
+  local sha
+  if [ -n "${target_commit}" ]; then
+    if ! sha="$(git rev-parse --short "${target_commit}" 2>/dev/null)"; then
+      die "resolve-pending: cannot resolve --commit '${target_commit}'"
+    fi
+  else
+    if ! sha="$(git rev-parse --short HEAD 2>/dev/null)"; then
+      die "resolve-pending: not in a git repo (use --commit <sha>)"
+    fi
+  fi
+
+  [ -d ".lattice/findings/closed" ] || { echo "[${PROG}] resolve-pending: no closed findings directory"; return 0; }
+
+  shopt -s nullglob
+  local resolved=0
+  for f in .lattice/findings/closed/*.yml .lattice/findings/closed/*/*.yml; do
+    [ -f "${f}" ] || continue
+    if grep -q '^closed_by_commit: __PENDING__$' "${f}"; then
+      # Use awk for cross-platform safety (macOS sed -i differs from GNU sed -i)
+      local tmp; tmp="$(mktemp)"
+      awk -v sha="${sha}" '/^closed_by_commit: __PENDING__$/ { print "closed_by_commit: " sha; next } { print }' "${f}" > "${tmp}"
+      mv "${tmp}" "${f}"
+      echo "[${PROG}] resolved: ${f} -> ${sha}"
+      resolved=$((resolved + 1))
+    fi
+  done
+
+  if [ ${resolved} -eq 0 ]; then
+    echo "[${PROG}] resolve-pending: no __PENDING__ markers found (nothing to do)"
+  else
+    echo "[${PROG}] resolved ${resolved} pending finding(s) to ${sha}"
+    echo "[${PROG}] next: git add .lattice/findings/closed/ && git commit --amend --no-edit"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -2039,6 +2093,7 @@ case "${sub}" in
   doctor)             cmd_doctor "$@" ;;
   export)             cmd_export "$@" ;;
   changelog)          cmd_changelog "$@" ;;
+  resolve-pending)    cmd_resolve_pending "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

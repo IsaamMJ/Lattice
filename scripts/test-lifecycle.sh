@@ -567,6 +567,59 @@ else
   fail "milestone filter mis-partitioned: p0=${out_p0} post=${out_post}"
 fi
 
+note "Test 41: close --pending stamps __PENDING__ placeholder (v0.7.11)"
+new_fixture t41
+write_yaml .lattice/findings/open/LOW-pend.yml pend LOW
+if "${LATTICE}" close LOW-pend --reason fixed --pending >/tmp/lattice-t41.out 2>&1; then
+  if grep -q '^closed_by_commit: __PENDING__$' .lattice/findings/closed/LOW-pend.yml; then
+    ok "close --pending writes __PENDING__ sentinel"
+  else
+    fail "close --pending did not write __PENDING__: $(grep closed_by_commit .lattice/findings/closed/LOW-pend.yml)"
+  fi
+else
+  fail "close --pending failed: $(cat /tmp/lattice-t41.out)"
+fi
+
+note "Test 42: resolve-pending replaces __PENDING__ with HEAD short SHA (v0.7.11)"
+new_fixture t42
+write_yaml .lattice/findings/open/LOW-rp.yml rp LOW
+"${LATTICE}" close LOW-rp --reason fixed --pending >/dev/null 2>&1
+if "${LATTICE}" resolve-pending >/tmp/lattice-t42.out 2>&1; then
+  STAMPED=$(grep '^closed_by_commit:' .lattice/findings/closed/LOW-rp.yml | awk '{print $2}')
+  HEAD_SHA=$(git rev-parse --short HEAD)
+  if [ "${STAMPED}" = "${HEAD_SHA}" ]; then
+    ok "resolve-pending stamps current HEAD SHA"
+  else
+    fail "resolve-pending stamped wrong SHA: ${STAMPED} vs ${HEAD_SHA}"
+  fi
+else
+  fail "resolve-pending failed: $(cat /tmp/lattice-t42.out)"
+fi
+
+note "Test 43: --pending and --commit mutually exclusive (v0.7.11)"
+new_fixture t43
+write_yaml .lattice/findings/open/LOW-conf.yml conf LOW
+if "${LATTICE}" close LOW-conf --reason fixed --pending --commit HEAD >/tmp/lattice-t43.out 2>&1; then
+  fail "--pending and --commit should be mutually exclusive"
+else
+  grep -q "mutually exclusive" /tmp/lattice-t43.out && ok "--pending + --commit conflict rejected" || fail "conflict error unclear"
+fi
+
+note "Test 44: post-commit hook resolves pending and stamped SHA matches fix commit (v0.7.11)"
+new_fixture t44
+cp "${REPO_ROOT}/scripts/post-commit-resolve-pending.sh" .git/hooks/post-commit
+chmod +x .git/hooks/post-commit
+write_yaml .lattice/findings/open/LOW-hook.yml hook LOW
+"${LATTICE}" close LOW-hook --reason fixed --pending >/dev/null 2>&1
+git add . && git commit -qm "fix LOW-hook test" 2>/dev/null
+FIX_SHA=$(git log --oneline | grep "fix LOW-hook" | awk '{print $1}')
+STAMPED_SHA=$(grep '^closed_by_commit:' .lattice/findings/closed/LOW-hook.yml | awk '{print $2}')
+if [ "${FIX_SHA}" = "${STAMPED_SHA}" ] && git cat-file -e "${STAMPED_SHA}" 2>/dev/null; then
+  ok "post-commit hook stamps reachable SHA matching fix commit"
+else
+  fail "hook mismatch: fix=${FIX_SHA} stamped=${STAMPED_SHA}"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

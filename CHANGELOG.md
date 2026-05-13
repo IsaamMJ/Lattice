@@ -2,6 +2,42 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.11] — 2026-05-13
+
+Real-usage workflow fix: pre-commit close stamping was producing wrong `closed_by_commit` SHAs. Reported by a project actively using Lattice — they had to follow up every close with a manual fix commit. This release ships the proper lifecycle.
+
+### Problem
+The natural workflow was: edit code → `lattice close <id>` → commit. But at step 2, `HEAD` was still the *previous* commit, so `closed_by_commit` got stamped with the wrong SHA. Users had to manually rewrite the YAML after the fix commit landed.
+
+### Added
+- **`lattice close --pending`** — stamps `closed_by_commit: __PENDING__` instead of resolving HEAD. Mutually exclusive with `--commit`. Use when closing BEFORE the fix commit lands.
+- **`lattice resolve-pending [--commit <sha>]`** — scans all closed YAMLs, replaces `__PENDING__` with current HEAD short SHA (or explicit `--commit`). One command, batches all pending findings.
+- **`scripts/post-commit-resolve-pending.sh`** — optional git hook. Auto-resolves `__PENDING__` after every commit by creating a follow-up `lifecycle:` commit. Install once: `cp scripts/post-commit-resolve-pending.sh .git/hooks/post-commit && chmod +x .git/hooks/post-commit`.
+
+### Workflow (with hook installed)
+```bash
+lattice close <id> --reason fixed --pending
+git add . && git commit -m "fix X"
+# Hook auto-creates "lifecycle: stamp closed_by_commit ..." commit.
+# Stamped SHA = fix commit SHA. Both stay reachable.
+```
+
+### Workflow (manual, no hook)
+```bash
+lattice close <id> --reason fixed --pending
+git add . && git commit -m "fix X"
+lattice resolve-pending
+git add . && git commit -m "lifecycle: resolve pending close"
+```
+
+### Design notes
+- **Hook uses follow-up commit, not amend.** Amend changes the commit SHA, leaving the stamped value pointing at an orphaned object that `git gc` can reap. A follow-up commit keeps the original (stamped) SHA reachable forever.
+- **Rejected the "predict next commit SHA" approach** as proposed in the bug report — commit SHAs depend on tree+parent+message+author+timestamp; you can't compute them before the commit happens.
+- The hook is recursion-safe: the follow-up commit re-triggers post-commit, but the second pass finds no `__PENDING__` markers and exits clean.
+
+### Tests
+40 → 44. New: `--pending` writes sentinel, `resolve-pending` stamps correct SHA, `--pending`/`--commit` mutually exclusive, hook stamps reachable SHA matching the fix commit.
+
 ## [0.7.10] — 2026-05-13
 
 Milestone axis. Final Tier-2 feature for the day. v0.8.0 reserved for the planned bigger scope (cross-dimension dedupe + Closes-Lattice commit convention + JSON Schema validation).

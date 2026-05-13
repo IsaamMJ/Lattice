@@ -64,6 +64,7 @@ PARTIAL=""
 PARTIAL_MODE=0
 REASON=""
 RATIONALE=""
+PENDING_MODE=0
 
 require_value_for() {
   local flag="$1" next="$2"
@@ -98,6 +99,12 @@ while [ "$#" -gt 0 ]; do
       require_value_for "--rationale" "${2:-}"
       RATIONALE="$2"; shift 2
       ;;
+    --pending)
+      # v0.7.11: stamp closed_by_commit: __PENDING__ instead of resolving HEAD.
+      # Use when closing BEFORE the fix commit lands. Resolve later with
+      # `lattice resolve-pending` (manual) or the post-commit hook (automatic).
+      PENDING_MODE=1; shift
+      ;;
     *)
       echo "[lattice-close] error: unknown arg: $1" >&2
       usage
@@ -106,11 +113,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Resolve commit. Hard-fail outside git if no --commit given.
-if [ -z "${COMMIT}" ]; then
-  if ! COMMIT="$(git rev-parse HEAD 2>/dev/null)"; then
-    echo "[lattice-close] error: not in a git repo. Use --commit <sha> to specify." >&2
-    exit 1
+# Pending mode short-circuits commit resolution. SHA gets stamped as __PENDING__
+# and resolved later via `lattice resolve-pending` or the post-commit hook.
+if [ "${PENDING_MODE}" -eq 1 ]; then
+  if [ -n "${COMMIT}" ]; then
+    echo "[lattice-close] error: --pending and --commit are mutually exclusive" >&2
+    exit 2
+  fi
+  COMMIT="__PENDING__"
+else
+  # Resolve commit. Hard-fail outside git if no --commit given.
+  if [ -z "${COMMIT}" ]; then
+    if ! COMMIT="$(git rev-parse HEAD 2>/dev/null)"; then
+      echo "[lattice-close] error: not in a git repo. Use --commit <sha>, --pending, or run inside git." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -128,15 +145,18 @@ esac
 
 # v0.7.2: resolve --commit through git rev-parse so HEAD, branch names, tags,
 # and short SHAs all work uniformly (README quickstart promises `--commit HEAD`).
-if RESOLVED="$(git rev-parse --short "${COMMIT}" 2>/dev/null)"; then
-  COMMIT="${RESOLVED}"
+# v0.7.11: skip resolution when COMMIT is the __PENDING__ sentinel.
+if [ "${COMMIT}" != "__PENDING__" ]; then
+  if RESOLVED="$(git rev-parse --short "${COMMIT}" 2>/dev/null)"; then
+    COMMIT="${RESOLVED}"
+  fi
+  SHORT_SHA="${COMMIT:0:7}"
+  if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]; then
+    echo "[lattice-close] error: --commit must be a git ref or hex SHA (got: ${COMMIT})" >&2
+    exit 2
+  fi
+  COMMIT="${SHORT_SHA}"
 fi
-SHORT_SHA="${COMMIT:0:7}"
-if ! [[ "${SHORT_SHA}" =~ ^[0-9a-f]{7}$ ]]; then
-  echo "[lattice-close] error: --commit must be a git ref or hex SHA (got: ${COMMIT})" >&2
-  exit 2
-fi
-COMMIT="${SHORT_SHA}"
 
 # Normalize accepted input forms to a filename slug.
 FIND="${FIND%.yml}"
