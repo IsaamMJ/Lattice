@@ -46,7 +46,7 @@ Usage:
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
-  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review]
+  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--due-for-review] [--blocked|--unblocked]
   lattice show <id>
   lattice triage [--module M] [--tier T] [--status S] [--dimension D] [--cluster]
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
@@ -66,6 +66,7 @@ Usage:
   lattice id-gen <dimension> <rule> <file> <code_context>
   lattice doctor
   lattice export --format markdown [--tier T] [--dimension D] [--module M] [--closed]
+  lattice changelog --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--tier T] [--module M]
   lattice version
   lattice help
 
@@ -634,6 +635,7 @@ cmd_defer() {
 cmd_list() {
   local filter_module="" filter_tier="" filter_status="" filter_dim=""
   local due_for_review=0
+  local blocked_filter=""   # "" = no filter, "blocked" = only blocked, "unblocked" = only unblocked
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --module)    filter_module="$2"; shift 2 ;;
@@ -641,6 +643,8 @@ cmd_list() {
       --status)    filter_status="$2"; shift 2 ;;
       --dimension) filter_dim="$2"; shift 2 ;;
       --due-for-review) due_for_review=1; shift ;;
+      --unblocked) blocked_filter="unblocked"; shift ;;
+      --blocked)   blocked_filter="blocked"; shift ;;
       *) die "list: unknown arg: $1" ;;
     esac
   done
@@ -678,6 +682,15 @@ cmd_list() {
     [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
     [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
     [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
+
+    if [ -n "${blocked_filter}" ]; then
+      local blocked_by
+      blocked_by="$(yaml_field "${f}" "blocked_by")"
+      case "${blocked_filter}" in
+        unblocked) [ -n "${blocked_by}" ] && continue ;;
+        blocked)   [ -z "${blocked_by}" ] && continue ;;
+      esac
+    fi
 
     if [ "${due_for_review}" -eq 1 ]; then
       [ "${status}" != "deferred" ] && continue
@@ -1860,6 +1873,125 @@ cmd_export() {
 }
 
 # ---------------------------------------------------------------------------
+# changelog — render closed findings as release-note markdown.
+# Usage:
+#   lattice changelog --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--tier T] [--module M]
+# Output: markdown grouped by close_reason (fixed first), then tier.
+# Skips findings without closed_at or with closed_at outside the window.
+# ---------------------------------------------------------------------------
+cmd_changelog() {
+  local since="" until="" filter_tier="" filter_module=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --since)   [ -z "${2:-}" ] && die "changelog: --since requires YYYY-MM-DD"
+                 since="$2"; shift 2 ;;
+      --until)   [ -z "${2:-}" ] && die "changelog: --until requires YYYY-MM-DD"
+                 until="$2"; shift 2 ;;
+      --tier)    [ -z "${2:-}" ] && die "changelog: --tier requires a value"
+                 filter_tier="${2^^}"; shift 2 ;;
+      --module)  [ -z "${2:-}" ] && die "changelog: --module requires a value"
+                 filter_module="$2"; shift 2 ;;
+      *) die "changelog: unknown arg: $1" ;;
+    esac
+  done
+
+  [ -z "${since}" ] && die "changelog: --since is required (format: YYYY-MM-DD)"
+  [[ "${since}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "changelog: --since must be YYYY-MM-DD"
+  if [ -n "${until}" ]; then
+    [[ "${until}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "changelog: --until must be YYYY-MM-DD"
+  fi
+
+  [ -d ".lattice/findings/closed" ] || { echo "_No closed findings._"; return 0; }
+
+  shopt -s nullglob
+  # Collect: "reason|tier|module|rule|file|line|title|closed_by_commit|closed_at|path"
+  local rows=()
+  for f in .lattice/findings/closed/*.yml .lattice/findings/closed/*/*.yml; do
+    [ -f "${f}" ] || continue
+    local closed_at reason tier module rule file line title commit
+    closed_at="$(yaml_field "${f}" "closed_at")"
+    [ -z "${closed_at}" ] && continue
+    local closed_date="${closed_at%%T*}"
+    [[ "${closed_date}" < "${since}" ]] && continue
+    if [ -n "${until}" ]; then
+      [[ "${closed_date}" > "${until}" ]] && continue
+    fi
+    reason="$(yaml_field "${f}" "close_reason")"
+    [ -z "${reason}" ] && reason="fixed"
+    tier="$(yaml_field "${f}" "tier")"
+    module="$(yaml_field "${f}" "module")"
+    rule="$(yaml_field "${f}" "rule")"
+    file="$(yaml_field "${f}" "file")"
+    line="$(yaml_field "${f}" "line")"
+    title="$(yaml_field "${f}" "title")"
+    commit="$(yaml_field "${f}" "closed_by_commit")"
+
+    [ -n "${filter_tier}" ] && [ "${tier^^}" != "${filter_tier}" ] && continue
+    if [ -n "${filter_module}" ]; then
+      [[ "${module,,}" == *"${filter_module,,}"* ]] || continue
+    fi
+
+    rows+=("${reason}|${tier}|${module}|${rule}|${file}|${line}|${title}|${commit}|${closed_at}")
+  done
+
+  if [ ${#rows[@]} -eq 0 ]; then
+    echo "# Changelog (since ${since}${until:+ until ${until}})"
+    echo ""
+    echo "_No findings closed in the given window._"
+    return 0
+  fi
+
+  echo "# Changelog"
+  echo ""
+  if [ -n "${until}" ]; then
+    echo "Closed findings between **${since}** and **${until}** (${#rows[@]} total)."
+  else
+    echo "Closed findings since **${since}** (${#rows[@]} total)."
+  fi
+  echo ""
+
+  # Order: fixed → false-positive → wont-fix → out-of-scope → duplicate
+  local reason_order="fixed false-positive wont-fix out-of-scope duplicate"
+  local tier_order="CRITICAL BLOCKER HIGH RISK DRIFT MEDIUM WATCH LOW INTENTIONAL UNVERIFIABLE OK"
+
+  for r in ${reason_order}; do
+    local reason_rows=()
+    for row in "${rows[@]}"; do
+      [ "${row%%|*}" = "${r}" ] && reason_rows+=("${row}")
+    done
+    [ ${#reason_rows[@]} -eq 0 ] && continue
+
+    local pretty_reason="${r}"
+    case "${r}" in
+      fixed)          pretty_reason="Fixed" ;;
+      false-positive) pretty_reason="False positives" ;;
+      wont-fix)       pretty_reason="Won't fix" ;;
+      out-of-scope)   pretty_reason="Out of scope" ;;
+      duplicate)      pretty_reason="Duplicates" ;;
+    esac
+    echo "## ${pretty_reason} (${#reason_rows[@]})"
+    echo ""
+
+    for t in ${tier_order}; do
+      local printed=0
+      for row in "${reason_rows[@]}"; do
+        IFS='|' read -r _r row_tier row_module row_rule row_file row_line row_title row_commit row_closed_at <<< "${row}"
+        [ "${row_tier^^}" = "${t}" ] || continue
+        if [ ${printed} -eq 0 ]; then
+          echo "### ${t}"
+          printed=1
+        fi
+        local where="${row_file}:${row_line}"
+        local commit_ref=""
+        [ -n "${row_commit}" ] && commit_ref=" (\`${row_commit}\`)"
+        printf -- "- **%s** / \`%s\` — %s%s\n" "${row_module}" "${row_rule}" "${row_title:-${where}}" "${commit_ref}"
+      done
+      [ ${printed} -eq 1 ] && echo ""
+    done
+  done
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -1898,6 +2030,7 @@ case "${sub}" in
   id-gen)             cmd_id_gen "$@" ;;
   doctor)             cmd_doctor "$@" ;;
   export)             cmd_export "$@" ;;
+  changelog)          cmd_changelog "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

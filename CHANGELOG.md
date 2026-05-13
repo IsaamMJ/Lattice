@@ -2,6 +2,22 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] — 2026-05-13
+
+Cross-finding state — release-note generation + external-blocker tracking. Second Tier-2 batch. Still narrow on code-anchored findings; `blocked_by` is an optional annotation, not a new finding type.
+
+### Added
+- **`lattice changelog --since <YYYY-MM-DD> [--until <YYYY-MM-DD>] [--tier T] [--module M]`** — renders closed findings as release-note markdown. Groups by `close_reason` (Fixed → False positives → Won't fix → Out of scope → Duplicates), then by tier within each group. Emits `closed_by_commit` as a code-spanned ref. Filters compose. Solves "what shipped in May?" without manual stitching.
+- **`blocked_by:` optional finding field** — free-form string (`blocked_by: "vendor X"` or `blocked_by: "legal review"`). No schema enforcement, no enum, no required-format. Just a flag.
+- **`lattice list --unblocked` / `--blocked`** — partition findings by presence of `blocked_by`. `--unblocked` shows only findings ready to work on; `--blocked` shows only those waiting on external dependencies. Removes person-blocker noise from daily `lattice next` flow.
+
+### Tests
+35 → 39. New cases: list `--unblocked`/`--blocked` partition correctly, changelog renders closed findings grouped by reason, changelog requires `--since`, changelog rejects non-ISO date.
+
+### Boundary check
+- `changelog` is a read-only render of existing closed YAMLs. No schema change.
+- `blocked_by` is an annotation field. Findings still need `file:line`. Cannot be used to file "build a landing page" findings — the boundary holds. The field is for "this code finding can't be closed until vendor X responds," not for tracking the vendor itself.
+
 ## [0.7.8] — 2026-05-13
 
 Discoverability + stakeholder export. First Tier-2 features — both small, both immediately useful, neither blurs the Lattice/strategy boundary.

@@ -506,6 +506,50 @@ else
   fail "export --tier did not filter correctly: $(cat /tmp/lattice-t35.out)"
 fi
 
+note "Test 36: lattice list --unblocked / --blocked filters (v0.7.9)"
+new_fixture t36
+write_yaml .lattice/findings/open/HIGH-block.yml block HIGH
+echo 'blocked_by: "vendor X"' >> .lattice/findings/open/HIGH-block.yml
+write_yaml .lattice/findings/open/HIGH-free.yml free HIGH
+out_un="$("${LATTICE}" list --unblocked 2>/dev/null)"
+out_bl="$("${LATTICE}" list --blocked 2>/dev/null)"
+if echo "${out_un}" | grep -q "free" && ! echo "${out_un}" | grep -q "block" \
+   && echo "${out_bl}" | grep -q "block" && ! echo "${out_bl}" | grep -q "free"; then
+  ok "list --unblocked / --blocked partition correctly"
+else
+  fail "blocked filter mis-partitioned: unblocked=${out_un} blocked=${out_bl}"
+fi
+
+note "Test 37: lattice changelog renders closed findings (v0.7.9)"
+new_fixture t37
+write_yaml .lattice/findings/open/LOW-chlog.yml chlog LOW
+"${LATTICE}" close LOW-chlog --reason fixed --commit abcdef1 >/dev/null
+if "${LATTICE}" changelog --since 2026-01-01 >/tmp/lattice-t37.out 2>&1; then
+  if grep -q "## Fixed" /tmp/lattice-t37.out && grep -q "chlog" /tmp/lattice-t37.out; then
+    ok "changelog renders closed findings grouped by reason"
+  else
+    fail "changelog missing expected content: $(cat /tmp/lattice-t37.out)"
+  fi
+else
+  fail "changelog failed: $(cat /tmp/lattice-t37.out)"
+fi
+
+note "Test 38: lattice changelog --since required (v0.7.9)"
+new_fixture t38
+if "${LATTICE}" changelog >/tmp/lattice-t38.out 2>&1; then
+  fail "changelog should require --since"
+else
+  grep -q "since" /tmp/lattice-t38.out && ok "changelog requires --since" || fail "changelog error unclear"
+fi
+
+note "Test 39: lattice changelog --since validates date format (v0.7.9)"
+new_fixture t39
+if "${LATTICE}" changelog --since "yesterday" >/tmp/lattice-t39.out 2>&1; then
+  fail "changelog should reject non-ISO date"
+else
+  ok "changelog rejects non-ISO --since"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"
