@@ -126,3 +126,15 @@ mv "${tmp}" "${DEST}"
 
 echo "[lattice-reopen] reopened ${FIND} → ${DEST}"
 echo "[lattice-reopen] previously_closed_in=${ORIG_SHA}"
+
+# v0.7.12: same half-staged fix as lattice-close.sh. Stage the new open/
+# location and the deletion of the closed/ source so `git commit` after
+# reopen captures both sides of the move.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  staged=0
+  git add -- "${DEST}" 2>/dev/null && staged=1 || true
+  git rm --cached -q -- "${SRC}" 2>/dev/null && staged=1 || true
+  if [ ${staged} -eq 1 ]; then
+    echo "[lattice-reopen] git: staged ${DEST} (add) + ${SRC} (delete)"
+  fi
+fi

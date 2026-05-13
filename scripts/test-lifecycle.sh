@@ -620,6 +620,36 @@ else
   fail "hook mismatch: fix=${FIX_SHA} stamped=${STAMPED_SHA}"
 fi
 
+note "Test 45: close auto-stages both paths so single commit captures the move (v0.7.12)"
+new_fixture t45
+write_yaml .lattice/findings/open/LOW-stage.yml stage LOW
+git add .lattice/findings/open/LOW-stage.yml && git commit -qm "file finding" 2>/dev/null
+"${LATTICE}" close LOW-stage --reason fixed --commit HEAD >/dev/null
+status=$(git status --short)
+# Git should show this as a clean rename (R), no unstaged delete dangling
+if echo "${status}" | grep -qE '^R[[:space:]]'; then
+  ok "close stages move as a rename (no half-staged state)"
+elif echo "${status}" | grep -qE '^A[[:space:]]' && echo "${status}" | grep -qE '^D[[:space:]]'; then
+  # On some git versions rename detection requires -M flag; A+D is also acceptable
+  ok "close stages both add and delete (no half-staged state)"
+else
+  fail "close left half-staged state: ${status}"
+fi
+
+note "Test 46: reopen auto-stages both paths (v0.7.12)"
+new_fixture t46
+write_yaml .lattice/findings/open/LOW-reop.yml reop LOW
+"${LATTICE}" close LOW-reop --reason fixed --commit HEAD >/dev/null
+git commit -qm "close LOW-reop" 2>/dev/null
+"${LATTICE}" reopen LOW-reop --reason "regression" >/dev/null
+status=$(git status --short)
+if echo "${status}" | grep -qE '^R[[:space:]]' \
+   || (echo "${status}" | grep -qE '^A[[:space:]]' && echo "${status}" | grep -qE '^D[[:space:]]'); then
+  ok "reopen stages move so single commit captures both sides"
+else
+  fail "reopen left half-staged state: ${status}"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"

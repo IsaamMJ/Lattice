@@ -290,3 +290,20 @@ mv "${tmp}" "${DEST}"
 
 echo "[lattice-close] closed ${FIND} → ${DEST}"
 echo "[lattice-close] commit=${COMMIT} reason=${REASON:-fixed}${PR:+ pr=${PR}}"
+
+# v0.7.12: auto-stage both paths in git so `git commit` after close just works.
+# Without this, the user sees "open/ delete (unstaged) + closed/ add (staged)"
+# and a naive `git add closed/` followed by commit leaves the open/ delete
+# behind, producing a half-staged state and a finding present in both dirs
+# after pull on another machine.
+# Falls back silently outside git or if files aren't tracked.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  staged=0
+  git add -- "${DEST}" 2>/dev/null && staged=1 || true
+  # Stage the delete of SRC if it was tracked. `git rm --cached` removes it
+  # from the index regardless of working-tree state.
+  git rm --cached -q -- "${SRC}" 2>/dev/null && staged=1 || true
+  if [ ${staged} -eq 1 ]; then
+    echo "[lattice-close] git: staged ${DEST} (add) + ${SRC} (delete)"
+  fi
+fi

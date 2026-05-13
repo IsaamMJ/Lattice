@@ -2,6 +2,23 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.12] — 2026-05-13
+
+Half-staged git state after `lattice close` / `lattice reopen`. Reported from real team usage (jiive-backend `fd1d238 → 09b2490` had to be split into two commits to clean up). Last patch before v0.8.0 work begins.
+
+### Fixed
+- **`lattice close` now auto-stages both sides of the move.** Previously `mv open/X.yml → closed/X.yml` left git showing `A` (new file in closed/) + unstaged `D` (delete in open/). A naive `git add closed/ && git commit` shipped the add without the delete — finding visible in BOTH directories after pull on another machine. Now: at end of close, runs `git add DEST` + `git rm --cached SRC`. Git typically detects this as a clean rename (`R` in status). Single commit captures both sides. Silent fallback outside git or on untracked files.
+- **`lattice reopen` got the same fix** (mirror problem: `closed/X.yml → open/X.yml` left the closed-side delete unstaged).
+
+### Tests
+44 → 46. New: close stages move as rename, reopen stages move as rename. Both verify single `git commit` captures the full move with no residual state.
+
+### Severity
+LOW (cosmetic / workflow), but recurring foot-gun on teams. Reporter rated it LOW; we agree but shipped fast because the workaround (`git add -A .lattice/findings/` every time) is the kind of friction that erodes trust in the tool.
+
+### Last 0.7.x patch
+Hard stop on 0.7.x feature/fix releases after this. v0.8.0 will be "Closed Loops" — headless audit + auto-fix + bug-report-back, ~3 weeks of real engineering. Strategy locked.
+
 ## [0.7.11] — 2026-05-13
 
 Real-usage workflow fix: pre-commit close stamping was producing wrong `closed_by_commit` SHAs. Reported by a project actively using Lattice — they had to follow up every close with a manual fix commit. This release ships the proper lifecycle.
