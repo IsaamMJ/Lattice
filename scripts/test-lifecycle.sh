@@ -753,6 +753,90 @@ else
   fail "telemetry should fire after explicit opt-in: cfg=$(cat .lattice/config.yml 2>/dev/null), out=$(echo "${out}" | tail -5)"
 fi
 
+note "Test 56: lattice verify --rerun-grep reports STILL OPEN when pattern matches (v0.8.0, closes #10)"
+new_fixture t56
+# Seed a finding with a verify_pattern that should currently match
+cat > .lattice/findings/open/HIGH-rg-stale.yml <<YML
+id: rg-stale-id
+rule: stale
+dimension: audit
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: code still present
+fix: remove it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+verify_pattern: ^code$
+YML
+if "${LATTICE}" verify HIGH-rg-stale --rerun-grep > /tmp/lattice-t56.out 2>&1; then
+  fail "verify --rerun-grep should exit 1 when pattern still matches: $(cat /tmp/lattice-t56.out)"
+else
+  grep -q "STILL OPEN" /tmp/lattice-t56.out && ok "verify --rerun-grep reports STILL OPEN when pattern matches" || fail "missing STILL OPEN: $(cat /tmp/lattice-t56.out)"
+fi
+
+note "Test 57: lattice verify --rerun-grep reports PASS when pattern no longer matches (v0.8.0)"
+new_fixture t57
+cat > .lattice/findings/open/HIGH-rg-fixed.yml <<YML
+id: rg-fixed-id
+rule: fixed
+dimension: audit
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: code already removed
+fix: remove it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+verify_pattern: this-never-appears-XYZQ
+YML
+if "${LATTICE}" verify HIGH-rg-fixed --rerun-grep > /tmp/lattice-t57.out 2>&1; then
+  grep -q "PASS — finding appears resolved" /tmp/lattice-t57.out && ok "verify --rerun-grep reports PASS when pattern no longer matches" || fail "missing PASS: $(cat /tmp/lattice-t57.out)"
+else
+  fail "verify --rerun-grep should exit 0 when pattern gone: $(cat /tmp/lattice-t57.out)"
+fi
+
+note "Test 58: lattice verify --rerun-grep --close-clean moves YAML to closed/ (v0.8.0)"
+new_fixture t58
+cat > .lattice/findings/open/HIGH-rg-auto.yml <<YML
+id: rg-auto-id
+rule: auto
+dimension: audit
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: auto-close candidate
+fix: remove it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+verify_pattern: never-matches-ABCQ
+YML
+"${LATTICE}" verify HIGH-rg-auto --rerun-grep --close-clean > /tmp/lattice-t58.out 2>&1 || true
+if [ ! -f .lattice/findings/open/HIGH-rg-auto.yml ] && ls .lattice/findings/closed/*.yml 2>/dev/null | grep -q rg-auto; then
+  ok "verify --rerun-grep --close-clean moved finding to closed/"
+else
+  fail "finding not moved: $(ls .lattice/findings/open/ .lattice/findings/closed/ 2>/dev/null)"
+fi
+
+note "Test 59: lattice verify --rerun-grep with no verify_pattern emits hint (v0.8.0)"
+new_fixture t59
+write_yaml .lattice/findings/open/HIGH-rg-nop.yml nop HIGH
+out="$("${LATTICE}" verify HIGH-rg-nop --rerun-grep 2>&1 || true)"
+if echo "${out}" | grep -q "no verify_pattern: field"; then
+  ok "verify --rerun-grep hints when verify_pattern missing"
+else
+  fail "missing hint about verify_pattern: ${out}"
+fi
+
 note "Test 55: lattice config telemetry on --global writes to ~/.claude/lattice/config.yml (v0.8.0)"
 new_fixture t55
 rm -f "${HOME}/.claude/lattice/config.yml"

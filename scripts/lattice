@@ -71,7 +71,7 @@ Usage:
   lattice handoff <id>
   lattice next [--module M]
   lattice timeline [--since <YYYY-MM-DD>]
-  lattice verify <id> [--run]
+  lattice verify <id> [--run | --rerun-grep [--close-clean]]
   lattice ci-check [--tier <TIERS>]
   lattice pr-body [--since <YYYY-MM-DD>]
   lattice usage [--since <days>] [--unused <days>] [--json]
@@ -1395,16 +1395,19 @@ cmd_timeline() {
 # verify — print or run the simulate: steps for a finding.
 # ---------------------------------------------------------------------------
 cmd_verify() {
-  local run_mode=0
+  local run_mode=0 rerun_grep=0 close_clean=0
   local find_id=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --run) run_mode=1; shift ;;
+      --rerun-grep) rerun_grep=1; shift ;;
+      --close-clean) close_clean=1; shift ;;
       -*) die "verify: unknown flag: $1" ;;
       *)  find_id="$1"; shift ;;
     esac
   done
-  [ -z "${find_id}" ] && die "verify: usage: lattice verify <id> [--run]"
+  [ -z "${find_id}" ] && die "verify: usage: lattice verify <id> [--run | --rerun-grep [--close-clean]]"
+  [ "${close_clean}" -eq 1 ] && [ "${rerun_grep}" -eq 0 ] && die "verify: --close-clean requires --rerun-grep"
 
   local src
   src="$(locate_finding_interactive "${find_id}")" || die "verify: not found or cancelled: ${find_id}"
@@ -1422,6 +1425,67 @@ cmd_verify() {
   echo "[${PROG}] verify: ${tier}  ${module}/${rule}"
   [ -n "${title}" ] && echo "  ${title}"
   echo ""
+
+  if [ "${rerun_grep}" -eq 1 ]; then
+    local pattern verify_file negate file_field file_path
+    pattern="$(yaml_field "${src}" "verify_pattern")"
+    verify_file="$(yaml_field "${src}" "verify_file")"
+    negate="$(yaml_field "${src}" "verify_negate")"
+    file_field="$(yaml_field "${src}" "file")"
+    file_path="${verify_file:-${file_field}}"
+    file_path="${file_path%%:*}"
+
+    if [ -z "${pattern}" ]; then
+      echo "[${PROG}] verify: no verify_pattern: field in ${slug}"
+      echo "[${PROG}] hint: add verify_pattern: <regex> to the YAML so this command can re-run the grep that originally detected the issue."
+      echo "[${PROG}]       optional fields: verify_file: <path> (default: file:), verify_negate: true|false"
+      return 0
+    fi
+    if [ -z "${file_path}" ]; then
+      echo "[${PROG}] verify: no file: or verify_file: field — cannot re-run grep"
+      return 2
+    fi
+    if [ ! -f "${file_path}" ]; then
+      echo "[${PROG}] verify: file no longer exists: ${file_path}"
+      echo "[${PROG}] hint: file was deleted or moved — close with --reason fixed (if intentional) or duplicate (if relocated)"
+      return 2
+    fi
+
+    local matched=0
+    if grep -qE -- "${pattern}" "${file_path}" 2>/dev/null; then
+      matched=1
+    fi
+
+    local is_clean=0 verdict
+    if [ "${negate}" = "true" ]; then
+      [ "${matched}" -eq 1 ] && is_clean=1
+      verdict="pattern (negate) MATCH = clean"
+    else
+      [ "${matched}" -eq 0 ] && is_clean=1
+      verdict="pattern NO-MATCH = clean"
+    fi
+
+    echo "  file:    ${file_path}"
+    echo "  pattern: ${pattern}"
+    echo "  mode:    ${verdict}"
+    echo "  matched: $([ ${matched} -eq 1 ] && echo yes || echo no)"
+    echo ""
+    if [ "${is_clean}" -eq 1 ]; then
+      echo "[${PROG}] verify: PASS — finding appears resolved (pattern check clean)"
+      if [ "${close_clean}" -eq 1 ]; then
+        local sha
+        sha="$(git rev-parse --short HEAD 2>/dev/null || echo manual)"
+        # Use the helper directly to avoid PATH/recursion oddities.
+        bash "${HELPER_CLOSE}" "${slug}" --reason fixed --commit "${sha}" --rationale "auto-closed by lattice verify --rerun-grep --close-clean (pattern no longer matches)" >/dev/null 2>&1 \
+          && echo "[${PROG}] verify: --close-clean moved ${slug} to .lattice/findings/closed/" \
+          || echo "[${PROG}] verify: --close-clean FAILED to move finding — close manually"
+      fi
+      return 0
+    else
+      echo "[${PROG}] verify: STILL OPEN — pattern check did not pass (issue likely still present)"
+      return 1
+    fi
+  fi
 
   if [ -z "${simulate_steps}" ]; then
     echo "[${PROG}] verify: no simulate: steps defined in ${slug}"

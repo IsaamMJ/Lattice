@@ -159,6 +159,19 @@ simulate:
   - "curl -X POST http://localhost:3000/api/webhook -H 'X-Sig: bad' -d '{}'"
   - "Run admin tool: simulate REPORT_FULL with gender=F"
 
+# Machine-readable verification pattern (v0.8.0, optional everywhere).
+# Lets `lattice verify <id> --rerun-grep` re-execute the original pattern
+# hunt that produced this finding. When the pattern stops matching, the
+# finding is effectively resolved and can be auto-closed with --close-clean.
+#
+#   verify_pattern: <regex used by the audit skill>
+#   verify_file:    <path>   # optional, defaults to file: above
+#   verify_negate:  true     # optional — finding is clean when pattern MATCHES
+#                            #   (use for "must contain rate-limiter" checks)
+verify_pattern: 'console\.log\(.*token'
+verify_file: src/auth/session.ts
+# verify_negate: true
+
 # Optional everywhere — relates other findings (v0.6.7+)
 # Pure advisory hint surfacing sub-symptom / shared-root-cause relationships
 # during triage. Each entry is the slug of another finding (basename minus .yml).
