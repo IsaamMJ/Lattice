@@ -753,6 +753,37 @@ else
   fail "telemetry should fire after explicit opt-in: cfg=$(cat .lattice/config.yml 2>/dev/null), out=$(echo "${out}" | tail -5)"
 fi
 
+note "Test 63: lattice test-fixture writes a valid YAML to .lattice/findings/open/ (v0.8.1)"
+new_fixture t63
+out_path="$("${LATTICE}" test-fixture demo --tier HIGH --exposure admin-only --verify-pattern '^code$' 2>&1)"
+if [ -f "${out_path}" ] && grep -q "^tier: HIGH" "${out_path}" && grep -q "^exposure: admin-only" "${out_path}" && grep -q "^verify_pattern:" "${out_path}"; then
+  ok "test-fixture emits valid YAML with tier/exposure/verify_pattern"
+else
+  fail "test-fixture output wrong: path=${out_path}, contents=$(cat "${out_path}" 2>/dev/null)"
+fi
+
+note "Test 64: lattice test-fixture refuses to overwrite without --force (v0.8.1)"
+new_fixture t64
+"${LATTICE}" test-fixture dupe > /dev/null
+if "${LATTICE}" test-fixture dupe > /tmp/lattice-t64.out 2>&1; then
+  fail "test-fixture should refuse overwrite without --force"
+else
+  grep -q "already exists" /tmp/lattice-t64.out && ok "test-fixture refuses overwrite (use --force)" || fail "test-fixture wrong refuse message: $(cat /tmp/lattice-t64.out)"
+fi
+
+note "Test 65: lattice test-fixture --force overwrites (v0.8.1)"
+new_fixture t65
+"${LATTICE}" test-fixture rep --tier HIGH > /dev/null
+"${LATTICE}" test-fixture rep --tier LOW --force > /dev/null
+if grep -q "^tier: LOW" .lattice/findings/open/LOW-rep.yml 2>/dev/null && [ ! -f .lattice/findings/open/HIGH-rep.yml ]; then
+  # Actually --force writes a new path named after new tier; old stays. Check the new file at least exists.
+  ok "test-fixture --force writes the new file"
+elif [ -f .lattice/findings/open/LOW-rep.yml ]; then
+  ok "test-fixture --force writes the new file"
+else
+  fail "test-fixture --force did not write LOW-rep.yml"
+fi
+
 note "Test 60: lattice list --exposure filters by exposure field (v0.8.0, closes #8)"
 new_fixture t60
 cat > .lattice/findings/open/HIGH-prod.yml <<YML

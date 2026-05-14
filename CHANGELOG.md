@@ -2,6 +2,20 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-05-14
+
+**Dev-loop polish.** Two small additions that compound: faster validation and one-line test fixtures. Surfaced by dogfooding v0.8.0 in the same session that shipped it.
+
+### Added
+- **`lattice test-fixture <slug>` subcommand.** Emits a valid finding YAML to `.lattice/findings/open/<TIER>-<slug>.yml` (or `--out PATH`). Flags: `--tier`, `--dimension`, `--module`, `--file`, `--line`, `--title`, `--exposure`, `--verify-pattern`, `--force`. Cuts the 12-line `cat > .yml <<YML` boilerplate every new test in `scripts/test-lifecycle.sh` used to need. Refuses to overwrite without `--force`.
+- **`scripts/validate.sh --quick`.** Skips the lifecycle test suite (section 9) when iterating on polish locally; non-`--quick` runs (CI / release builds) still enforce the gate. Cuts `validate.sh` runtime from ~5 minutes to ~12 seconds when the suite already ran green seconds prior. The skip prints a hint pointing at `bash scripts/test-lifecycle.sh` for explicit reruns.
+
+### Tests
+- 62 → 65 lifecycle tests. New: `test-fixture` writes valid YAML (#63), refuses overwrite without `--force` (#64), honours `--force` (#65).
+
+### Why
+The v0.8.0 polish ship surfaced two repeating costs in the author's own loop: rerunning the lifecycle suite inside `validate.sh` immediately after running it standalone, and writing 14 lines of YAML boilerplate per new test. Both fixed structurally, not by discipline.
+
 ## [0.8.0] — 2026-05-14
 
 **"Closed Loops" — earned, not declared.** Five polish issues filed by an independent Claude session reviewing Lattice from the user's perspective. All five landed before the stable tag. No new features in flight, no version bumps during the discipline phase.

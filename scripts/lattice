@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.8.0)
+# lattice — unified CLI dispatcher (v0.8.1)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -61,6 +61,7 @@ Usage:
   lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>|--pending] [--pr <num>]
   lattice close <id> --partial "<text>" [--commit <sha>]
   lattice resolve-pending [--commit <sha>]
+  lattice test-fixture <slug> [--tier T] [--dimension D] [--exposure E] [--verify-pattern P] [--out PATH] [--force]
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
@@ -2341,6 +2342,82 @@ cmd_changelog() {
 #   lattice resolve-pending [--commit <sha>]    # default: HEAD
 # Exit: 0 if any changes (or none to do); 1 on git failure.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# test-fixture — emit a valid finding YAML for tests + dogfood scaffolding.
+#
+# Cuts the 12-line `cat > .lattice/findings/open/...yml <<YML` boilerplate
+# that every new test in scripts/test-lifecycle.sh used to need.
+#
+# Usage:
+#   lattice test-fixture <slug> [--tier T] [--dimension D] [--module M]
+#                               [--file F] [--line N] [--title TXT]
+#                               [--exposure E] [--verify-pattern PAT]
+#                               [--out PATH] [--force]
+#   Defaults: tier=MEDIUM dim=audit module=mod file=src/x.ts line=1
+#             title=<slug> id=<slug>-id
+#   Output: .lattice/findings/open/<TIER>-<slug>.yml  (or --out PATH)
+# ---------------------------------------------------------------------------
+cmd_test_fixture() {
+  local slug=""
+  local tier="MEDIUM" dim="audit" module="mod"
+  local file="src/x.ts" line="1" title=""
+  local exposure="" verify_pattern=""
+  local out_path="" force=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tier)            tier="$2"; shift 2 ;;
+      --dimension)       dim="$2"; shift 2 ;;
+      --module)          module="$2"; shift 2 ;;
+      --file)            file="$2"; shift 2 ;;
+      --line)            line="$2"; shift 2 ;;
+      --title)           title="$2"; shift 2 ;;
+      --exposure)        exposure="$2"; shift 2 ;;
+      --verify-pattern)  verify_pattern="$2"; shift 2 ;;
+      --out)             out_path="$2"; shift 2 ;;
+      --force)           force=1; shift ;;
+      -*)                die "test-fixture: unknown flag: $1" ;;
+      *)                 [ -z "${slug}" ] && slug="$1" || die "test-fixture: extra arg: $1"; shift ;;
+    esac
+  done
+  [ -z "${slug}" ] && die "test-fixture: usage: lattice test-fixture <slug> [--tier T] [--exposure E] [--verify-pattern P] [--out PATH]"
+  [ -z "${title}" ] && title="${slug}"
+
+  ensure_project_dirs
+
+  local target="${out_path}"
+  if [ -z "${target}" ]; then
+    target=".lattice/findings/open/${tier}-${slug}.yml"
+  fi
+  if [ -f "${target}" ] && [ "${force}" -ne 1 ]; then
+    die "test-fixture: ${target} already exists (use --force to overwrite)"
+  fi
+  mkdir -p "$(dirname "${target}")" 2>/dev/null || true
+
+  local today
+  today="$(date -u +%Y-%m-%d 2>/dev/null || echo 2026-05-14)"
+
+  {
+    printf 'id: %s-id\n' "${slug}"
+    printf 'rule: %s\n' "${slug}"
+    printf 'dimension: %s\n' "${dim}"
+    printf 'tier: %s\n' "${tier}"
+    printf 'module: %s\n' "${module}"
+    printf 'file: %s\n' "${file}"
+    printf 'line: %s\n' "${line}"
+    printf 'title: %s\n' "${title}"
+    printf 'fix: fix it\n'
+    printf 'sweep_date: %s\n' "${today}"
+    printf 'sweep_id: sw1\n'
+    printf 'auditor: claude-code/audit\n'
+    printf 'status: open\n'
+    [ -n "${exposure}" ]       && printf 'exposure: %s\n' "${exposure}"
+    [ -n "${verify_pattern}" ] && printf "verify_pattern: '%s'\n" "${verify_pattern//\'/\\\'}"
+  } > "${target}"
+  echo "${target}"
+}
+
+# ---------------------------------------------------------------------------
 cmd_resolve_pending() {
   local target_commit=""
   while [ "$#" -gt 0 ]; do
@@ -2429,6 +2506,7 @@ case "${sub}" in
   export)             cmd_export "$@" ;;
   changelog)          cmd_changelog "$@" ;;
   resolve-pending)    cmd_resolve_pending "$@" ;;
+  test-fixture)       cmd_test_fixture "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

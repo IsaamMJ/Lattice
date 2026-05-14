@@ -18,6 +18,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 
+# --quick: skip the lifecycle test suite section. Useful when iterating on
+# polish and the suite already ran green seconds ago. CI / release builds
+# must still call validate.sh without --quick to enforce the gate.
+QUICK=0
+for arg in "$@"; do
+  case "${arg}" in
+    --quick) QUICK=1 ;;
+  esac
+done
+
 note()   { printf "[validate] %s\n" "$*"; }
 warn()   { printf "[validate] WARN: %s\n" "$*" >&2; fail=1; }
 ok()     { printf "[validate]   ok: %s\n" "$*"; }
@@ -247,16 +257,20 @@ else
 fi
 
 # --- 9. Functional lifecycle test suite (v0.6.2 protection layer) -----
-note "running lifecycle test suite"
-if [ -f "${ROOT}/scripts/test-lifecycle.sh" ]; then
-  if bash "${ROOT}/scripts/test-lifecycle.sh" > /tmp/lattice-test-output.log 2>&1; then
-    ok "test-lifecycle.sh"
-  else
-    warn "test-lifecycle.sh failed (output below):"
-    sed 's/^/[validate]   /' /tmp/lattice-test-output.log >&2 || true
-  fi
+if [ "${QUICK}" -eq 1 ]; then
+  note "skipping lifecycle test suite (--quick) — re-run \`bash scripts/test-lifecycle.sh\` directly when needed"
 else
-  warn "missing scripts/test-lifecycle.sh (lifecycle protection layer)"
+  note "running lifecycle test suite"
+  if [ -f "${ROOT}/scripts/test-lifecycle.sh" ]; then
+    if bash "${ROOT}/scripts/test-lifecycle.sh" > /tmp/lattice-test-output.log 2>&1; then
+      ok "test-lifecycle.sh"
+    else
+      warn "test-lifecycle.sh failed (output below):"
+      sed 's/^/[validate]   /' /tmp/lattice-test-output.log >&2 || true
+    fi
+  else
+    warn "missing scripts/test-lifecycle.sh (lifecycle protection layer)"
+  fi
 fi
 
 # --- 10. Self-audit gate (v0.7.2+) -------------------------------------
