@@ -143,6 +143,28 @@ lattice update --enable-auto   # opt this project into automatic updates
 
 Default update mode is `notify` after config is initialized. Use `updates.mode: auto` for your own active projects, and `notify`, `pinned`, or `off` for client or production-sensitive repos.
 
+### Telemetry (opt-in, off by default)
+
+Lattice can send sanitized failure reports to a public Worker that opens GitHub issues (audit them at `github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry`). **Telemetry is OFF by default** — nothing is sent unless you explicitly opt in.
+
+```bash
+lattice config telemetry on            # opt in for this project
+lattice config telemetry on --global   # opt in for all your projects
+lattice config telemetry off           # opt out (project veto wins over --global)
+lattice config telemetry show          # show effective state + endpoint
+```
+
+| What is sent on FAILED commands | What is NEVER sent |
+| --- | --- |
+| Lattice version | File paths or repo names |
+| Command name (e.g. `close`, `sync`) | Finding IDs / slugs |
+| Exit code | Commit SHAs |
+| OS family (`linux` / `darwin` / `windows`) | Source code, diffs, or YAML bodies |
+| Hashed fingerprint of `(command, exit_code)` | Project names or directory names |
+| Hashed `(hostname, $HOME)` so one bug counts once per machine | Usernames or user emails |
+
+Successful commands never trigger telemetry. `help`, `--version`, `doctor`, `config`, and `update` exit failures are also skipped. The full wire format and worker source are public: `docs/telemetry-protocol.md` and `worker/lattice-telemetry.js`. Enterprises can route to a self-hosted collector via `LATTICE_TELEMETRY_URL=<your-url>`.
+
 ---
 
 ## Methodology

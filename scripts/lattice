@@ -310,33 +310,47 @@ maybe_update_check() {
 _LATTICE_TELEMETRY_URL="${LATTICE_TELEMETRY_URL:-https://lattice-telemetry.isaam-mj.workers.dev}"
 
 _telemetry_enabled() {
-  # Env var always wins
-  [ "${LATTICE_TELEMETRY:-1}" = "0" ] && return 1
-
-  # Project-local config
+  # Precedence (highest first):
+  #   1. project OFF  — explicit per-project veto wins over everything
+  #   2. env LATTICE_TELEMETRY=0 / =1
+  #   3. project ON
+  #   4. global config ON / OFF
+  #   5. default OFF (opt-in, per v0.8.0 polish #12)
   if [ -f .lattice/config.yml ] && grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml 2>/dev/null; then
     return 1
   fi
-  # Global config
-  if [ -f "${HOME}/.claude/lattice/config.yml" ] && grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then
-    return 1
+  case "${LATTICE_TELEMETRY:-}" in
+    0) return 1 ;;
+    1) return 0 ;;
+  esac
+  if [ -f .lattice/config.yml ] && grep -qE '^telemetry:[[:space:]]*on' .lattice/config.yml 2>/dev/null; then
+    return 0
   fi
-
-  return 0
+  if [ -f "${HOME}/.claude/lattice/config.yml" ]; then
+    if grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then return 1; fi
+    if grep -qE '^telemetry:[[:space:]]*on'  "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then return 0; fi
+  fi
+  return 1
 }
 
 _maybe_show_telemetry_disclosure() {
+  # First-run informational notice only — does NOT enable telemetry.
+  # Telemetry stays OFF unless the user explicitly runs `lattice config telemetry on`.
   local marker="${HOME}/.claude/lattice/.telemetry-acknowledged"
   [ -f "${marker}" ] && return 0
-  _telemetry_enabled || return 0
+  # Only show in interactive-ish contexts (skip when stderr is not a TTY-like fd)
+  # to avoid noise in CI / piped invocations.
+  [ -t 2 ] 2>/dev/null || { mkdir -p "${HOME}/.claude/lattice" 2>/dev/null || true; touch "${marker}" 2>/dev/null || true; return 0; }
 
   cat >&2 <<DISCLOSURE
-[${PROG}] Anonymous error telemetry is ENABLED by default. On FAILED commands only,
-[${PROG}]   sends: version, exit code, command name, OS. NEVER sends: file paths,
-[${PROG}]   finding IDs, commit SHAs, source code, project/repo names, usernames.
-[${PROG}] Disable: lattice config telemetry off  (or LATTICE_TELEMETRY=0)
-[${PROG}] Audit:   github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry
-[${PROG}] Source:  worker/lattice-telemetry.js + docs/telemetry-protocol.md
+[${PROG}] Telemetry is OFF by default. To help improve Lattice you can opt in to
+[${PROG}]   sanitized failure reports (version, exit code, command name, OS only —
+[${PROG}]   NEVER file paths, finding IDs, commit SHAs, source code, project names,
+[${PROG}]   repo names, or usernames):
+[${PROG}]     Per project:  lattice config telemetry on
+[${PROG}]     All projects: lattice config telemetry on --global
+[${PROG}] Audit:  github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry
+[${PROG}] Source: worker/lattice-telemetry.js + docs/telemetry-protocol.md
 DISCLOSURE
 
   mkdir -p "${HOME}/.claude/lattice" 2>/dev/null || true
@@ -1763,29 +1777,50 @@ YML
       if [ -f .lattice/config.yml ]; then
         cat .lattice/config.yml
       else
-        echo "[${PROG}] no .lattice/config.yml (defaults: usage.enabled=true, updates.mode=notify, telemetry=on)"
+        echo "[${PROG}] no .lattice/config.yml (defaults: usage.enabled=true, updates.mode=notify, telemetry=off)"
       fi
       ;;
     telemetry)
       local action="${2:-show}"
+      local scope="project"
+      # Look for --global anywhere in remaining args
+      local a
+      for a in "$@"; do
+        [ "${a}" = "--global" ] && scope="global"
+      done
       case "${action}" in
         on|off)
-          ensure_project_dirs
-          local cfg=".lattice/config.yml"
+          local cfg
+          if [ "${scope}" = "global" ]; then
+            mkdir -p "${HOME}/.claude/lattice" 2>/dev/null || true
+            cfg="${HOME}/.claude/lattice/config.yml"
+          else
+            ensure_project_dirs
+            cfg=".lattice/config.yml"
+          fi
           local tmp; tmp="$(mktemp)"
           if [ -f "${cfg}" ]; then
             grep -v '^telemetry:' "${cfg}" > "${tmp}" || true
           fi
           printf "telemetry: %s\n" "${action}" >> "${tmp}"
           mv "${tmp}" "${cfg}"
-          echo "[${PROG}] telemetry: ${action} (project-local)"
+          echo "[${PROG}] telemetry: ${action} (${scope}) — wrote ${cfg}"
           ;;
         show|"")
-          local proj_state="on" global_state="on" env_state=""
-          [ -f .lattice/config.yml ] && grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml 2>/dev/null && proj_state="off"
-          [ -f "${HOME}/.claude/lattice/config.yml" ] && grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null && global_state="off"
-          [ "${LATTICE_TELEMETRY:-1}" = "0" ] && env_state=" (overridden OFF by LATTICE_TELEMETRY=0)"
-          echo "[${PROG}] telemetry status:"
+          local proj_state="unset" global_state="unset" env_state=""
+          if [ -f .lattice/config.yml ]; then
+            grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml 2>/dev/null && proj_state="off"
+            grep -qE '^telemetry:[[:space:]]*on'  .lattice/config.yml 2>/dev/null && proj_state="on"
+          fi
+          if [ -f "${HOME}/.claude/lattice/config.yml" ]; then
+            grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null && global_state="off"
+            grep -qE '^telemetry:[[:space:]]*on'  "${HOME}/.claude/lattice/config.yml" 2>/dev/null && global_state="on"
+          fi
+          case "${LATTICE_TELEMETRY:-}" in
+            0) env_state=" (overridden OFF by LATTICE_TELEMETRY=0)" ;;
+            1) env_state=" (overridden ON by LATTICE_TELEMETRY=1)" ;;
+          esac
+          echo "[${PROG}] telemetry status (default: OFF — opt-in):"
           echo "  project (.lattice/config.yml): ${proj_state}"
           echo "  global  (~/.claude/lattice/config.yml): ${global_state}"
           if _telemetry_enabled; then
@@ -1795,10 +1830,10 @@ YML
           fi
           echo "  endpoint: ${_LATTICE_TELEMETRY_URL}"
           ;;
-        *) die "config telemetry: usage: lattice config telemetry on|off|show" ;;
+        *) die "config telemetry: usage: lattice config telemetry on|off|show [--global]" ;;
       esac
       ;;
-    *) die "config: usage: lattice config init|show|telemetry <on|off|show>" ;;
+    *) die "config: usage: lattice config init|show|telemetry <on|off|show> [--global]" ;;
   esac
 }
 

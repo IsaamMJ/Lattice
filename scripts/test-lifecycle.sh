@@ -728,6 +728,43 @@ else
   ok "help/version/doctor skipped from telemetry"
 fi
 
+note "Test 53: telemetry is OFF by default (v0.8.0 opt-IN, closes #12)"
+new_fixture t53
+rm -f "${HOME}/.claude/lattice/.telemetry-acknowledged"
+rm -f "${HOME}/.claude/lattice/config.yml"
+# Unset the suite-level LATTICE_TELEMETRY=0 so we test the *default* (no env, no config).
+out="$(unset LATTICE_TELEMETRY; LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q "telemetry] payload"; then
+  fail "telemetry must default to OFF (opt-IN): $(echo "${out}" | grep payload | head -1)"
+else
+  ok "telemetry OFF by default — no payload emitted without explicit opt-in"
+fi
+
+note "Test 54: lattice config telemetry on (project) enables opt-in (v0.8.0)"
+new_fixture t54
+rm -f "${HOME}/.claude/lattice/config.yml"
+"${LATTICE}" config telemetry on >/dev/null
+# No finding seeded — close "" must fail and trip telemetry exit hook.
+# Unset suite-level LATTICE_TELEMETRY=0 so the project-level `telemetry: on` actually wins.
+out="$(unset LATTICE_TELEMETRY; LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q "telemetry] payload"; then
+  ok "explicit project opt-in enables telemetry"
+else
+  fail "telemetry should fire after explicit opt-in: cfg=$(cat .lattice/config.yml 2>/dev/null), out=$(echo "${out}" | tail -5)"
+fi
+
+note "Test 55: lattice config telemetry on --global writes to ~/.claude/lattice/config.yml (v0.8.0)"
+new_fixture t55
+rm -f "${HOME}/.claude/lattice/config.yml"
+"${LATTICE}" config telemetry on --global >/dev/null
+if grep -qE '^telemetry:[[:space:]]*on' "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then
+  ok "--global flag writes opt-in to user-level config"
+else
+  fail "--global did not persist: $(cat "${HOME}/.claude/lattice/config.yml" 2>/dev/null)"
+fi
+# Cleanup: remove global config so it does not bleed into later test runs
+rm -f "${HOME}/.claude/lattice/config.yml"
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"
