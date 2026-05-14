@@ -2,6 +2,26 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] — 2026-05-14
+
+**Closes the silent-correctness blind spot.** Auto-telemetry only catches FAILED commands (non-zero exits). The riseCraft session of 2026-05-14 noted 7 real bugs/observations — 6 of which were silent (exit 0 with wrong output, UX gaps, doc issues) and entirely invisible to the telemetry pipe. v0.9.3 adds a manual channel that ships those through the same Worker.
+
+### Added
+- **`lattice report <category> --title "..." --body "..." [--severity LOW|MED|HIGH]`** — manual bug / observation channel. Same Cloudflare Worker as auto-telemetry, different label set (`manual-report` + `category:<cat>` + `severity:<sev>`), no fingerprint dedup (each manual report is a deliberate observation, not a recurring crash). Verified end-to-end: issue created at `github.com/IsaamMJ/Lattice/issues?q=label%3Amanual-report` within ~5s of command.
+- **Categories:** `bug | enhancement | ux | docs | perf | security`
+- **`--body-file <path>`** — load body from a file. Useful when an agent has drafted a markdown report and wants to ship it.
+- **Worker (`worker/lattice-telemetry.js`)** extended:
+  - `sanitize()` now accepts optional `kind`, `category`, `severity`, `title`, `body` fields. Defaults to `kind: "telemetry"` for backward compatibility with v0.8.x / v0.9.0-v0.9.2 clients.
+  - New `createManualIssue()` path: bypasses dedup, uses author-supplied title + body, applies sanitization (path redaction, SHA redaction) defense-in-depth.
+  - Routing: `payload.kind === "manual_report"` → manual path. Anything else → existing dedup path. Existing telemetry flow unchanged.
+- Worker deployed live to `lattice-telemetry.isaam-mj.workers.dev` (version `59f37e92-2b99-4633-b336-5d8900875d3d`).
+
+### Tests
+- 84 → 89 lifecycle tests. New: rejects missing args (#82), rejects invalid category + severity (#83), debug payload shape with quote/newline escaping (#84), `--body-file` path (#85).
+
+### Why it matters
+The original telemetry design assumed bugs = crashes. They aren't. Wrong-but-exits-0 bugs (parser malformations, missing fields, silent UX gaps) are exactly the bugs an agent session can SEE but the EXIT trap cannot. Without this channel, every such observation either died with the session or required the human to paste a draft markdown into GitHub manually. Now: one command, one issue, queue-ready.
+
 ## [0.9.2] — 2026-05-14
 
 **Discovery-gap fix.** A real riseCraft session said *"I don't know the actual bug report channel"* — even though the entire auto-bug-reporting infrastructure was in the repo. The session would have to read code + docs to discover it. That's a documentation gap masquerading as a configuration gap. Fixed structurally so no future session ever loses this signal.

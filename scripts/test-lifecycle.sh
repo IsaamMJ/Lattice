@@ -870,6 +870,57 @@ else
   fail "context missing telemetry ON line: ${out_on}"
 fi
 
+note "Test 82: lattice report rejects missing args (v0.9.3)"
+new_fixture t82
+if "${LATTICE}" report 2>/tmp/lattice-t82.out; then
+  fail "report with no args should fail"
+else
+  grep -q "report: usage:" /tmp/lattice-t82.out && ok "report rejects missing category" || fail "wrong error: $(cat /tmp/lattice-t82.out)"
+fi
+if "${LATTICE}" report bug 2>/tmp/lattice-t82b.out; then
+  fail "report with no --title should fail"
+else
+  grep -q "title required" /tmp/lattice-t82b.out && ok "report rejects missing --title" || fail "wrong error: $(cat /tmp/lattice-t82b.out)"
+fi
+
+note "Test 83: lattice report rejects invalid category + severity (v0.9.3)"
+new_fixture t83
+if "${LATTICE}" report nonsense --title t --body b 2>/tmp/lattice-t83.out; then
+  fail "report should reject 'nonsense' category"
+else
+  grep -q "category must be one of" /tmp/lattice-t83.out && ok "report rejects invalid category" || fail "wrong error: $(cat /tmp/lattice-t83.out)"
+fi
+if "${LATTICE}" report bug --title t --body b --severity URGENT 2>/tmp/lattice-t83b.out; then
+  fail "report should reject 'URGENT' severity"
+else
+  grep -q "severity must be" /tmp/lattice-t83b.out && ok "report rejects invalid severity" || fail "wrong error: $(cat /tmp/lattice-t83b.out)"
+fi
+
+note "Test 84: lattice report debug payload shape (v0.9.3)"
+new_fixture t84
+out="$(LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" report bug --title "test t84" --body $'line1\nline2\nwith \"quotes\"' --severity HIGH 2>&1)"
+if echo "${out}" | grep -q '"kind":"manual_report"' \
+   && echo "${out}" | grep -q '"category":"bug"' \
+   && echo "${out}" | grep -q '"severity":"HIGH"' \
+   && echo "${out}" | grep -q '"title":"test t84"' \
+   && echo "${out}" | grep -q 'line1\\nline2' \
+   && echo "${out}" | grep -q 'with \\\"quotes\\\"'; then
+  ok "report debug payload includes kind/category/severity + escapes newlines + quotes"
+else
+  fail "report debug payload wrong: ${out}"
+fi
+
+note "Test 85: lattice report --body-file reads body from file (v0.9.3)"
+new_fixture t85
+echo "Body loaded from file" > /tmp/lattice-t85-body.md
+out="$(LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" report ux --title "file body" --body-file /tmp/lattice-t85-body.md 2>&1)"
+if echo "${out}" | grep -q 'Body loaded from file'; then
+  ok "report reads body from --body-file"
+else
+  fail "--body-file not loaded: ${out}"
+fi
+rm -f /tmp/lattice-t85-body.md
+
 note "Test 80: lattice invariants show / diff (v0.9.1)"
 new_fixture t80
 "${LATTICE}" invariants derive >/dev/null 2>&1
