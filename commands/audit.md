@@ -140,7 +140,7 @@ For audit dimension, `<rule-slug>` should be a kebab-case description of the cla
 YAML body per finding (audit dimension):
 
 ```yaml
-id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via `lattice id-gen`>
+id: <12-char hex>   # Generate per-finding via: lattice id-gen audit <rule> <file> "<exact source line, whitespace-collapsed>". Do NOT call id-gen without all four positional args — it will fail with exit 2 and auto-report a telemetry bug.
 rule: <kebab-case rule slug>
 dimension: audit
 tier: DRIFT | INTENTIONAL | OK | UNVERIFIABLE

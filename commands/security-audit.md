@@ -172,7 +172,7 @@ For security dimension, `<rule-slug>` is a kebab-case pattern name: `webhook-tim
 YAML body per finding (security dimension):
 
 ```yaml
-id: <12-char hex — sha1(dimension:rule:file:code_context_normalized)[:12], generate via `lattice id-gen`>
+id: <12-char hex>   # Generate per-finding via: lattice id-gen security <rule> <file> "<exact source line, whitespace-collapsed>". Do NOT call id-gen without all four positional args — it will fail with exit 2 and auto-report a telemetry bug.
 rule: <kebab-case pattern slug>
 dimension: security
 tier: CRITICAL | HIGH | MEDIUM | LOW | OK

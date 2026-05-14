@@ -2,6 +2,29 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-rc2] — 2026-05-14
+
+First real-world rc1 dogfood caught two bugs in under 2 hours. Both auto-reported by telemetry (closes #3 / #4 in `IsaamMJ/Lattice`). Both fixed.
+
+### Fixed
+- **Worker dedup race condition.** rc1 used Workers KV alone for fingerprint dedup, which is eventually consistent — two simultaneous POSTs both read "no record" and both created issues (witnessed as #3 / #4, ~1 second apart, same fingerprint). Fix: embed `<!-- lattice-fp:<hash> -->` marker in every issue body, then add GitHub Search API as a backstop when KV reports a cache miss. Search is the cross-Worker source of truth; KV remains the fast-path cache. Verified live with smoke test.
+- **Audit-skill prompts mis-invoked `lattice id-gen`.** `commands/{audit,security-audit,scale-audit,flow-audit}.md` showed `id-gen` in the YAML schema example without its required positional args. Sonnet 4.6 interpreted this as "you can pre-generate IDs in a loop" and fired 10 unsuccessful `id-gen` calls before recovering. Fix: inline the full signature `lattice id-gen <dim> <rule> <file> "<line_content>"` in all four skill schema blocks with an explicit "do NOT call without all four args" note.
+
+### Why this matters
+This is the **first time Lattice fixed bugs the maintainer never typed into chat.** The full meta-loop closed end-to-end:
+1. rc1 deployed to a real project (riseCraft Flutter audit)
+2. Bugs hit during the audit
+3. Telemetry auto-filed issues #3 and #4 in the Lattice repo
+4. Maintainer reviewed the issues, diagnosed, fixed, shipped rc2
+
+Total elapsed: ~2 hours from bug occurrence to fix shipped. Pre-telemetry baseline: days (relayed verbally through chat sessions).
+
+### Tests
+52 pass on the existing suite. Worker race-safety verified manually via dedup smoke test (issue #5 — created with new fingerprint, marker embedded, GitHub Search finds it). Closed #1 / #2 / #5 as smoke-test cleanup.
+
+### Still in -rc dogfood mode
+Continuing the 1-week dogfood window. If no further bugs surface, tag stable v0.8.0 next weekend.
+
 ## [0.8.0-rc1] — 2026-05-14
 
 **The Loop, step 1: auto-bug-reporting.** First release with end-to-end client→server→GitHub-Issues automation. Every failed `lattice` invocation now (optionally) files itself as a deduplicated GitHub Issue on `IsaamMJ/Lattice` without user or maintainer intervention. Closes the slowest part of the improvement cycle.
