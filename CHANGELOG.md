@@ -2,6 +2,22 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-05-14
+
+**"Closed Loops" — earned, not declared.** Five polish issues filed by an independent Claude session reviewing Lattice from the user's perspective. All five landed before the stable tag. No new features in flight, no version bumps during the discipline phase.
+
+### Added
+- **`exposure:` schema field (#8).** Optional per-finding: `production-critical | user-facing | admin-only | internal | test-only | dead-code`. The `--effective-tier` flag on `lattice list` demotes severity by 1 step for `admin-only`/`internal` and 2 steps for `test-only`/`dead-code`, with the original tier preserved in a `(was HIGH, admin-only)` suffix. Prevents CRITICAL/HIGH inflation when the same pattern lives in production vs an unreachable admin tool. `lattice list --exposure <kind>` filters.
+- **`verify_pattern:` schema field + `lattice verify --rerun-grep` (#10).** Records the regex an audit skill used to detect the finding so the CLI can re-execute it later. `--rerun-grep` reports PASS (pattern no longer matches) or STILL OPEN. `--close-clean` auto-moves passing findings to `closed/` with rationale "pattern no longer matches". Closes the audit→fix→verify loop without a model session.
+- **Opt-in telemetry with per-project consent (#12).** Telemetry now defaults to OFF. New precedence: project-OFF veto > `LATTICE_TELEMETRY` env > project-ON > global config > default OFF. `lattice config telemetry on [--global]` writes consent; `lattice config telemetry show` reports effective state and endpoint. First-run disclosure is informational only — no POST until explicit opt-in. `LATTICE_TELEMETRY_URL` lets enterprises route to a self-hosted collector. README documents the full wire shape ("what is sent / what is never sent").
+- **`lattice doctor` auto-bootstraps `.lattice/` on first run (#9).** When the tree is missing, doctor now silently creates `findings/{open,closed}` and continues diagnostics with a `[WARN]` line, instead of `[FAIL]+exit 1`. First impression no longer feels broken.
+
+### Changed
+- **CLI vs slash-command boundary documented (#11).** README gains a "Workflow" section that names the two interfaces — slash commands PRODUCE findings inside Claude Code, the `lattice` CLI MANAGES their lifecycle in any shell. `lattice help` intro lists the slash commands; each slash-command markdown points back to the CLI for triage/sync/close.
+
+### Tests
+- 52 → 62 lifecycle tests. New coverage: doctor bootstrap (#33), opt-in default + `--global` flag (#53–55), `verify --rerun-grep` paths (#56–59), `exposure` filter + `--effective-tier` demotion (#60–62).
+
 ## [0.8.0-rc3] — 2026-05-14
 
 Third hour of dogfood, third auto-reported bug (#6: `lattice update` exit 2). The loop is genuinely closing on a sub-hour cadence now.
