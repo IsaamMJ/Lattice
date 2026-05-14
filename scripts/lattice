@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.8.3)
+# lattice — unified CLI dispatcher (v0.9.0)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -64,6 +64,10 @@ Usage:
   lattice test-fixture <slug> [--tier T] [--dimension D] [--exposure E] [--verify-pattern P] [--out PATH] [--force]
   lattice install-hooks [--force]
   lattice stats
+  lattice mode [classic|substrate|hybrid]
+  lattice decide <slug> --title "..." --because "..." [--status S] [--supersedes ID] [--cite PATH[:lines]] [--relates-to SLUG]
+  lattice decisions list [--status S]
+  lattice decisions show <id-or-slug>
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
@@ -335,7 +339,8 @@ _telemetry_enabled() {
   #   2. env LATTICE_TELEMETRY=0 / =1
   #   3. project ON
   #   4. global config ON / OFF
-  #   5. default OFF (opt-in, per v0.8.0 polish #12)
+  #   5. LATTICE_OWNER_MODE=1 — owner of the Lattice repo: default ON for own projects
+  #   6. default OFF (opt-in, per v0.8.0 polish #12)
   if [ -f .lattice/config.yml ] && grep -qE '^telemetry:[[:space:]]*off' .lattice/config.yml 2>/dev/null; then
     return 1
   fi
@@ -350,6 +355,9 @@ _telemetry_enabled() {
     if grep -qE '^telemetry:[[:space:]]*off' "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then return 1; fi
     if grep -qE '^telemetry:[[:space:]]*on'  "${HOME}/.claude/lattice/config.yml" 2>/dev/null; then return 0; fi
   fi
+  # Owner mode: flip default to ON when the user is auditing their own projects.
+  # Set in shell rc (e.g. `export LATTICE_OWNER_MODE=1`) — no per-project config needed.
+  [ "${LATTICE_OWNER_MODE:-0}" = "1" ] && return 0
   return 1
 }
 
@@ -1918,6 +1926,12 @@ cmd_config() {
         return 0
       fi
       cat > .lattice/config.yml <<'YML'
+# v0.9+ — operating mode (classic | substrate | hybrid). See docs/v1.0-substrate-spec.md.
+#   classic   : v0.8.x behavior. Findings + CLAUDE.md sync only.
+#   substrate : full v1.0. Invariants + drift bounds + traces + ADRs + MCP.
+#   hybrid    : findings + ADRs + MCP, no invariant derivation.
+mode: classic
+
 usage:
   enabled: true
 
@@ -2446,6 +2460,196 @@ cmd_test_fixture() {
 }
 
 # ---------------------------------------------------------------------------
+# mode — read or set the operating mode (classic | substrate | hybrid).
+# See docs/v1.0-substrate-spec.md.
+# ---------------------------------------------------------------------------
+cmd_mode() {
+  local target="${1:-}"
+  if [ -z "${target}" ]; then
+    if [ -f .lattice/config.yml ] && grep -qE '^mode:' .lattice/config.yml 2>/dev/null; then
+      grep -E '^mode:' .lattice/config.yml | head -1 | awk '{print $2}'
+    else
+      echo "classic"
+    fi
+    return 0
+  fi
+  case "${target}" in
+    classic|substrate|hybrid) ;;
+    *) die "mode: must be one of: classic | substrate | hybrid" ;;
+  esac
+  ensure_project_dirs
+  local cfg=".lattice/config.yml"
+  local tmp; tmp="$(mktemp)"
+  if [ -f "${cfg}" ]; then
+    grep -v '^mode:' "${cfg}" > "${tmp}" || true
+  fi
+  {
+    printf "mode: %s\n" "${target}"
+    cat "${tmp}" 2>/dev/null || true
+  } > "${cfg}.new"
+  mv "${cfg}.new" "${cfg}"
+  rm -f "${tmp}"
+  echo "[${PROG}] mode: ${target} — wrote ${cfg}"
+}
+
+# ---------------------------------------------------------------------------
+# decide — create or amend an ADR YAML in .lattice/decisions/.
+# v0.9+. See docs/v1.0-substrate-spec.md for the schema.
+#
+# Usage:
+#   lattice decide <slug> --title "<title>" --because "<rationale>"
+#                         [--status in_progress|active|superseded|reversed]
+#                         [--supersedes <prior-id>]
+#                         [--reverses <prior-id>]
+#                         [--cite <path>[:lines]]   (may repeat)
+#                         [--relates-to <finding-slug>]  (may repeat)
+# ---------------------------------------------------------------------------
+cmd_decide() {
+  local slug="" title="" because=""
+  local status="active"
+  local supersedes="" reverses=""
+  local cites=() relates=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --title)        title="$2"; shift 2 ;;
+      --because)      because="$2"; shift 2 ;;
+      --status)       status="$2"; shift 2 ;;
+      --supersedes)   supersedes="$2"; shift 2 ;;
+      --reverses)     reverses="$2"; shift 2 ;;
+      --cite)         cites+=("$2"); shift 2 ;;
+      --relates-to)   relates+=("$2"); shift 2 ;;
+      -*)             die "decide: unknown flag: $1" ;;
+      *)              [ -z "${slug}" ] && slug="$1" || die "decide: extra arg: $1"; shift ;;
+    esac
+  done
+  [ -z "${slug}" ] && die "decide: usage: lattice decide <slug> --title \"...\" --because \"...\""
+  [ -z "${title}" ] && die "decide: --title required"
+  [ -z "${because}" ] && die "decide: --because required (the rationale)"
+
+  ensure_project_dirs
+  mkdir -p .lattice/decisions
+
+  # Auto-number: scan existing 0NNN- prefixes, pick next.
+  shopt -s nullglob
+  local next=1
+  for f in .lattice/decisions/*.yml; do
+    local n
+    n="$(basename "${f}" | awk -F- '{print $1+0}')"
+    [ "${n}" -ge "${next}" ] && next=$((n + 1))
+  done
+  local padded
+  padded="$(printf '%04d' "${next}")"
+  local dest=".lattice/decisions/${padded}-${slug}.yml"
+  [ -f "${dest}" ] && die "decide: ${dest} already exists"
+
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local today
+  today="$(date -u +%Y-%m-%d)"
+  local actor="${LATTICE_AGENT:-${USER:-unknown}}"
+
+  {
+    printf 'id: %s-%s\n' "${padded}" "${slug}"
+    printf 'slug: %s\n' "${slug}"
+    printf 'title: "%s"\n' "${title//\"/\\\"}"
+    printf 'status: %s\n' "${status}"
+    printf 'created_at: %s\n' "${now}"
+    printf 'created_by: %s\n' "${actor}"
+    printf 'because: "%s"\n' "${because//\"/\\\"}"
+    if [ "${status}" = "active" ]; then
+      printf 'still_valid_as_of: %s\n' "${today}"
+    fi
+    [ -n "${supersedes}" ] && printf 'supersedes: %s\n' "${supersedes}"
+    [ -n "${reverses}" ]   && printf 'reverses: %s\n' "${reverses}"
+    if [ ${#cites[@]} -gt 0 ]; then
+      printf 'cited_files:\n'
+      for c in "${cites[@]}"; do
+        local cpath clines
+        cpath="${c%%:*}"
+        clines="${c#*:}"
+        [ "${cpath}" = "${clines}" ] && clines=""
+        printf '  - path: %s\n' "${cpath}"
+        [ -n "${clines}" ] && printf '    lines: %s\n' "${clines}"
+      done
+    fi
+    if [ ${#relates[@]} -gt 0 ]; then
+      printf 'relates_to:\n'
+      for r in "${relates[@]}"; do
+        printf '  - finding: %s\n' "${r}"
+      done
+    fi
+  } > "${dest}"
+
+  # If superseding, mark the prior ADR as superseded.
+  if [ -n "${supersedes}" ]; then
+    local prior
+    prior="$(ls .lattice/decisions/${supersedes}*.yml 2>/dev/null | head -1)"
+    if [ -n "${prior}" ] && [ -f "${prior}" ]; then
+      local tmp; tmp="$(mktemp)"
+      awk -v new="${padded}-${slug}" '
+        /^status:/ { print "status: superseded"; next }
+        /^superseded_by:/ { next }
+        { print }
+        END { print "superseded_by: " new }
+      ' "${prior}" > "${tmp}" && mv "${tmp}" "${prior}"
+      echo "[${PROG}] marked superseded: ${prior}"
+    fi
+  fi
+
+  echo "${dest}"
+}
+
+# ---------------------------------------------------------------------------
+# decisions — list ADRs, optionally filtered by status.
+# Usage: lattice decisions list [--status active|in_progress|superseded|reversed]
+# ---------------------------------------------------------------------------
+cmd_decisions() {
+  local action="${1:-list}"
+  shift 2>/dev/null || true
+  case "${action}" in
+    list)
+      local filter_status=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --status) filter_status="$2"; shift 2 ;;
+          -*) die "decisions: unknown flag: $1" ;;
+          *) die "decisions: unexpected arg: $1" ;;
+        esac
+      done
+      [ -d .lattice/decisions ] || { echo "[${PROG}] no .lattice/decisions/ in cwd"; return 0; }
+      shopt -s nullglob
+      local count=0
+      for f in .lattice/decisions/*.yml; do
+        local id title status
+        id="$(yaml_field "${f}" "id")"
+        title="$(yaml_field "${f}" "title")"
+        status="$(yaml_field "${f}" "status")"
+        [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
+        printf "%-9s %-30s %s\n" "${status}" "${id}" "${title}"
+        count=$((count + 1))
+      done
+      echo ""
+      echo "[${PROG}] ${count} decision(s)"
+      ;;
+    show)
+      local target="${1:-}"
+      [ -z "${target}" ] && die "decisions show: usage: lattice decisions show <id-or-slug>"
+      shopt -s nullglob
+      for f in .lattice/decisions/*${target}*.yml; do
+        echo "[${PROG}] ${f}"
+        echo "----------------------------------------------------------------------"
+        cat "${f}"
+        return 0
+      done
+      die "decisions: not found: ${target}"
+      ;;
+    *)
+      die "decisions: usage: lattice decisions list [--status S] | show <id>"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # install-hooks — install the post-commit-resolve-pending hook into .git/hooks/
 # (closes #7). Idempotent. Sources the helper from project-local scripts/ if
 # present, else from the global ~/.claude/lattice/scripts/.
@@ -2621,6 +2825,9 @@ case "${sub}" in
   test-fixture)       cmd_test_fixture "$@" ;;
   install-hooks)      cmd_install_hooks "$@" ;;
   stats)              cmd_stats "$@" ;;
+  mode)               cmd_mode "$@" ;;
+  decide)             cmd_decide "$@" ;;
+  decisions)          cmd_decisions "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

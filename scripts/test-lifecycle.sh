@@ -753,6 +753,69 @@ else
   fail "telemetry should fire after explicit opt-in: cfg=$(cat .lattice/config.yml 2>/dev/null), out=$(echo "${out}" | tail -5)"
 fi
 
+note "Test 71: lattice mode read+set defaults to classic, persists to .lattice/config.yml (v0.9.0)"
+new_fixture t71
+if [ "$("${LATTICE}" mode 2>&1)" = "classic" ]; then
+  ok "mode default = classic for fresh project"
+else
+  fail "mode default wrong: $("${LATTICE}" mode 2>&1)"
+fi
+"${LATTICE}" mode substrate >/dev/null
+if grep -qE '^mode:[[:space:]]*substrate' .lattice/config.yml && [ "$("${LATTICE}" mode)" = "substrate" ]; then
+  ok "mode set substrate persists to .lattice/config.yml"
+else
+  fail "mode set failed: $(cat .lattice/config.yml 2>/dev/null)"
+fi
+
+note "Test 72: lattice mode rejects unknown values (v0.9.0)"
+new_fixture t72
+if "${LATTICE}" mode bogus >/tmp/lattice-t72.out 2>&1; then
+  fail "mode bogus should fail"
+else
+  grep -q "must be one of" /tmp/lattice-t72.out && ok "mode rejects unknown value" || fail "mode error msg wrong"
+fi
+
+note "Test 73: lattice decide writes ADR YAML with required fields (v0.9.0)"
+new_fixture t73
+dest="$("${LATTICE}" decide test-decision --title "Test ADR" --because "needed for test" 2>&1)"
+if [ -f "${dest}" ] && grep -q '^id: 0001-test-decision' "${dest}" && grep -q '^status: active' "${dest}" && grep -q '^title: "Test ADR"' "${dest}"; then
+  ok "decide creates ADR YAML with id/status/title/because"
+else
+  fail "decide output wrong: dest=${dest}, contents=$(cat "${dest}" 2>/dev/null)"
+fi
+
+note "Test 74: lattice decide --supersedes marks prior ADR (v0.9.0)"
+new_fixture t74
+"${LATTICE}" decide first-decision --title "First" --because "initial" >/dev/null
+"${LATTICE}" decide second-decision --title "Second" --because "replaces first" --supersedes 0001 >/dev/null
+if grep -q '^status: superseded' .lattice/decisions/0001-first-decision.yml && grep -q '^superseded_by: 0002-second-decision' .lattice/decisions/0001-first-decision.yml; then
+  ok "decide --supersedes flips prior status + links forward"
+else
+  fail "supersede chain wrong: $(cat .lattice/decisions/0001-first-decision.yml 2>/dev/null)"
+fi
+
+note "Test 75: lattice decisions list filters by --status (v0.9.0)"
+new_fixture t75
+"${LATTICE}" decide one --title "One" --because "x" >/dev/null
+"${LATTICE}" decide two --title "Two" --because "y" --status in_progress >/dev/null
+out="$("${LATTICE}" decisions list --status in_progress 2>&1)"
+if echo "${out}" | grep -q "0002-two" && ! echo "${out}" | grep -q "0001-one"; then
+  ok "decisions list --status filters correctly"
+else
+  fail "decisions list filter wrong: ${out}"
+fi
+
+note "Test 76: LATTICE_OWNER_MODE=1 flips telemetry default ON (v0.9.0)"
+new_fixture t76
+rm -f "${HOME}/.claude/lattice/config.yml"
+# Unset suite-level LATTICE_TELEMETRY=0 so owner-mode default isn't overridden.
+out="$(unset LATTICE_TELEMETRY; LATTICE_OWNER_MODE=1 LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" close "" --reason fixed 2>&1 || true)"
+if echo "${out}" | grep -q "telemetry] payload"; then
+  ok "LATTICE_OWNER_MODE=1 flips telemetry default ON"
+else
+  fail "owner mode did not enable telemetry: $(echo "${out}" | tail -5)"
+fi
+
 note "Test 66: lattice install-hooks installs post-commit (v0.8.2, closes #7)"
 new_fixture t66
 "${LATTICE}" install-hooks > /tmp/lattice-t66.out 2>&1

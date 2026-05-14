@@ -2,6 +2,24 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-05-14
+
+**First slice of v1.0 substrate.** ADR lifecycle + operating-mode switch land first. Invariant derivation, MAT traces, MCP server follow in v0.9.x patches. See `docs/v1.0-substrate-spec.md` for the locked design.
+
+### Added
+- **`lattice mode <classic|substrate|hybrid>`** — sets the operating mode for the current project, persisted to `.lattice/config.yml`. `classic` keeps v0.8.x behavior unchanged (default for existing projects without the field, including jiive). `substrate` opts in to the full v1.0 stack (invariants + drift bounds + traces + MCP, landing in subsequent v0.9.x). `hybrid` enables ADRs + MCP without invariant derivation.
+- **`lattice decide <slug> --title "..." --because "..."`** — creates an ADR YAML in `.lattice/decisions/<NNNN>-<slug>.yml`. Auto-numbers `0001+`. Supports `--status`, `--supersedes`, `--reverses`, `--cite <path[:lines]>` (repeatable), `--relates-to <finding-slug>` (repeatable). When `--supersedes` is used, the prior ADR is auto-flipped to `status: superseded` with a forward link.
+- **`lattice decisions list [--status S]`** — prints ADR table with status/id/title. Filters by status. `lattice decisions show <id-or-slug>` prints one full ADR.
+- **`LATTICE_OWNER_MODE=1`** env — flips telemetry default ON when no project/global config and no `LATTICE_TELEMETRY` env are set. For the Lattice owner running on their own projects: `export LATTICE_OWNER_MODE=1` in shell rc, no per-project `config telemetry on` needed.
+- **`mode: classic` field added to `lattice config init` template.** Existing configs without it still default to classic — zero-friction for jiive backend.
+- **`docs/v1.0-substrate-spec.md`** — locks the v1.0 design (single-user single-orchestrator scope, derive-from-code substrate, ABC drift bounds, MCP interface, ADR schema).
+
+### Tests
+- 70 → 76 lifecycle tests. New: mode default+set+reject (#71, #72), decide creates ADR (#73), decide --supersedes chain (#74), decisions list --status filter (#75), LATTICE_OWNER_MODE flips telemetry default (#76).
+
+### Compatibility
+- jiive backend, riseCraft frontend, all v0.8.x projects upgrade with **zero data migration**. `mode:` defaults to `classic` when absent. `decisions/` directory created lazily on first `lattice decide`.
+
 ## [0.8.3] — 2026-05-14
 
 **`lattice` now resolves from a fresh shell after install** (#13). The biggest reliability gap for autonomous Claude-driven audit loops: previously the binary lived at `~/.claude/lattice/scripts/lattice` with no PATH integration, so `lattice sweep-id` from a new shell errored with `command not found` and Claude had to discover the full path manually every session.

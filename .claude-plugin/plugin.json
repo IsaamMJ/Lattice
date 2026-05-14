@@ -1,6 +1,6 @@
 {
   "name": "lattice",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Audit framework for keeping docs aligned with code. Doc-vs-code drift, scale risks, security exposures — grounded findings with file:line evidence, YAML-per-finding lifecycle.",
   "author": {
     "name": "Isaam MJ",
