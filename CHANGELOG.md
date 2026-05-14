@@ -2,6 +2,29 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0-rc3] — 2026-05-14
+
+Third hour of dogfood, third auto-reported bug (#6: `lattice update` exit 2). The loop is genuinely closing on a sub-hour cadence now.
+
+### Fixed
+- **Telemetry skip list now includes `update`.** Two false-positive paths were flooding the bug tracker:
+  1. `lattice update --check` returns exit 1 BY DESIGN when an update is available (CI-friendly contract). Every "check succeeded, update available" run was auto-filing a bogus bug.
+  2. Typos like `lattice update --version` hit the `*) die "usage:..."` path → exit 2 → telemetry. These are user/agent errors, not Lattice bugs.
+
+  Update-related failures are almost always network or deployment issues, not code defects. Skipping them removes the noise.
+
+### Deferred to rc4 (or later)
+- **stderr msg_excerpt in payload.** Currently telemetry only sends `command + exit_code`, so issue #6 came in with no context about which sub-failure path triggered it. Adding sanitized stderr capture would 10x the diagnostic value. NOT shipping under time pressure — bash stderr tee on Git Bash Windows needs careful testing.
+
+### Loop validation (today's tally)
+- 09:00 — rc1 shipped (telemetry server + client live)
+- 11:00 — riseCraft audit caught two bugs, auto-filed as #3/#4
+- 13:00 — rc2 shipped (Worker race + audit skills fixed)
+- 14:00 — `update` audit caught false-positive, auto-filed as #6
+- 14:30 — rc3 shipped (this release)
+
+**Pre-telemetry baseline: zero auto-reports, all bugs relayed manually.**
+
 ## [0.8.0-rc2] — 2026-05-14
 
 First real-world rc1 dogfood caught two bugs in under 2 hours. Both auto-reported by telemetry (closes #3 / #4 in `IsaamMJ/Lattice`). Both fixed.

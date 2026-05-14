@@ -348,9 +348,13 @@ _send_telemetry() {
 
   local exit_code="$1" command="$2"
 
-  # Skip on help/version/doctor/config — not real failures even if exit code != 0
+  # Skip on help/version/doctor/config/update — not real failures even if exit code != 0.
+  # `update --check` returns 1 BY DESIGN when an update is available (CI-friendly), so
+  # telemetering on it floods the bug tracker with non-bugs. Same for usage typos like
+  # `lattice update --version` which hit the *) die path. Update issues are usually
+  # network / deployment, not Lattice bugs.
   case "${command}" in
-    help|--help|-h|version|--version|-v|doctor|config) return 0 ;;
+    help|--help|-h|version|--version|-v|doctor|config|update) return 0 ;;
   esac
 
   local version os timestamp fingerprint user_hash payload
