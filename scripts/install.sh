@@ -63,15 +63,77 @@ echo ""
 echo "[lattice] restart Claude Code to load commands, then try:"
 echo "[lattice]   /audit-sweep ."
 echo ""
-echo "[lattice] CLI dispatcher (v0.8.2) installed at:"
+echo "[lattice] CLI dispatcher (v0.8.3) installed at:"
 echo "[lattice]   ${SCRIPT_DEST}/lattice"
 echo ""
-echo "[lattice] add to PATH (one-time, copy whichever fits your shell):"
-echo "[lattice]   echo 'alias lattice=\"${SCRIPT_DEST}/lattice\"' >> ~/.bashrc"
-echo "[lattice]   echo 'alias lattice=\"${SCRIPT_DEST}/lattice\"' >> ~/.zshrc"
-echo "[lattice]   # or: ln -s ${SCRIPT_DEST}/lattice ~/.local/bin/lattice"
+
+# v0.8.3 (#13): auto-install a shim in ~/.local/bin so `lattice` resolves from
+# any shell without an alias step. Falls back to a wrapper script on systems
+# where symlinks fail (Windows without developer-mode). Skips silently when
+# ~/.local/bin already has a Lattice shim pointing at SCRIPT_DEST.
+SHIM_DIR="${HOME}/.local/bin"
+SHIM_PATH="${SHIM_DIR}/lattice"
+mkdir -p "${SHIM_DIR}" 2>/dev/null || true
+
+shim_ok=0
+shim_kind=""
+if [ -L "${SHIM_PATH}" ] && [ "$(readlink "${SHIM_PATH}" 2>/dev/null)" = "${SCRIPT_DEST}/lattice" ]; then
+  shim_ok=1; shim_kind="existing symlink"
+elif [ -f "${SHIM_PATH}" ] && grep -q "${SCRIPT_DEST}/lattice" "${SHIM_PATH}" 2>/dev/null; then
+  shim_ok=1; shim_kind="existing wrapper"
+else
+  # Try a real symlink first; fall back to a tiny exec wrapper if symlink fails.
+  if ln -sfn "${SCRIPT_DEST}/lattice" "${SHIM_PATH}" 2>/dev/null; then
+    shim_ok=1; shim_kind="symlink"
+  else
+    cat > "${SHIM_PATH}" <<WRAPPER
+#!/usr/bin/env bash
+exec bash "${SCRIPT_DEST}/lattice" "\$@"
+WRAPPER
+    chmod +x "${SHIM_PATH}" 2>/dev/null || true
+    [ -x "${SHIM_PATH}" ] && { shim_ok=1; shim_kind="wrapper script"; }
+  fi
+fi
+
+if [ "${shim_ok}" -eq 1 ]; then
+  echo "[lattice] shim installed at ${SHIM_PATH} (${shim_kind})"
+else
+  echo "[lattice] WARN: could not install shim at ${SHIM_PATH} — fall back to manual alias:"
+  echo "[lattice]   alias lattice=\"${SCRIPT_DEST}/lattice\""
+fi
+
+# PATH check: is ~/.local/bin actually on PATH right now? If not, write a
+# one-line guard into the user's shell rc so the next shell picks it up.
+case ":${PATH}:" in
+  *":${SHIM_DIR}:"*)
+    echo "[lattice] ${SHIM_DIR} already on PATH — \`lattice\` will resolve in new shells"
+    ;;
+  *)
+    echo "[lattice] note: ${SHIM_DIR} is NOT on your current PATH"
+    rc_target=""
+    if [ -n "${ZSH_VERSION:-}" ] || [ -n "${BASH_VERSION:-}" ]; then
+      # Prefer the rc file the user actually has.
+      for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.profile"; do
+        if [ -f "${rc}" ]; then rc_target="${rc}"; break; fi
+      done
+    fi
+    # If we found one and it doesn't already mention .local/bin, append the guard line.
+    if [ -n "${rc_target}" ] && ! grep -q '\.local/bin' "${rc_target}" 2>/dev/null; then
+      {
+        echo ""
+        echo "# Added by lattice install.sh — ensures ~/.local/bin is on PATH"
+        echo 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+      } >> "${rc_target}"
+      echo "[lattice] added PATH guard to ${rc_target}"
+      echo "[lattice] open a new shell (or: source ${rc_target}) and \`lattice help\` will work"
+    else
+      echo "[lattice] add manually to your shell rc:"
+      echo "[lattice]   export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
+    ;;
+esac
 echo ""
-echo "[lattice] then run \`lattice help\` from any project root."
+echo "[lattice] verify: lattice doctor"
 echo ""
 echo "[lattice] docs: ${REPO}#readme"
 echo ""

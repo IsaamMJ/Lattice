@@ -2,6 +2,18 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] — 2026-05-14
+
+**`lattice` now resolves from a fresh shell after install** (#13). The biggest reliability gap for autonomous Claude-driven audit loops: previously the binary lived at `~/.claude/lattice/scripts/lattice` with no PATH integration, so `lattice sweep-id` from a new shell errored with `command not found` and Claude had to discover the full path manually every session.
+
+### Fixed
+- **`scripts/install.sh` now installs a `lattice` shim in `~/.local/bin/`** automatically. Symlink first, with a tiny `exec bash` wrapper fallback for systems where symlink creation fails (e.g. Windows without developer-mode). Idempotent — re-running install does not duplicate.
+- **`install.sh` patches `~/.local/bin` onto `$PATH`** when the user's shell rc (zshrc → bashrc → bash_profile → profile, first match) doesn't already mention it. Guard line is appended once with a comment marker; subsequent installs detect and skip.
+- **Diagnostic message after install** reports the shim kind (symlink / wrapper / existing) and whether `~/.local/bin` is on the current PATH, so users know exactly what state they're in.
+
+### Why this matters
+This closes the loop with #14's PATH check from v0.8.2 — that one prevents the false-green; this one makes the green real. Together: `curl … | bash`, restart shell, `lattice doctor` → all green. No manual alias step.
+
 ## [0.8.2] — 2026-05-14
 
 **Issue-tracker triage batch.** Four quick wins from the GitHub backlog (#7, #14, #18, #19) plus the missing half of #15. No schema changes.
