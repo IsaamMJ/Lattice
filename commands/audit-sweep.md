@@ -303,3 +303,8 @@ Reply 'fix all critical', 'apply checklist', 'show bundles', or 'discuss'.
 - One `[SWEEP] Module K/N complete` line per module after return
 - Final output = master findings file path + counts + one prompt
 - The findings file IS the summary — do not re-summarize in chat
+
+
+---
+
+After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.

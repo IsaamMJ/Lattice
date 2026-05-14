@@ -215,3 +215,8 @@ Reply 'fix <id>' to address one finding, 'fix all blockers' to triage them in or
 - No preamble. Start with "Scale-auditing <module-path>..."
 - One status line per pattern hunt ("setInterval: 1 hit, reading context...")
 - Final output = findings file path + verdict counts + next-action prompt
+
+
+---
+
+After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.

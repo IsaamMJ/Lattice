@@ -132,3 +132,10 @@ The `bash scripts/lattice handoff` and `bash scripts/lattice close` calls both a
 Lattice tracks bugs; v0.7.3 proved Haiku can fix easy ones reliably (3-for-3 on PATCH_DOC, ~9s and ~35K tokens each). This skill makes that loop a single command instead of manual orchestration. The eligibility gate keeps the lane safe; the verify-before-close step prevents bad fixes from looking clean.
 
 When Haiku fails, the failure-feedback log accumulates evidence for refining the handoff brief template over time. That feedback is the input to the self-improving handoff loop described in `MEMORY.md`.
+
+
+---
+
+## CLI vs slash command
+
+`/lattice-fix` (this slash command) is the **canonical fix entry point**. There is no `lattice fix` CLI subcommand — the auto-fix path requires a model session to drive Haiku, so it lives in slash form only. The `lattice` CLI handles non-model lifecycle: `lattice list`, `lattice show`, `lattice close`, `lattice verify`. See README "Workflow" section.

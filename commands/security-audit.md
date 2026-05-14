@@ -275,3 +275,8 @@ Reply 'fix <id>' to address one finding, 'fix all critical' to triage CRITICALs 
 - No preamble. Start with "Security-auditing <module-path>..."
 - One status line per pattern hunt batch
 - Final output = findings file path + verdict counts + drafted checklist + next-action prompt
+
+
+---
+
+After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.

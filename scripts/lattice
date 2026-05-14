@@ -38,7 +38,24 @@ PROG="lattice"
 
 usage() {
   cat <<'USAGE'
-lattice — Lattice findings CLI (v0.7)
+lattice — Lattice findings CLI
+
+Lattice has two interfaces:
+
+  Slash commands (run inside Claude Code) PRODUCE findings:
+    /audit           — doc-vs-code drift
+    /security-audit  — auth gaps, secret leaks, OWASP Top 10
+    /scale-audit     — horizontal-scaling killers
+    /flow-audit      — customer-flow gaps
+    /audit-sweep .   — runs every dimension across every module
+    /lattice-fix     — auto-fixes one low-risk PATCH_DOC finding
+  Slash command markdown lives in ~/.claude/commands/ (or this repo's commands/).
+
+  CLI (this script) MANAGES the lifecycle of findings produced above:
+    triage, list, show, sync (CLAUDE.md), close, verify, defer, reopen.
+
+  Canonical loop:
+    slash command -> .lattice/findings/open/*.yml -> lattice list/triage/sync/close.
 
 Usage:
   lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>|--pending] [--pr <num>]

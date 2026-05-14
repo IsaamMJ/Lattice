@@ -17,6 +17,31 @@ Every finding cites a file and line. Every verdict requires evidence. Audits sto
 
 ---
 
+## Workflow — slash commands vs CLI
+
+Lattice ships **two interfaces** and they do different jobs:
+
+| Interface | Where it runs | Job |
+|---|---|---|
+| **Slash commands** (`/audit`, `/security-audit`, `/scale-audit`, `/flow-audit`, `/audit-sweep`, `/lattice-fix`) | Inside Claude Code (model session required) | **Produce** findings by reasoning about code |
+| **CLI** (`lattice list`, `lattice show`, `lattice sync`, `lattice close`, `lattice triage`, `lattice verify`, …) | Any shell, no model | **Manage** the lifecycle of those findings |
+
+```text
+   ┌─────────────────────┐       ┌──────────────────────────┐       ┌────────────────────┐
+   │ Slash command       │  ───▶ │ .lattice/findings/open/  │  ───▶ │ lattice CLI        │
+   │ (e.g. /audit-sweep) │       │ <TIER>-<module>-<rule>.yml│       │ list / triage /    │
+   │ inside Claude Code  │       │ + sweeps/<sha>.yml       │       │ sync / close / etc │
+   └─────────────────────┘       └──────────────────────────┘       └────────────────────┘
+```
+
+**Use a slash command when:** you want Claude Code to read code, reason about it, and emit new YAML findings. They require an active Claude Code session because they call models.
+
+**Use the CLI when:** you want to triage, view, sync to `CLAUDE.md`, close (with reason), reopen, defer, or verify findings that already exist on disk. The CLI is plain bash — it works in CI, in cron jobs, in editor terminals, with no model token cost.
+
+Both share the same YAML schema (`docs/finding-schema.md`). Slash commands write the YAML; the CLI reads, writes back lifecycle fields, and renders summaries. Use `lattice help` to see every subcommand and `ls ~/.claude/commands/` to see every slash command.
+
+---
+
 ## 30-second quickstart
 
 ```bash

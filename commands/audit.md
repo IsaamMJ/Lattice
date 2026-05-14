@@ -288,3 +288,8 @@ While the skill is being piloted, append a `## Telemetry` block to the findings 
 ```
 
 After 3 audits, review the telemetry and decide whether to hard-code subagent dispatches per step. Until then, keep the skill model-agnostic.
+
+
+---
+
+After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.

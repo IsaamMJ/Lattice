@@ -337,3 +337,8 @@ Flow audit is a **new dimension** (flow) complementing existing audit (docs), sc
 - [Enhancing Multi-Turn Conversations: Ensuring AI Agents Provide Accurate Responses](https://www.getmaxim.ai/articles/enhancing-multi-turn-conversations-ensuring-ai-agents-provide-accurate-responses/) — Context consistency
 - [What Causes Chatbot Drop-Off and How to Fix It](https://velaro.com/blog/chatbot-abandonment-reasons-and-solutions) — Timeout handling and abandonment signals
 - [State Management for Conversational AI: Fixing Context Loss](https://www.linkedin.com/posts/aditya-santhanam_conversational-ai-forgets-users-expect-activity-7433473499358380032-eTul) — State preservation across turns
+
+
+---
+
+After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.
