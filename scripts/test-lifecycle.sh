@@ -805,6 +805,66 @@ else
   fail "decisions list filter wrong: ${out}"
 fi
 
+note "Test 77: lattice invariants derive on a Flutter-shaped project (v0.9.1)"
+new_fixture t77
+mkdir -p lib/features/auth lib/core/services
+echo "void main() {}" > lib/main.dart
+cat > pubspec.yaml <<'YML'
+name: t77_app
+description: test fixture
+dependencies:
+  flutter:
+    sdk: flutter
+YML
+"${LATTICE}" invariants derive >/tmp/lattice-t77.out 2>&1
+if [ -f .lattice/invariants/HEAD.yml ] && grep -q '^  - flutter' .lattice/invariants/HEAD.yml && grep -q 'lib/features/auth' .lattice/invariants/HEAD.yml; then
+  ok "invariants derive detects flutter stack + modules"
+else
+  fail "invariants derive output wrong: $(cat .lattice/invariants/HEAD.yml 2>/dev/null)"
+fi
+# Re-running should be idempotent
+"${LATTICE}" invariants derive >/dev/null 2>&1
+if [ -f .lattice/invariants/HEAD.yml ]; then
+  ok "invariants derive is idempotent"
+fi
+
+note "Test 78: lattice invariants derive on a Supabase-shaped project (v0.9.1)"
+new_fixture t78
+mkdir -p supabase/functions/razorpay-webhook supabase/migrations
+echo "Deno.serve(() => new Response('ok'));" > supabase/functions/razorpay-webhook/index.ts
+echo "CREATE TABLE IF NOT EXISTS public.user_subscriptions (id uuid PRIMARY KEY);" > supabase/migrations/01.sql
+"${LATTICE}" invariants derive >/dev/null 2>&1
+if grep -q '^  - supabase' .lattice/invariants/HEAD.yml && grep -q '^  - razorpay-webhook' .lattice/invariants/HEAD.yml && grep -q 'user_subscriptions' .lattice/invariants/HEAD.yml; then
+  ok "invariants derive detects supabase stack + edge functions + db tables"
+else
+  fail "supabase invariants wrong: $(cat .lattice/invariants/HEAD.yml 2>/dev/null)"
+fi
+
+note "Test 79: lattice context prints mode + findings summary (v0.9.1)"
+new_fixture t79
+"${LATTICE}" mode substrate >/dev/null
+"${LATTICE}" decide test-adr --title "Test" --because "for test 79" >/dev/null
+"${LATTICE}" test-fixture sample --tier HIGH >/dev/null
+out="$("${LATTICE}" context 2>&1)"
+if echo "${out}" | grep -q "mode: substrate" \
+   && echo "${out}" | grep -q "## Active decisions" \
+   && echo "${out}" | grep -q "0001-test-adr" \
+   && echo "${out}" | grep -q "HIGH: 1"; then
+  ok "context emits mode + ADRs + findings summary"
+else
+  fail "context output wrong: ${out}"
+fi
+
+note "Test 80: lattice invariants show / diff (v0.9.1)"
+new_fixture t80
+"${LATTICE}" invariants derive >/dev/null 2>&1
+"${LATTICE}" invariants show > /tmp/lattice-t80-show.out 2>&1
+if grep -q '^commit:' /tmp/lattice-t80-show.out && grep -q '^derived_at:' /tmp/lattice-t80-show.out; then
+  ok "invariants show prints stored YAML"
+else
+  fail "invariants show missing fields: $(cat /tmp/lattice-t80-show.out)"
+fi
+
 note "Test 76: LATTICE_OWNER_MODE=1 flips telemetry default ON (v0.9.0)"
 new_fixture t76
 rm -f "${HOME}/.claude/lattice/config.yml"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.0)
+# lattice — unified CLI dispatcher (v0.9.1)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -68,6 +68,8 @@ Usage:
   lattice decide <slug> --title "..." --because "..." [--status S] [--supersedes ID] [--cite PATH[:lines]] [--relates-to SLUG]
   lattice decisions list [--status S]
   lattice decisions show <id-or-slug>
+  lattice invariants derive [--print] | show | diff
+  lattice context
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
@@ -2650,6 +2652,311 @@ cmd_decisions() {
 }
 
 # ---------------------------------------------------------------------------
+# invariants — derive structural facts about the project from code (v0.9.1).
+#
+# First-pass grep-based derivation. Walks the working tree, detects tech
+# stack (Flutter / Node / Supabase), extracts modules, contracts (HTTP
+# routes, Edge Functions, DB tables), and emits a YAML to:
+#   .lattice/invariants/HEAD.yml  (and a sha-tagged copy)
+#
+# Subcommands:
+#   lattice invariants derive [--write|--print]   (default: --write)
+#   lattice invariants show
+#   lattice invariants diff                       (HEAD vs previous)
+#
+# Tree-sitter upgrade comes in v0.9.x as needed. This pass is intentionally
+# coarse — covers ~80% of the cases that matter for Claude session-start.
+# ---------------------------------------------------------------------------
+cmd_invariants() {
+  local action="${1:-derive}"
+  shift 2>/dev/null || true
+  case "${action}" in
+    derive) _invariants_derive "$@" ;;
+    show)   _invariants_show ;;
+    diff)   _invariants_diff ;;
+    regen)  _invariants_derive --write ;;
+    check)  _invariants_diff ;;
+    *)      die "invariants: usage: lattice invariants derive|show|diff" ;;
+  esac
+}
+
+_invariants_derive() {
+  local out_mode="write"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --print) out_mode="print"; shift ;;
+      --write) out_mode="write"; shift ;;
+      *) die "invariants derive: unknown flag: $1" ;;
+    esac
+  done
+
+  ensure_project_dirs
+  mkdir -p .lattice/invariants
+
+  local commit
+  commit="$(git rev-parse --short HEAD 2>/dev/null || echo "uncommitted")"
+  local derived_at
+  derived_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Detect stack ----------------------------------------------------------
+  local has_pubspec=0 has_pkgjson=0 has_supabase=0 has_flutter=0
+  [ -f pubspec.yaml ] && { has_pubspec=1; grep -q '^[[:space:]]*flutter:' pubspec.yaml 2>/dev/null && has_flutter=1; }
+  [ -f package.json ] && has_pkgjson=1
+  [ -d supabase ] && [ -d supabase/migrations -o -d supabase/functions ] && has_supabase=1
+
+  # Find module roots -----------------------------------------------------
+  # Heuristic: top-level dirs under lib/ (Flutter) or src/ (Node) or
+  # supabase/functions/* (Edge Functions).
+  local modules=()
+  if [ -d lib ]; then
+    while IFS= read -r -d '' d; do
+      modules+=("${d#./}")
+    done < <(find lib -mindepth 1 -maxdepth 2 -type d -print0 2>/dev/null | head -z -n 50)
+  fi
+  if [ -d src ]; then
+    while IFS= read -r -d '' d; do
+      modules+=("${d#./}")
+    done < <(find src -mindepth 1 -maxdepth 2 -type d -print0 2>/dev/null | head -z -n 50)
+  fi
+  if [ -d supabase/functions ]; then
+    while IFS= read -r -d '' d; do
+      modules+=("${d#./}")
+    done < <(find supabase/functions -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+  fi
+
+  # Contracts -------------------------------------------------------------
+  # 1. Edge Functions (Supabase)
+  local edge_fns=()
+  if [ "${has_supabase}" = "1" ] && [ -d supabase/functions ]; then
+    while IFS= read -r -d '' fn; do
+      local name
+      name="$(basename "${fn}")"
+      [ "${name}" = "_shared" ] && continue
+      edge_fns+=("${name}")
+    done < <(find supabase/functions -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+  fi
+
+  # 2. Express / Fastify routes (Node)
+  local node_routes=()
+  if [ "${has_pkgjson}" = "1" ]; then
+    while IFS= read -r line; do
+      [ -n "${line}" ] && node_routes+=("${line}")
+    done < <(grep -RhEn "(app|router|fastify)\.(get|post|put|delete|patch)\(['\"]" \
+              --include='*.js' --include='*.ts' \
+              src/ routes/ 2>/dev/null \
+              | sed -E 's/.*\.(get|post|put|delete|patch)\(['"'"'"]([^'"'"'"]+)['"'"'"].*/\1 \2/' \
+              | sort -u | head -100)
+  fi
+
+  # 3. Frontend HTTP calls (Flutter)
+  local fe_calls=()
+  if [ "${has_flutter}" = "1" ] && [ -d lib ]; then
+    while IFS= read -r line; do
+      [ -n "${line}" ] && fe_calls+=("${line}")
+    done < <(grep -RhEn "(dio|http|api)\.(get|post|put|delete|patch)\(" \
+              --include='*.dart' lib/ 2>/dev/null \
+              | sed -E 's/^[^:]+:[0-9]+:[[:space:]]*//; s/.*\.(get|post|put|delete|patch)\(([^,)]+).*/\1 \2/' \
+              | sort -u | head -100)
+  fi
+
+  # 4. DB tables (Supabase migrations)
+  local db_tables=()
+  if [ "${has_supabase}" = "1" ] && [ -d supabase/migrations ]; then
+    while IFS= read -r tbl; do
+      [ -n "${tbl}" ] && db_tables+=("${tbl}")
+    done < <(grep -REho '\bCREATE TABLE (IF NOT EXISTS )?[a-zA-Z_]+\.?[a-zA-Z_]*' \
+              supabase/migrations/ 2>/dev/null \
+              | sed -E 's/.*CREATE TABLE (IF NOT EXISTS )?//' \
+              | sort -u | head -50)
+  fi
+
+  # Emit YAML -------------------------------------------------------------
+  local tmp; tmp="$(mktemp)"
+  {
+    printf 'commit: %s\n' "${commit}"
+    printf 'derived_at: %s\n' "${derived_at}"
+    printf 'derived_by: lattice/invariants-engine@0.9.1\n'
+    printf '\n# Stack detection (heuristic)\n'
+    printf 'stack:\n'
+    [ "${has_flutter}" = "1" ] && printf '  - flutter\n'
+    [ "${has_pkgjson}" = "1" ] && printf '  - node\n'
+    [ "${has_supabase}" = "1" ] && printf '  - supabase\n'
+    [ "${has_flutter}${has_pkgjson}${has_supabase}" = "000" ] && printf '  - unknown\n'
+
+    if [ ${#modules[@]} -gt 0 ]; then
+      printf '\n# Modules (top-level dirs under lib/ / src/ / supabase/functions/)\n'
+      printf 'modules:\n'
+      for m in "${modules[@]}"; do
+        printf '  - path: %s\n' "${m}"
+      done
+    fi
+
+    if [ ${#edge_fns[@]} -gt 0 ]; then
+      printf '\n# Supabase Edge Functions\n'
+      printf 'edge_functions:\n'
+      for fn in "${edge_fns[@]}"; do
+        printf '  - %s\n' "${fn}"
+      done
+    fi
+
+    if [ ${#node_routes[@]} -gt 0 ]; then
+      printf '\n# Node HTTP routes (heuristic from app/router/fastify .verb())\n'
+      printf 'routes:\n'
+      for r in "${node_routes[@]}"; do
+        local v p
+        v="${r%% *}"; p="${r#* }"
+        printf '  - method: %s\n    path: %s\n' "${v}" "${p}"
+      done
+    fi
+
+    if [ ${#fe_calls[@]} -gt 0 ]; then
+      printf '\n# Frontend HTTP calls (heuristic from dio/http/api .verb())\n'
+      printf 'frontend_calls:\n'
+      for c in "${fe_calls[@]}"; do
+        local v p
+        v="${c%% *}"; p="${c#* }"
+        printf '  - method: %s\n    target: %s\n' "${v}" "${p}"
+      done
+    fi
+
+    if [ ${#db_tables[@]} -gt 0 ]; then
+      printf '\n# Database tables (from supabase/migrations/*.sql)\n'
+      printf 'db_tables:\n'
+      for t in "${db_tables[@]}"; do
+        printf '  - %s\n' "${t}"
+      done
+    fi
+  } > "${tmp}"
+
+  if [ "${out_mode}" = "print" ]; then
+    cat "${tmp}"
+    rm -f "${tmp}"
+    return 0
+  fi
+
+  # Write to .lattice/invariants/HEAD.yml + sha-tagged copy
+  cp "${tmp}" ".lattice/invariants/HEAD.yml"
+  cp "${tmp}" ".lattice/invariants/${commit}.yml"
+  rm -f "${tmp}"
+  echo "[${PROG}] invariants derived: .lattice/invariants/HEAD.yml (commit ${commit})"
+}
+
+_invariants_show() {
+  if [ -f .lattice/invariants/HEAD.yml ]; then
+    cat .lattice/invariants/HEAD.yml
+  else
+    echo "[${PROG}] no invariants yet — run: lattice invariants derive"
+    return 1
+  fi
+}
+
+_invariants_diff() {
+  if [ ! -f .lattice/invariants/HEAD.yml ]; then
+    echo "[${PROG}] no baseline — run: lattice invariants derive"
+    return 1
+  fi
+  local baseline_commit
+  baseline_commit="$(grep -E '^commit:' .lattice/invariants/HEAD.yml | awk '{print $2}')"
+
+  local tmp_new; tmp_new="$(mktemp)"
+  _invariants_derive --print > "${tmp_new}" 2>/dev/null
+  local new_commit
+  new_commit="$(grep -E '^commit:' "${tmp_new}" | awk '{print $2}')"
+
+  if [ "${baseline_commit}" = "${new_commit}" ]; then
+    echo "[${PROG}] HEAD invariants are fresh (commit ${baseline_commit}); no diff"
+    rm -f "${tmp_new}"
+    return 0
+  fi
+
+  echo "[${PROG}] diff: ${baseline_commit} -> ${new_commit}"
+  echo ""
+  diff -u .lattice/invariants/HEAD.yml "${tmp_new}" || true
+  rm -f "${tmp_new}"
+}
+
+# ---------------------------------------------------------------------------
+# context — what Claude sees at session start (v0.9.1).
+# Prints active invariants summary + open findings + active ADRs + drift hint.
+# Designed for `cat $(lattice context)` or MCP get_context() consumption.
+# Always regenerated, never cached.
+# ---------------------------------------------------------------------------
+cmd_context() {
+  local mode
+  mode="$(cmd_mode 2>/dev/null || echo classic)"
+
+  echo "# Lattice context — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "mode: ${mode}"
+  if git rev-parse --short HEAD >/dev/null 2>&1; then
+    printf 'commit: %s\n' "$(git rev-parse --short HEAD)"
+  fi
+  echo ""
+
+  # Active ADRs (substrate + hybrid modes)
+  if [ "${mode}" != "classic" ] && [ -d .lattice/decisions ]; then
+    echo "## Active decisions"
+    shopt -s nullglob
+    local any=0
+    for f in .lattice/decisions/*.yml; do
+      local st
+      st="$(yaml_field "${f}" "status")"
+      [ "${st}" = "active" ] || [ "${st}" = "in_progress" ] || continue
+      any=1
+      printf '  - %s — %s\n' "$(yaml_field "${f}" "id")" "$(yaml_field "${f}" "title")"
+    done
+    [ ${any} -eq 0 ] && echo "  (none)"
+    echo ""
+  fi
+
+  # Invariants summary (substrate mode)
+  if [ "${mode}" = "substrate" ]; then
+    if [ -f .lattice/invariants/HEAD.yml ]; then
+      echo "## Invariants (.lattice/invariants/HEAD.yml)"
+      grep -E '^(commit|stack|modules|edge_functions|routes|db_tables):' .lattice/invariants/HEAD.yml \
+        | head -20 | sed 's/^/  /'
+      local mod_count fn_count route_count tbl_count
+      mod_count="$(grep -cE '^  - path:' .lattice/invariants/HEAD.yml 2>/dev/null || echo 0)"
+      fn_count="$(awk '/^edge_functions:/{f=1;next} /^[a-z]/{f=0} f && /^  -/{c++} END{print c+0}' .lattice/invariants/HEAD.yml 2>/dev/null)"
+      printf '  totals: modules=%s edge_fns=%s\n' "${mod_count}" "${fn_count}"
+    else
+      echo "## Invariants"
+      echo "  (none — run: lattice invariants derive)"
+    fi
+    echo ""
+  fi
+
+  # Open findings summary
+  if [ -d .lattice/findings/open ]; then
+    echo "## Open findings (top by tier)"
+    local total=0
+    declare -A by_tier
+    shopt -s nullglob
+    for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+      [ -f "${f}" ] || continue
+      total=$((total + 1))
+      local t
+      t="$(yaml_field "${f}" "tier")"
+      by_tier["${t}"]=$(( ${by_tier["${t}"]:-0} + 1 ))
+    done
+    if [ ${total} -eq 0 ]; then
+      echo "  (none)"
+    else
+      for t in CRITICAL BLOCKER HIGH RISK DRIFT MEDIUM WATCH LOW INTENTIONAL UNVERIFIABLE OK; do
+        local n=${by_tier["${t}"]:-0}
+        [ ${n} -gt 0 ] && printf '  %s: %d\n' "${t}" "${n}"
+      done
+      printf '  total: %d\n' "${total}"
+    fi
+    echo ""
+  fi
+
+  echo "## Next actions"
+  echo "  lattice list --tier CRITICAL,HIGH        # priority queue"
+  echo "  lattice next                             # single highest-priority finding"
+  echo "  lattice invariants diff                  # has the structural shape drifted?"
+}
+
+# ---------------------------------------------------------------------------
 # install-hooks — install the post-commit-resolve-pending hook into .git/hooks/
 # (closes #7). Idempotent. Sources the helper from project-local scripts/ if
 # present, else from the global ~/.claude/lattice/scripts/.
@@ -2828,6 +3135,8 @@ case "${sub}" in
   mode)               cmd_mode "$@" ;;
   decide)             cmd_decide "$@" ;;
   decisions)          cmd_decisions "$@" ;;
+  invariants)         cmd_invariants "$@" ;;
+  context)            cmd_context "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

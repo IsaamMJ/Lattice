@@ -2,6 +2,26 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-05-14
+
+**Second slice of v1.0 substrate.** Invariant derivation + session-start context payload. MCP server + MAT traces still to come in v0.9.x patches.
+
+### Added
+- **`lattice invariants derive [--print]`** — grep-based first pass extracts structural facts from the working tree to `.lattice/invariants/HEAD.yml` (and `<sha>.yml`). Detects stack (Flutter / Node / Supabase), enumerates modules under `lib/` `src/` `supabase/functions/`, captures Edge Functions, Node HTTP routes (Express/Fastify/NestJS patterns), Flutter HTTP calls (dio/http/api), and DB tables from `supabase/migrations/*.sql`. Tree-sitter upgrade comes in a later patch when grep coverage proves insufficient.
+- **`lattice invariants show`** — prints the current `HEAD.yml`.
+- **`lattice invariants diff`** — diffs HEAD baseline against a freshly-derived version. Shows what structural shape changed.
+- **`lattice context`** — prints the session-start payload Claude consumes: mode + commit + active ADRs + invariants summary + open-findings tier breakdown + next-action hints. Always regenerated, never cached. The same payload the MCP `get_context()` endpoint will return when v0.9.3 lands.
+
+### Verified end-to-end on riseCraft
+- `lattice invariants derive` on `E:\riseCraftfrontend` detects: flutter+supabase stack, 30 lib/ modules (auth, payments, subscriptions, etc.), 5 Edge Functions (razorpay-create-order, razorpay-webhook, send-push-notifications, telegram-summary, admin-ops), and matching DB tables.
+
+### Tests
+- 77 → 81 lifecycle tests. New: invariants derive on Flutter project (#77), on Supabase project (#78), context emits mode+ADRs+findings (#79), invariants show stored YAML (#80).
+
+### Compatibility
+- `.lattice/invariants/` created lazily on first `lattice invariants derive`. Classic-mode projects unaffected.
+- `lattice context` works in all three modes; substrate adds the invariants section.
+
 ## [0.9.0] — 2026-05-14
 
 **First slice of v1.0 substrate.** ADR lifecycle + operating-mode switch land first. Invariant derivation, MAT traces, MCP server follow in v0.9.x patches. See `docs/v1.0-substrate-spec.md` for the locked design.
