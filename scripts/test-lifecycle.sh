@@ -855,6 +855,21 @@ else
   fail "context output wrong: ${out}"
 fi
 
+note "Test 81: lattice context announces telemetry status (v0.9.2 — discovery gap fix)"
+new_fixture t81
+out_off="$("${LATTICE}" context 2>&1)"
+if echo "${out_off}" | grep -q "^telemetry: OFF" && echo "${out_off}" | grep -q "lattice config telemetry on"; then
+  ok "context announces telemetry OFF with enable hint"
+else
+  fail "context missing telemetry OFF line: ${out_off}"
+fi
+out_on="$(unset LATTICE_TELEMETRY; LATTICE_OWNER_MODE=1 "${LATTICE}" context 2>&1)"
+if echo "${out_on}" | grep -q "^telemetry: ON" && echo "${out_on}" | grep -q "github.com/IsaamMJ/Lattice"; then
+  ok "context announces telemetry ON with issue URL"
+else
+  fail "context missing telemetry ON line: ${out_on}"
+fi
+
 note "Test 80: lattice invariants show / diff (v0.9.1)"
 new_fixture t80
 "${LATTICE}" invariants derive >/dev/null 2>&1

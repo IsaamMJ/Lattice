@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.1)
+# lattice — unified CLI dispatcher (v0.9.2)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -2889,6 +2889,13 @@ cmd_context() {
   echo "mode: ${mode}"
   if git rev-parse --short HEAD >/dev/null 2>&1; then
     printf 'commit: %s\n' "$(git rev-parse --short HEAD)"
+  fi
+  # Telemetry status — every session must see this so the bug-reporting channel
+  # is never re-discovered as "an unknown mystery". Discovery, not just configuration.
+  if _telemetry_enabled; then
+    echo "telemetry: ON — failures auto-file at github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry"
+  else
+    echo "telemetry: OFF — enable: lattice config telemetry on  (or: export LATTICE_OWNER_MODE=1)"
   fi
   echo ""
 

@@ -2,6 +2,29 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] — 2026-05-14
+
+**Discovery-gap fix.** A real riseCraft session said *"I don't know the actual bug report channel"* — even though the entire auto-bug-reporting infrastructure was in the repo. The session would have to read code + docs to discover it. That's a documentation gap masquerading as a configuration gap. Fixed structurally so no future session ever loses this signal.
+
+### Fixed
+- **`lattice context` now announces telemetry status** as the third line of output, every time:
+  - `telemetry: ON — failures auto-file at github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry`
+  - `telemetry: OFF — enable: lattice config telemetry on  (or: export LATTICE_OWNER_MODE=1)`
+
+  Every Claude session that runs `lattice context` at session start now immediately sees:
+  1. That bug-reporting exists,
+  2. Whether it's on or off,
+  3. The exact URL where issues land,
+  4. How to enable it if off.
+
+  The session would have to actively ignore the line, not "not know."
+
+### Tests
+- 82 → 84 lifecycle tests. New: context telemetry-OFF announce (#81), context telemetry-ON with issue URL (#81 paired).
+
+### Why this matters
+Bug reporting is auto-fired on FAILED commands. If a session is *unaware* it exists, it doesn't think to enable it, doesn't trigger it, and we lose the auto-bug stream that's supposed to be Lattice's compounding feedback loop. v0.8.0 #12 made telemetry opt-IN for compliance. v0.9.2 makes the opt-in discoverable.
+
 ## [0.9.1] — 2026-05-14
 
 **Second slice of v1.0 substrate.** Invariant derivation + session-start context payload. MCP server + MAT traces still to come in v0.9.x patches.
