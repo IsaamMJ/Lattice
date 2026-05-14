@@ -473,13 +473,17 @@ else
   fail "doctor returned non-zero on clean setup: $(cat /tmp/lattice-t32.out)"
 fi
 
-note "Test 33: lattice doctor fails when .lattice/ missing (v0.7.8)"
+note "Test 33: lattice doctor auto-bootstraps .lattice/ on fresh install (v0.8.0, closes #9)"
 new_fixture t33
 rm -rf .lattice
 if "${LATTICE}" doctor >/tmp/lattice-t33.out 2>&1; then
-  fail "doctor should fail when .lattice/ missing"
+  if grep -q "auto-created" /tmp/lattice-t33.out && [ -d .lattice/findings/open ] && [ -d .lattice/findings/closed ]; then
+    ok "doctor auto-creates .lattice/findings/{open,closed} on first run"
+  else
+    fail "doctor did not bootstrap correctly: $(cat /tmp/lattice-t33.out)"
+  fi
 else
-  grep -q "missing" /tmp/lattice-t33.out && ok "doctor fails with helpful message when uninitialized" || fail "doctor failure message unclear"
+  fail "doctor should succeed (with WARN) after auto-bootstrap, got: $(cat /tmp/lattice-t33.out)"
 fi
 
 note "Test 34: lattice export --format markdown renders table (v0.7.8)"

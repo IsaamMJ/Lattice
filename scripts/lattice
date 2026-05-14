@@ -1839,16 +1839,26 @@ cmd_doctor() {
   if [ -d ".lattice" ]; then
     _check_pass ".lattice/ directory exists"
   else
-    _check_fail ".lattice/ missing" "run any lattice command in this repo to initialize (or: mkdir -p .lattice/findings/open .lattice/findings/closed)"
-    echo ""
-    echo "  doctor: bailing — nothing else to check without .lattice/"
-    return 1
+    mkdir -p .lattice/findings/open .lattice/findings/closed 2>/dev/null || true
+    if [ -d ".lattice/findings/open" ] && [ -d ".lattice/findings/closed" ]; then
+      _check_warn ".lattice/ tree auto-created on first run" "created .lattice/findings/{open,closed}"
+    else
+      _check_fail ".lattice/ missing and could not auto-create" "check write permissions in $(pwd); or run: mkdir -p .lattice/findings/open .lattice/findings/closed"
+      echo ""
+      echo "  doctor: bailing — nothing else to check without .lattice/"
+      return 1
+    fi
   fi
   for sub in findings/open findings/closed; do
     if [ -d ".lattice/${sub}" ]; then
       _check_pass ".lattice/${sub}/ exists"
     else
-      _check_warn ".lattice/${sub}/ missing" "will be auto-created on first close/sync"
+      mkdir -p ".lattice/${sub}" 2>/dev/null || true
+      if [ -d ".lattice/${sub}" ]; then
+        _check_warn ".lattice/${sub}/ auto-created" "subtree was missing — bootstrapped"
+      else
+        _check_warn ".lattice/${sub}/ missing" "will be auto-created on first close/sync"
+      fi
     fi
   done
   if [ -f ".lattice/config.yml" ]; then
