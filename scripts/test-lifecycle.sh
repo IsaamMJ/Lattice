@@ -753,6 +753,71 @@ else
   fail "telemetry should fire after explicit opt-in: cfg=$(cat .lattice/config.yml 2>/dev/null), out=$(echo "${out}" | tail -5)"
 fi
 
+note "Test 66: lattice install-hooks installs post-commit (v0.8.2, closes #7)"
+new_fixture t66
+"${LATTICE}" install-hooks > /tmp/lattice-t66.out 2>&1
+if [ -x .git/hooks/post-commit ] && grep -q "resolve-pending\|lattice resolve-pending" .git/hooks/post-commit; then
+  ok "install-hooks copied post-commit and made it executable"
+else
+  fail "install-hooks did not install correctly: $(cat /tmp/lattice-t66.out)"
+fi
+
+note "Test 67: lattice install-hooks is idempotent (v0.8.2)"
+new_fixture t67
+"${LATTICE}" install-hooks >/dev/null
+out="$("${LATTICE}" install-hooks 2>&1)"
+if echo "${out}" | grep -q "already installed"; then
+  ok "install-hooks detects existing Lattice hook and no-ops"
+else
+  fail "install-hooks did not detect prior install: ${out}"
+fi
+
+note "Test 68: lattice stats reports tier + dimension totals (v0.8.2, closes #15)"
+new_fixture t68
+"${LATTICE}" test-fixture a --tier HIGH --dimension security > /dev/null
+"${LATTICE}" test-fixture b --tier LOW  --dimension audit    > /dev/null
+out="$("${LATTICE}" stats 2>&1)"
+if echo "${out}" | grep -q "Open findings: 2" && echo "${out}" | grep -q "HIGH" && echo "${out}" | grep -q "security"; then
+  ok "stats summarizes tier and dimension counts"
+else
+  fail "stats output wrong: ${out}"
+fi
+
+note "Test 69: lattice doctor flags lattice not in PATH (v0.8.2, closes #14)"
+new_fixture t69
+# Keep /usr/bin:/bin so bash + env still resolve; strip any user PATH so
+# lattice itself is unreachable. /tmp is appended just to have a dummy dir.
+out="$(env -i PATH=/usr/bin:/bin:/tmp HOME="${HOME}" bash "${LATTICE}" doctor 2>&1 || true)"
+if echo "${out}" | grep -q "lattice not in PATH"; then
+  ok "doctor warns when lattice is not in PATH"
+else
+  fail "doctor PATH check missing: ${out}"
+fi
+
+note "Test 70: regenerate emits did-you-mean hint on invalid dimension (v0.8.2, closes #19)"
+new_fixture t70
+cat > .lattice/findings/open/LOW-typo.yml <<YML
+id: typo-id
+rule: typo
+dimension: securty
+tier: LOW
+module: mod
+file: src/x.ts
+line: 1
+title: t
+fix: f
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+YML
+out="$("${LATTICE}" sync 2>&1 || true)"
+if echo "${out}" | grep -q "did you mean 'security'"; then
+  ok "did-you-mean suggests closest valid dimension"
+else
+  fail "did-you-mean hint missing: ${out}"
+fi
+
 note "Test 63: lattice test-fixture writes a valid YAML to .lattice/findings/open/ (v0.8.1)"
 new_fixture t63
 out_path="$("${LATTICE}" test-fixture demo --tier HIGH --exposure admin-only --verify-pattern '^code$' 2>&1)"

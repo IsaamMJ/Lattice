@@ -2,6 +2,22 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] — 2026-05-14
+
+**Issue-tracker triage batch.** Four quick wins from the GitHub backlog (#7, #14, #18, #19) plus the missing half of #15. No schema changes.
+
+### Added
+- **`lattice install-hooks [--force]`** (#7) — installs `post-commit-resolve-pending.sh` into `.git/hooks/post-commit`. Detects an existing Lattice hook and no-ops; refuses to overwrite an unrelated hook without `--force`. Sources from the project-local `scripts/` directory first, then `~/.claude/lattice/scripts/`.
+- **`lattice stats`** (#15) — single-screen summary: totals by tier, by dimension, top-10 modules. Closes the missing piece of #15 — `lattice list` and `lattice show` have existed since v0.6.
+
+### Fixed
+- **`lattice doctor` no longer false-greens when the CLI is not in PATH** (#14). New diagnostic line emits a `[WARN]` with the exact `ln -sf` command to fix it. Critical for autonomous Claude-driven loops where a missing PATH burns tokens chasing `command not found`.
+- **`lattice update --self` no longer dies on project-local installs** (#18). Search order now: project-local `update.sh` → global `~/.claude/lattice/scripts/update.sh` → fresh fetch from GitHub via curl/wget. The end-to-end install→update path works without any manual `curl | bash` workaround.
+- **Schema enum rejections now suggest the closest valid value** (#19). `dimension: securty` → `did you mean 'security'?`. Levenshtein-based; the full allowed list is still printed alongside, so a wide miss costs nothing.
+
+### Tests
+- 65 → 70 lifecycle tests. New: install-hooks happy-path + idempotence (#66–67), stats summary (#68), doctor PATH warning (#69), did-you-mean hint (#70).
+
 ## [0.8.1] — 2026-05-14
 
 **Dev-loop polish.** Two small additions that compound: faster validation and one-line test fixtures. Surfaced by dogfooding v0.8.0 in the same session that shipped it.

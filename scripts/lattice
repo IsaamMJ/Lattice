@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.8.1)
+# lattice — unified CLI dispatcher (v0.8.2)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -62,6 +62,8 @@ Usage:
   lattice close <id> --partial "<text>" [--commit <sha>]
   lattice resolve-pending [--commit <sha>]
   lattice test-fixture <slug> [--tier T] [--dimension D] [--exposure E] [--verify-pattern P] [--out PATH] [--force]
+  lattice install-hooks [--force]
+  lattice stats
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
@@ -1851,9 +1853,23 @@ cmd_update() {
       echo "[${PROG}] up to date: ${current}"
       ;;
     --self)
+      # Search order (#18): project-local sibling, global install, fresh GitHub fetch.
       local updater="${SELF_DIR}/update.sh"
-      [ -f "${updater}" ] || die "update: missing ${updater}"
-      bash "${updater}"
+      if [ -f "${updater}" ]; then
+        bash "${updater}"
+      elif [ -f "${HOME}/.claude/lattice/scripts/update.sh" ]; then
+        echo "[${PROG}] update: using global installer at ~/.claude/lattice/scripts/update.sh" >&2
+        bash "${HOME}/.claude/lattice/scripts/update.sh"
+      else
+        echo "[${PROG}] update: no local update.sh found — fetching from GitHub" >&2
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/update.sh | bash
+        elif command -v wget >/dev/null 2>&1; then
+          wget -qO- https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/update.sh | bash
+        else
+          die "update: neither local update.sh nor curl/wget available"
+        fi
+      fi
       ;;
     --enable-auto)
       cmd_config init >/dev/null
@@ -2008,6 +2024,18 @@ cmd_doctor() {
     _check_pass "inside a git repo"
   else
     _check_warn "not in a git repo" "lattice close --commit will require explicit SHA arg outside git"
+  fi
+  # PATH discoverability (#14) — false-green guard. The whole "autonomous Claude
+  # loop" pitch breaks if `lattice` isn't reachable from a fresh shell.
+  local found_path=""
+  if command -v lattice >/dev/null 2>&1; then
+    found_path="$(command -v lattice 2>/dev/null || true)"
+  fi
+  if [ -n "${found_path}" ]; then
+    _check_pass "lattice in PATH (${found_path})"
+  else
+    # Don't FAIL — many users run via full path or alias; just WARN with the fix.
+    _check_warn "lattice not in PATH from this shell" "fix: ln -sf $(realpath "$0" 2>/dev/null || echo "$0") ~/.local/bin/lattice  (and ensure ~/.local/bin is on PATH)"
   fi
   echo ""
 
@@ -2418,6 +2446,90 @@ cmd_test_fixture() {
 }
 
 # ---------------------------------------------------------------------------
+# install-hooks — install the post-commit-resolve-pending hook into .git/hooks/
+# (closes #7). Idempotent. Sources the helper from project-local scripts/ if
+# present, else from the global ~/.claude/lattice/scripts/.
+# ---------------------------------------------------------------------------
+cmd_install_hooks() {
+  local force=0
+  for a in "$@"; do
+    [ "${a}" = "--force" ] && force=1
+  done
+
+  git rev-parse --git-dir >/dev/null 2>&1 || die "install-hooks: not inside a git repo"
+  local git_dir
+  git_dir="$(git rev-parse --git-dir)"
+  local hooks_dir="${git_dir}/hooks"
+  mkdir -p "${hooks_dir}"
+
+  # Find source: project-local sibling first, then global install.
+  local src=""
+  for candidate in \
+      "${SELF_DIR}/post-commit-resolve-pending.sh" \
+      "${HOME}/.claude/lattice/scripts/post-commit-resolve-pending.sh"; do
+    if [ -f "${candidate}" ]; then src="${candidate}"; break; fi
+  done
+  [ -z "${src}" ] && die "install-hooks: could not find post-commit-resolve-pending.sh (tried ${SELF_DIR}/ and ~/.claude/lattice/scripts/)"
+
+  local dest="${hooks_dir}/post-commit"
+  if [ -f "${dest}" ] && [ "${force}" -ne 1 ]; then
+    if grep -q 'post-commit-resolve-pending\|lattice resolve-pending' "${dest}" 2>/dev/null; then
+      echo "[${PROG}] install-hooks: post-commit already installed (matches Lattice hook). nothing to do."
+      return 0
+    fi
+    die "install-hooks: ${dest} exists and is not the Lattice hook (use --force to overwrite)"
+  fi
+
+  cp "${src}" "${dest}"
+  chmod +x "${dest}" 2>/dev/null || true
+  echo "[${PROG}] install-hooks: installed ${dest}"
+  echo "[${PROG}] uninstall: rm ${dest}"
+}
+
+# ---------------------------------------------------------------------------
+# stats — totals by tier + dimension + top modules (closes the stats half of #15).
+# Reads .lattice/findings/open/*.yml and prints a single-screen summary.
+# ---------------------------------------------------------------------------
+cmd_stats() {
+  [ -d ".lattice/findings/open" ] || { echo "[${PROG}] no .lattice/findings/open/ in cwd" >&2; return 0; }
+
+  shopt -s nullglob
+  local total=0
+  declare -A by_tier by_dim by_module
+  for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
+    [ -f "${f}" ] || continue
+    total=$((total + 1))
+    local t d m
+    t="$(yaml_field "${f}" "tier")"
+    d="$(yaml_field "${f}" "dimension")"
+    m="$(yaml_field "${f}" "module")"
+    by_tier["${t}"]=$(( ${by_tier["${t}"]:-0} + 1 ))
+    by_dim["${d}"]=$(( ${by_dim["${d}"]:-0} + 1 ))
+    by_module["${m}"]=$(( ${by_module["${m}"]:-0} + 1 ))
+  done
+
+  echo "Open findings: ${total}"
+  echo ""
+  if [ ${total} -gt 0 ]; then
+    echo "By tier:"
+    for t in CRITICAL BLOCKER HIGH RISK DRIFT MEDIUM WATCH LOW INTENTIONAL UNVERIFIABLE OK; do
+      local n=${by_tier["${t}"]:-0}
+      [ ${n} -gt 0 ] && printf "  %-12s %d\n" "${t}" "${n}"
+    done
+    echo ""
+    echo "By dimension:"
+    for d in "${!by_dim[@]}"; do
+      printf "  %-15s %d\n" "${d}" "${by_dim[${d}]}"
+    done | sort -rnk2
+    echo ""
+    echo "Top modules:"
+    for m in "${!by_module[@]}"; do
+      printf "  %-40s %d\n" "${m}" "${by_module[${m}]}"
+    done | sort -rnk2 | head -10
+  fi
+}
+
+# ---------------------------------------------------------------------------
 cmd_resolve_pending() {
   local target_commit=""
   while [ "$#" -gt 0 ]; do
@@ -2507,6 +2619,8 @@ case "${sub}" in
   changelog)          cmd_changelog "$@" ;;
   resolve-pending)    cmd_resolve_pending "$@" ;;
   test-fixture)       cmd_test_fixture "$@" ;;
+  install-hooks)      cmd_install_hooks "$@" ;;
+  stats)              cmd_stats "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

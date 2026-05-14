@@ -188,6 +188,39 @@ const VALID_DIMENSIONS = new Set([
   'configuration', 'quality', 'product',
 ]);
 
+// v0.8.2 (#19): suggest the closest valid value when a schema enum is rejected.
+// Levenshtein distance, return the single best match (or '' if no allowed
+// value scores closer than half the input length — avoids "did you mean X?"
+// when the user typed something completely unrelated).
+function closestMatch(input, allowed) {
+  if (!input || !allowed || !allowed.length) return '';
+  const lev = (a, b) => {
+    const m = a.length, n = b.length;
+    if (!m) return n;
+    if (!n) return m;
+    const dp = Array.from({length: m + 1}, () => new Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      }
+    }
+    return dp[m][n];
+  };
+  const lower = String(input).toLowerCase();
+  let best = '', bestDist = Infinity;
+  for (const candidate of allowed) {
+    const d = lev(lower, String(candidate).toLowerCase());
+    if (d < bestDist) { bestDist = d; best = candidate; }
+  }
+  // Per #19: always surface the closest match. The full allowed list is
+  // already printed alongside, so an unhelpful suggestion is no worse than
+  // none — and a useful one (ux -> product, sec -> security) is a real win.
+  return best;
+}
+
 // v0.6.4.1: dimension+tier specific required fields. Mirrors docs/finding-schema.md.
 const DIMENSION_TIER_REQUIRED = {
   security: {
@@ -227,7 +260,9 @@ function validateFinding(parsed, filePath, kind = 'open') {
     // v0.6.4.1: dimension must be in the allowed enum
     const dim = String(parsed.dimension).toLowerCase();
     if (!VALID_DIMENSIONS.has(dim)) {
-      throw new Error(`invalid 'dimension' in ${filePath}: '${parsed.dimension}' (allowed: ${[...VALID_DIMENSIONS].join('|')})`);
+      const suggestion = closestMatch(parsed.dimension, [...VALID_DIMENSIONS]);
+      const hint = suggestion ? `\n  did you mean '${suggestion}'?` : '';
+      throw new Error(`invalid 'dimension' in ${filePath}: '${parsed.dimension}' (allowed: ${[...VALID_DIMENSIONS].join('|')})${hint}`);
     }
 
     // v0.6.4.1: dimension+tier specific required fields
@@ -328,7 +363,9 @@ const byStatus = { open: [], in_progress: [], deferred: [], wont_fix: [] };
 for (const f of open) {
   const s = (f.status || 'open').toLowerCase();
   if (!VALID_STATUS.includes(s)) {
-    console.error(`[lattice-regenerate] error: invalid status '${f.status}' in ${f.path} (allowed: ${VALID_STATUS.join('|')})`);
+    const suggestion = closestMatch(f.status, VALID_STATUS);
+    const hint = suggestion ? `\n  did you mean '${suggestion}'?` : '';
+    console.error(`[lattice-regenerate] error: invalid status '${f.status}' in ${f.path} (allowed: ${VALID_STATUS.join('|')})${hint}`);
     process.exit(2);  // v0.6.6: fatal schema violation
   }
   byStatus[s].push(f);
