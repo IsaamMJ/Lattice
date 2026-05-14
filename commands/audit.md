@@ -293,3 +293,5 @@ After 3 audits, review the telemetry and decide whether to hard-code subagent di
 ---
 
 After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.
+
+When emitting findings, also set `exposure:` (one of `production-critical | user-facing | admin-only | internal | test-only | dead-code`) so `lattice list --effective-tier` can demote severity for low-blast-radius code paths. Default to `production-critical` only when you have evidence the code is on the live user flow; reach for `admin-only` / `internal` / `test-only` / `dead-code` aggressively to prevent CRITICAL/HIGH inflation.

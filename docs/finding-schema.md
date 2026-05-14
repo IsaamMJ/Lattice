@@ -159,6 +159,25 @@ simulate:
   - "curl -X POST http://localhost:3000/api/webhook -H 'X-Sig: bad' -d '{}'"
   - "Run admin tool: simulate REPORT_FULL with gender=F"
 
+# Module-exposure multiplier (v0.8.0, optional everywhere).
+# Tells the CLI / consumers how reachable this code is by real users so the
+# base tier can be demoted for low-exposure code paths. Prevents CRITICAL/HIGH
+# inflation when the same pattern lives in production vs admin-only / dead code.
+#
+# Values:
+#   production-critical  — main user flow; tier stands
+#   user-facing          — reachable by typical users; tier stands
+#   admin-only           — admin/internal-tool only; demote 1 step
+#   internal             — internal API / background job; demote 1 step
+#   test-only            — *_test.* / fixtures; demote 2 steps (often suppress)
+#   dead-code            — no reachable route / behind disabled flag; demote 2
+#
+# Demotion ladder: CRITICAL → HIGH → MEDIUM → LOW → OK.
+# `lattice list --exposure <kind>` filters; `--effective-tier` shows demoted tier.
+exposure: production-critical
+# exposure: admin-only
+# exposure: dead-code
+
 # Machine-readable verification pattern (v0.8.0, optional everywhere).
 # Lets `lattice verify <id> --rerun-grep` re-execute the original pattern
 # hunt that produced this finding. When the pattern stops matching, the

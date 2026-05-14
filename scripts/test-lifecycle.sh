@@ -753,6 +753,97 @@ else
   fail "telemetry should fire after explicit opt-in: cfg=$(cat .lattice/config.yml 2>/dev/null), out=$(echo "${out}" | tail -5)"
 fi
 
+note "Test 60: lattice list --exposure filters by exposure field (v0.8.0, closes #8)"
+new_fixture t60
+cat > .lattice/findings/open/HIGH-prod.yml <<YML
+id: prod-id
+rule: prod
+dimension: audit
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: prod issue
+fix: fix it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+exposure: production-critical
+YML
+cat > .lattice/findings/open/HIGH-dead.yml <<YML
+id: dead-id
+rule: dead
+dimension: audit
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: dead-code issue
+fix: fix it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+exposure: dead-code
+YML
+out="$("${LATTICE}" list --exposure production-critical 2>&1 || true)"
+if echo "${out}" | grep -q "prod" && ! echo "${out}" | grep -q "dead"; then
+  ok "list --exposure filters out non-matching exposure"
+else
+  fail "exposure filter wrong: ${out}"
+fi
+
+note "Test 61: lattice list --effective-tier demotes HIGH/admin-only -> MEDIUM (v0.8.0)"
+new_fixture t61
+cat > .lattice/findings/open/HIGH-admin.yml <<YML
+id: admin-id
+rule: admin
+dimension: audit
+tier: HIGH
+module: mod
+file: src/x.ts
+line: 1
+title: admin-only finding
+fix: fix it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+exposure: admin-only
+YML
+out="$("${LATTICE}" list --effective-tier 2>&1 || true)"
+if echo "${out}" | grep -qE "^MEDIUM .*was HIGH, admin-only"; then
+  ok "list --effective-tier demotes HIGH+admin-only -> MEDIUM"
+else
+  fail "effective-tier demotion wrong: ${out}"
+fi
+
+note "Test 62: lattice list --effective-tier demotes CRITICAL/dead-code -> MEDIUM (2 steps) (v0.8.0)"
+new_fixture t62
+cat > .lattice/findings/open/CRITICAL-dead.yml <<YML
+id: ddcrit-id
+rule: ddcrit
+dimension: audit
+tier: CRITICAL
+module: mod
+file: src/x.ts
+line: 1
+title: dead-code crit
+fix: fix it
+sweep_date: 2026-05-14
+sweep_id: sw1
+auditor: claude-code/audit
+status: open
+exposure: dead-code
+YML
+out="$("${LATTICE}" list --effective-tier 2>&1 || true)"
+if echo "${out}" | grep -qE "^MEDIUM .*was CRITICAL, dead-code"; then
+  ok "list --effective-tier demotes CRITICAL+dead-code 2 steps -> MEDIUM"
+else
+  fail "two-step demotion wrong: ${out}"
+fi
+
 note "Test 56: lattice verify --rerun-grep reports STILL OPEN when pattern matches (v0.8.0, closes #10)"
 new_fixture t56
 # Seed a finding with a verify_pattern that should currently match

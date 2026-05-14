@@ -64,7 +64,7 @@ Usage:
   lattice reopen <id> --reason "<text>"
   lattice sync [--check]
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
-  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--milestone N] [--due-for-review] [--blocked|--unblocked]
+  lattice list [--module M] [--tier T] [--status S] [--dimension D] [--milestone N] [--exposure K] [--effective-tier] [--due-for-review] [--blocked|--unblocked]
   lattice show <id>
   lattice triage [--module M] [--tier T] [--status S] [--dimension D] [--cluster]
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
@@ -629,6 +629,40 @@ yaml_field() {
 }
 
 # ---------------------------------------------------------------------------
+# Effective tier — applies the v0.8.0 exposure multiplier.
+#
+# Rules (#8):
+#   production-critical / user-facing / "" → no demotion
+#   admin-only / internal                  → demote 1 step
+#   test-only / dead-code                  → demote 2 steps
+# Tier sequence (highest → lowest):  CRITICAL > HIGH > MEDIUM > LOW > OK
+# BLOCKER and dimension-specific tiers (RISK/WATCH, DRIFT/INTENTIONAL) are
+# treated as opaque — no demotion is applied beyond the four-step ladder.
+# ---------------------------------------------------------------------------
+effective_tier() {
+  local tier="$1" exposure="$2"
+  local steps=0
+  case "${exposure}" in
+    production-critical|user-facing|"") steps=0 ;;
+    admin-only|internal) steps=1 ;;
+    test-only|dead-code) steps=2 ;;
+    *) steps=0 ;;
+  esac
+  local cur="${tier}" i=0
+  while [ ${i} -lt ${steps} ]; do
+    case "${cur}" in
+      CRITICAL) cur=HIGH ;;
+      HIGH)     cur=MEDIUM ;;
+      MEDIUM)   cur=LOW ;;
+      LOW)      cur=OK ;;
+      *)        break ;;
+    esac
+    i=$((i+1))
+  done
+  printf '%s' "${cur}"
+}
+
+# ---------------------------------------------------------------------------
 # close
 # ---------------------------------------------------------------------------
 cmd_close() {
@@ -782,9 +816,10 @@ cmd_defer() {
 # ---------------------------------------------------------------------------
 cmd_list() {
   local filter_module="" filter_tier="" filter_status="" filter_dim=""
-  local filter_milestone=""
+  local filter_milestone="" filter_exposure=""
   local due_for_review=0
   local blocked_filter=""   # "" = no filter, "blocked" = only blocked, "unblocked" = only unblocked
+  local show_effective=0    # --effective-tier: render tier post-demotion
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --module)    filter_module="$2"; shift 2 ;;
@@ -792,6 +827,8 @@ cmd_list() {
       --status)    filter_status="$2"; shift 2 ;;
       --dimension) filter_dim="$2"; shift 2 ;;
       --milestone) filter_milestone="$2"; shift 2 ;;
+      --exposure)  filter_exposure="$2"; shift 2 ;;
+      --effective-tier) show_effective=1; shift ;;
       --due-for-review) due_for_review=1; shift ;;
       --unblocked) blocked_filter="unblocked"; shift ;;
       --blocked)   blocked_filter="blocked"; shift ;;
@@ -848,6 +885,12 @@ cmd_list() {
       [ "${milestone}" = "${filter_milestone}" ] || continue
     fi
 
+    local exposure
+    exposure="$(yaml_field "${f}" "exposure")"
+    if [ -n "${filter_exposure}" ]; then
+      [ "${exposure}" = "${filter_exposure}" ] || continue
+    fi
+
     if [ "${due_for_review}" -eq 1 ]; then
       [ "${status}" != "deferred" ] && continue
       [ -z "${defer_until}" ] && continue
@@ -859,7 +902,23 @@ cmd_list() {
     [ "${status}" = "in_progress" ] && extra=" (in_progress)"
     [ "${status}" = "wont_fix" ] && extra=" (wont_fix)"
 
-    printf "%-9s %-12s %s/%s — %s:%s%s\n" "${tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}"
+    local display_tier="${tier}"
+    if [ -n "${exposure}" ]; then
+      if [ "${show_effective}" -eq 1 ]; then
+        local eff
+        eff="$(effective_tier "${tier}" "${exposure}")"
+        if [ "${eff}" != "${tier}" ]; then
+          display_tier="${eff}"
+          extra="${extra} (was ${tier}, ${exposure})"
+        else
+          extra="${extra} (${exposure})"
+        fi
+      else
+        extra="${extra} (${exposure})"
+      fi
+    fi
+
+    printf "%-9s %-12s %s/%s — %s:%s%s\n" "${display_tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}"
     count=$((count + 1))
   done
 
