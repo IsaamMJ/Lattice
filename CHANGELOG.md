@@ -2,6 +2,43 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] — 2026-05-15
+
+**Global CLAUDE.md integration — discovery gap, structurally closed.** Every Claude Code session on this machine now immediately sees Lattice instructions at the top of `~/.claude/CLAUDE.md`. No manual onboarding step. No "session forgot Lattice exists" failure mode.
+
+### Added — Phase 1 (deterministic install-time integration)
+- **`install.sh` now bootstraps `~/.claude/CLAUDE.md`** via `lattice claude-md-tune --bootstrap` at the end of install. Creates the file if missing; prepends a Lattice block at the TOP if existing.
+- **Sentinel-managed block** — content lives between `<!-- LATTICE-MANAGED-BLOCK-START -->` and `<!-- LATTICE-MANAGED-BLOCK-END -->`. Future tunes replace ONLY content within sentinels. User content outside sentinels is never touched.
+- **Idempotent re-install** — sentinel detection means three back-to-back applies produce exactly one block. No duplication. Verified by test #119.
+- **Always pre-edit backup** — every mutation writes to `~/.claude/lattice/claude-md-backups/CLAUDE.md.<UTC-timestamp>` before touching the original. No backup-less edits, ever.
+- **Opt-in repo-star prompt** at install end. Only fires when running interactively AND `gh` is authenticated. Skipped silently otherwise. Never automatic.
+
+### Added — Phase 2 (self-tuning machinery)
+- **`lattice claude-md-tune`** — manage the Lattice block manually or under automation:
+  - `--propose` (default) — dry-run, prints what would change.
+  - `--apply` — actually write the refreshed block.
+  - `--bootstrap` — `--apply` with the success banner suppressed (used by install.sh).
+  - `--review-prompt` — emit a structured self-review prompt that the running Claude session can consume. This is the auto-tune mechanism: the same session reading its own onboarding doc decides if it needs revision. No external service. No cron. The session running tune IS the reviewer.
+- **`lattice claude-md-restore`** — undo:
+  - `--list` shows all backups with timestamps.
+  - `--latest` reverts to the most recent backup (also creates a "pre-restore" backup itself).
+  - `<YYYYMMDDTHHMMSSZ>` reverts to a specific timestamp.
+- **Block content** is a deterministic generator (`_lattice_md_block` in `scripts/lattice`) — single source of truth. v0.9.11+ will layer usage-stat-informed re-ordering on top of this base.
+
+### Tests
+- 121 → 127 lifecycle tests. New: bootstrap creates CLAUDE.md with sentinels (#117), user content preserved (#118), idempotent (#119), pre-edit backup (#120), restore reverts (#121), list shows backups (#122).
+
+### Why this matters (the structural closure)
+- v0.9.3 made manual filing easy.
+- v0.9.6 made event recording automatic.
+- v0.9.7 made friction detection automatic.
+- v0.9.8 made filing automatic (with confirmation).
+- v0.9.9 added the env-contract dimension.
+- **v0.9.10 makes discovery automatic.** Sessions no longer need to "know" Lattice exists — they read its instructions before doing anything else. The "session forgot to use Lattice" failure mode is now impossible without explicit removal of the block.
+
+The full Lattice observer loop:
+**Install → CLAUDE.md auto-knows Lattice → every session reads it at start → uses Lattice → MAT log records → review surfaces friction → reports auto-file → CLAUDE.md self-tunes from usage** (v0.9.11+).
+
 ## [0.9.9] — 2026-05-15
 
 **New audit dimension: env-contract.** Closes #31 — env-var silent-fallback detection. The design pressure-tested through two review rounds: shipped as a dimension inside the existing `/audit-sweep` flow (default-on, runs once per sweep), NOT as a standalone command that would have joined the dead-command pile (`triage`, `cluster`, `timeline`, `pr-body` — all 0 invocations).

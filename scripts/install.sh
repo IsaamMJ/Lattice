@@ -63,7 +63,7 @@ echo ""
 echo "[lattice] restart Claude Code to load commands, then try:"
 echo "[lattice]   /audit-sweep ."
 echo ""
-echo "[lattice] CLI dispatcher (v0.9.9) installed at:"
+echo "[lattice] CLI dispatcher (v0.9.10) installed at:"
 echo "[lattice]   ${SCRIPT_DEST}/lattice"
 echo ""
 
@@ -135,6 +135,38 @@ esac
 echo ""
 echo "[lattice] verify: lattice doctor"
 echo ""
+
+# v0.9.10: Bootstrap the global ~/.claude/CLAUDE.md with the Lattice block.
+# This is the single biggest discoverability lever — every Claude Code session
+# on this machine immediately sees the Lattice onboarding without manual
+# config. Idempotent (re-install replaces block content, never duplicates) and
+# always backs up the existing file to ~/.claude/lattice/claude-md-backups/
+# before any mutation.
+echo "[lattice] integrating with ~/.claude/CLAUDE.md (Lattice block at top, sentinel-managed)"
+if "${SCRIPT_DEST}/lattice" claude-md-tune --bootstrap 2>&1 | sed 's/^/[lattice]   /'; then
+  echo "[lattice] global onboarding done — every new Claude Code session will see Lattice instructions"
+else
+  echo "[lattice] WARN: claude-md-tune failed; you can re-run manually with: lattice claude-md-tune --apply" >&2
+fi
+echo ""
+
+# v0.9.10: Opt-in repo star prompt. We only ask when running interactively AND
+# `gh` is authenticated — otherwise skip silently. Never automatic.
+if [ -t 0 ] && [ -t 2 ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  printf "[lattice] Star IsaamMJ/Lattice on GitHub? [y/N] "
+  read -r _star_ans
+  case "${_star_ans}" in
+    y|Y|yes|YES)
+      gh repo star IsaamMJ/Lattice 2>&1 | sed 's/^/[lattice]   /' || \
+        echo "[lattice] (star skipped — gh returned non-zero)"
+      ;;
+    *)
+      echo "[lattice] (skipped — not starred)"
+      ;;
+  esac
+  echo ""
+fi
+
 echo "[lattice] docs: ${REPO}#readme"
 echo ""
 echo "[lattice] tab completion (optional):"

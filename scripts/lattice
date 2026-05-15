@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.9)
+# lattice — unified CLI dispatcher (v0.9.10)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -3533,7 +3533,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -3823,6 +3823,308 @@ cmd_review() {
   echo ""
   echo "  next: lattice review --json | jq    # structured form for tooling"
   echo "        (v0.9.8 will add --file to auto-create issues from candidates)"
+}
+
+# ---------------------------------------------------------------------------
+# Global CLAUDE.md integration helpers (v0.9.10).
+#
+# Single source of truth for:
+#   - the Lattice-managed block content (`_lattice_md_block`)
+#   - the sentinel-based install/replace logic (`_lattice_md_apply`)
+#   - backup management (`_lattice_md_backup`)
+#
+# Shared between install.sh (calls dispatcher with `lattice claude-md-tune
+# --apply --bootstrap`) and the `claude-md-tune` / `claude-md-restore`
+# subcommands so block content never lives in two places.
+#
+# Sentinels — never edit text inside these markers by hand; the tune loop
+# will overwrite them. Edit OUTSIDE the markers for personal customizations.
+# ---------------------------------------------------------------------------
+_LATTICE_MD_SENTINEL_START="<!-- LATTICE-MANAGED-BLOCK-START -->"
+_LATTICE_MD_SENTINEL_END="<!-- LATTICE-MANAGED-BLOCK-END -->"
+_LATTICE_GLOBAL_MD="${HOME}/.claude/CLAUDE.md"
+_LATTICE_MD_BACKUP_DIR="${HOME}/.claude/lattice/claude-md-backups"
+
+# Echoes the canonical Lattice-managed block (no surrounding sentinels — the
+# caller wraps). Pure heuristic, deterministic. v0.9.11+ may rewrite parts of
+# this based on usage data, but the structure stays stable.
+_lattice_md_block() {
+  local ver
+  ver="$(current_version 2>/dev/null || echo unknown)"
+  cat <<MDBLOCK
+${_LATTICE_MD_SENTINEL_START}
+<!-- managed by lattice install.sh / \`lattice claude-md-tune\` — do not edit by hand -->
+<!-- generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)  lattice-version: ${ver} -->
+
+# Lattice (audit + finding lifecycle substrate)
+
+Lattice is installed on this machine. Every Claude Code session should use it as the audit + finding-lifecycle layer for any project that has \`.lattice/\` checked in.
+
+## Session-start protocol
+
+1. Run \`lattice context\` at the very start of any session that operates on a project with \`.lattice/\`. It returns mode, active ADRs, invariants summary, open findings by tier, telemetry status, and pending friction candidates from prior sessions.
+2. If \`.lattice/\` does not exist and the user is asking for an audit, run \`lattice doctor\` first (auto-bootstraps the directory).
+3. If \`lattice context\` reports pending friction candidates, surface them to the user before diving into the task.
+
+## Working with findings
+
+- List: \`lattice list --tier CRITICAL,HIGH\` (or \`lattice next\` for the single highest-priority).
+- Close: \`lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> --commit HEAD --rationale "..."\`
+- Defer: \`lattice defer <id> --until YYYY-MM-DD --reason "..."\`
+- Reopen: \`lattice reopen <id> --reason "..."\`
+- Verify a "fixed" claim: \`lattice verify <id> --rerun-grep\`
+- ADR: \`lattice decide <slug> --title "..." --because-file <path>\`
+
+## Running audits
+
+- \`/audit <project-root> [doc-path]\` — single audit (doc-vs-code drift).
+- \`/audit-sweep <project-root> [audit|scale|security|env-contract|flow|coverage]\` — full sweep across modules. **Default-on dimensions:** audit + scale + security + env-contract. Flow / coverage are opt-in.
+- \`/security-audit\`, \`/scale-audit\`, \`/flow-audit\` — single-dimension passes.
+- \`/lattice-fix <id>\` — auto-fix one low-risk PATCH_DOC finding via a Haiku subagent.
+
+## Reporting friction
+
+Hit a workflow problem or silent-correctness bug? File it:
+\`\`\`
+lattice report <bug|enhancement|ux|docs|perf|security> --title "..." --body "..." --severity LOW|MED|HIGH
+\`\`\`
+Reports auto-create GitHub issues at \`github.com/IsaamMJ/Lattice/issues?q=label%3Amanual-report\`.
+
+## End-of-session protocol
+
+- Run \`lattice review\` to see friction candidates auto-derived from this session's MAT log.
+- Run \`lattice review --file --yes\` to auto-file them as GitHub issues (idempotent — already-filed candidates skip cleanly).
+
+## Self-tuning
+
+This block is auto-managed. If it goes stale, run \`lattice claude-md-tune --apply\` to refresh it from current Lattice state + observed usage. Backups are kept in \`~/.claude/lattice/claude-md-backups/\`; revert via \`lattice claude-md-restore --list\` and \`lattice claude-md-restore <timestamp>\`.
+
+${_LATTICE_MD_SENTINEL_END}
+MDBLOCK
+}
+
+# _lattice_md_backup <target_file>
+# Always copies target to backup dir with UTC timestamp. Echoes backup path.
+# No-op (returns 0) if target doesn't exist.
+_lattice_md_backup() {
+  local target="$1"
+  [ -f "${target}" ] || return 0
+  mkdir -p "${_LATTICE_MD_BACKUP_DIR}" 2>/dev/null || return 1
+  local ts backup_path
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_path="${_LATTICE_MD_BACKUP_DIR}/CLAUDE.md.${ts}"
+  cp "${target}" "${backup_path}" 2>/dev/null || return 1
+  echo "${backup_path}"
+}
+
+# _lattice_md_apply <target_file>
+# Idempotently inserts the Lattice block at the TOP of target_file. If the
+# block already exists (detected by sentinels), replaces ITS CONTENTS without
+# touching anything outside. If target doesn't exist, creates it with just the
+# block + a trailing newline so future user edits append cleanly.
+_lattice_md_apply() {
+  local target="$1"
+  mkdir -p "$(dirname "${target}")" 2>/dev/null || return 1
+
+  # Always backup first (if file exists)
+  local backup
+  backup="$(_lattice_md_backup "${target}")"
+  if [ -n "${backup}" ]; then
+    echo "[${PROG}] backed up to ${backup}" >&2
+  fi
+
+  local new_block
+  new_block="$(_lattice_md_block)"
+
+  if [ ! -f "${target}" ]; then
+    # New file — block at top + trailing newline for user content
+    {
+      printf '%s\n\n' "${new_block}"
+    } > "${target}"
+    echo "[${PROG}] created ${target} (Lattice block + empty user section)" >&2
+    return 0
+  fi
+
+  # Existing file — detect sentinels
+  if grep -qF "${_LATTICE_MD_SENTINEL_START}" "${target}"; then
+    # Replace content between sentinels in place using awk for atomicity
+    local tmp
+    tmp="$(mktemp)" || return 1
+    awk -v start="${_LATTICE_MD_SENTINEL_START}" \
+        -v end="${_LATTICE_MD_SENTINEL_END}" \
+        -v block="${new_block}" '
+      BEGIN { in_block=0; replaced=0 }
+      {
+        if (index($0, start) > 0 && !in_block) {
+          in_block=1
+          if (!replaced) {
+            print block
+            replaced=1
+          }
+          next
+        }
+        if (in_block) {
+          if (index($0, end) > 0) {
+            in_block=0
+          }
+          next
+        }
+        print
+      }
+    ' "${target}" > "${tmp}"
+    mv "${tmp}" "${target}"
+    echo "[${PROG}] replaced existing Lattice block in ${target}" >&2
+  else
+    # No sentinels — prepend block, then existing content
+    local tmp
+    tmp="$(mktemp)" || return 1
+    {
+      printf '%s\n\n' "${new_block}"
+      cat "${target}"
+    } > "${tmp}"
+    mv "${tmp}" "${target}"
+    echo "[${PROG}] prepended Lattice block to existing ${target}" >&2
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# claude-md-tune (v0.9.10) — Phase 2 of global integration.
+#
+# Modes:
+#   --propose          dry-run; print what the apply would do (default)
+#   --apply            actually write the refreshed block to ~/.claude/CLAUDE.md
+#   --bootstrap        equivalent to --apply, but suppresses the "no change"
+#                      banner; called by install.sh on first install
+#   --review-prompt    emit a structured self-review prompt for the running
+#                      Claude session to consume (this is the auto-tune
+#                      mechanism: same session reads its own onboarding doc
+#                      and proposes revisions, no external service needed)
+# ---------------------------------------------------------------------------
+cmd_claude_md_tune() {
+  local mode="propose"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --propose)        mode="propose"; shift ;;
+      --apply)          mode="apply"; shift ;;
+      --bootstrap)      mode="bootstrap"; shift ;;
+      --review-prompt)  mode="review-prompt"; shift ;;
+      -*)               die "claude-md-tune: unknown flag: $1" ;;
+      *)                die "claude-md-tune: extra arg: $1" ;;
+    esac
+  done
+
+  case "${mode}" in
+    propose)
+      echo "[${PROG}] claude-md-tune: would update ${_LATTICE_GLOBAL_MD}"
+      echo "[${PROG}] block content preview ($(date -u +%Y-%m-%dT%H:%M:%SZ)):"
+      echo ""
+      _lattice_md_block
+      echo ""
+      echo "[${PROG}] apply this with: lattice claude-md-tune --apply"
+      ;;
+    apply|bootstrap)
+      _lattice_md_apply "${_LATTICE_GLOBAL_MD}" || die "claude-md-tune: write failed"
+      if [ "${mode}" = "apply" ]; then
+        echo "[${PROG}] claude-md-tune: applied — restore via lattice claude-md-restore --list"
+      fi
+      ;;
+    review-prompt)
+      # Emit a structured prompt the running Claude session can act on:
+      # read current block, read usage data, propose revisions, apply.
+      local current usage_top friction_count
+      if [ -f "${_LATTICE_GLOBAL_MD}" ] && grep -qF "${_LATTICE_MD_SENTINEL_START}" "${_LATTICE_GLOBAL_MD}"; then
+        current="$(awk -v s="${_LATTICE_MD_SENTINEL_START}" -v e="${_LATTICE_MD_SENTINEL_END}" \
+          'index($0,s)>0{p=1} p{print} index($0,e)>0{p=0; exit}' "${_LATTICE_GLOBAL_MD}")"
+      else
+        current="(no Lattice block found in ${_LATTICE_GLOBAL_MD})"
+      fi
+      usage_top="$(cmd_usage --global --json 2>/dev/null | head -20 || echo "(no usage data)")"
+      friction_count="$(cmd_review --quiet 2>/dev/null || echo 0)"
+
+      cat <<PROMPT
+[lattice claude-md-tune --review-prompt]
+
+You are the Claude session running on this machine. The global CLAUDE.md
+contains a Lattice-managed onboarding block (shown below). Your task: read
+it cold as if you were a new session at session start, then decide if it
+should be revised.
+
+## Current Lattice block
+${current}
+
+## Top Lattice commands by global usage
+${usage_top}
+
+## Friction candidates pending today
+${friction_count} candidate(s) — run \`lattice review\` for details.
+
+## Your task
+1. If the block accurately reflects the most-used commands and current
+   workflow, output: NO_CHANGE
+2. If revisions would help (re-order commands by usage, surface friction
+   patterns, drop stale entries, add new commands from recent releases),
+   propose a revised block by running:
+     lattice claude-md-tune --apply
+   (the deterministic generator already incorporates current Lattice state)
+3. Either way, log your decision to .lattice/claude-md-tune-history/.
+
+Output your decision as one of: NO_CHANGE | REVISE | INSUFFICIENT_DATA
+PROMPT
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# claude-md-restore (v0.9.10) — list / revert CLAUDE.md backups.
+#
+#   lattice claude-md-restore --list           # show available backups
+#   lattice claude-md-restore <timestamp>      # revert to that backup
+#   lattice claude-md-restore --latest         # revert to most recent backup
+# ---------------------------------------------------------------------------
+cmd_claude_md_restore() {
+  if [ "$#" -eq 0 ]; then
+    die "claude-md-restore: usage: lattice claude-md-restore [--list | --latest | <YYYYMMDDTHHMMSSZ>]"
+  fi
+  if [ ! -d "${_LATTICE_MD_BACKUP_DIR}" ]; then
+    echo "[${PROG}] no backups (no ${_LATTICE_MD_BACKUP_DIR}/ directory)"
+    return 0
+  fi
+  shopt -s nullglob
+  local backups=("${_LATTICE_MD_BACKUP_DIR}"/CLAUDE.md.*)
+  if [ "${#backups[@]}" -eq 0 ]; then
+    echo "[${PROG}] no backups in ${_LATTICE_MD_BACKUP_DIR}/"
+    return 0
+  fi
+
+  local action="$1"
+  case "${action}" in
+    --list)
+      printf '%-22s  %s\n' "TIMESTAMP" "PATH"
+      local b ts
+      for b in "${backups[@]}"; do
+        ts="$(basename "${b}" | sed 's/^CLAUDE\.md\.//')"
+        printf '%-22s  %s\n' "${ts}" "${b}"
+      done
+      echo ""
+      echo "[${PROG}] revert via: lattice claude-md-restore <timestamp>"
+      echo "[${PROG}] latest:    lattice claude-md-restore --latest"
+      ;;
+    --latest)
+      # Backups are sorted by name = timestamp; tail -1 = newest
+      local latest="${backups[-1]}"
+      _lattice_md_backup "${_LATTICE_GLOBAL_MD}" >/dev/null 2>&1
+      cp "${latest}" "${_LATTICE_GLOBAL_MD}" || die "claude-md-restore: copy failed"
+      echo "[${PROG}] restored ${_LATTICE_GLOBAL_MD} from ${latest}"
+      ;;
+    *)
+      local target="${_LATTICE_MD_BACKUP_DIR}/CLAUDE.md.${action}"
+      [ -f "${target}" ] || die "claude-md-restore: no backup at ${target}"
+      _lattice_md_backup "${_LATTICE_GLOBAL_MD}" >/dev/null 2>&1
+      cp "${target}" "${_LATTICE_GLOBAL_MD}" || die "claude-md-restore: copy failed"
+      echo "[${PROG}] restored ${_LATTICE_GLOBAL_MD} from ${target}"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -4166,6 +4468,8 @@ case "${sub}" in
   sessions)           cmd_sessions "$@" ;;
   review)             cmd_review "$@" ;;
   audit-env-contract) cmd_audit_env_contract "$@" ;;
+  claude-md-tune)     cmd_claude_md_tune "$@" ;;
+  claude-md-restore)  cmd_claude_md_restore "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

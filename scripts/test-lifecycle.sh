@@ -1296,6 +1296,88 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 117: claude-md-tune --apply creates CLAUDE.md with Lattice block at top (v0.9.10)"
+new_fixture t117
+export HOME="${ROOT_TMP}/t117-home"
+mkdir -p "${HOME}/.claude"
+"${LATTICE}" claude-md-tune --apply >/tmp/lattice-t117.out 2>&1
+if [ -f "${HOME}/.claude/CLAUDE.md" ] \
+   && head -1 "${HOME}/.claude/CLAUDE.md" | grep -qF "LATTICE-MANAGED-BLOCK-START" \
+   && grep -qF "LATTICE-MANAGED-BLOCK-END" "${HOME}/.claude/CLAUDE.md"; then
+  ok "claude-md-tune --apply created CLAUDE.md with sentinel block at top"
+else
+  fail "CLAUDE.md not created correctly: $(cat /tmp/lattice-t117.out)"
+fi
+
+note "Test 118: claude-md-tune preserves user content below sentinels (v0.9.10)"
+new_fixture t118
+export HOME="${ROOT_TMP}/t118-home"
+mkdir -p "${HOME}/.claude"
+printf '# My personal CLAUDE.md\n\nMy custom rules here.\n' > "${HOME}/.claude/CLAUDE.md"
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+if head -1 "${HOME}/.claude/CLAUDE.md" | grep -qF "LATTICE-MANAGED-BLOCK-START" \
+   && grep -qF "My personal CLAUDE.md" "${HOME}/.claude/CLAUDE.md" \
+   && grep -qF "My custom rules here" "${HOME}/.claude/CLAUDE.md"; then
+  ok "claude-md-tune preserved user content below sentinels"
+else
+  fail "user content not preserved: $(cat "${HOME}/.claude/CLAUDE.md")"
+fi
+
+note "Test 119: claude-md-tune is idempotent — re-apply does not duplicate block (v0.9.10)"
+new_fixture t119
+export HOME="${ROOT_TMP}/t119-home"
+mkdir -p "${HOME}/.claude"
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+markers="$(grep -cF "LATTICE-MANAGED-BLOCK-START" "${HOME}/.claude/CLAUDE.md")"
+if [ "${markers}" = "1" ]; then
+  ok "three applies in a row produced exactly one block (markers=${markers})"
+else
+  fail "block duplicated on re-apply: marker count = ${markers}"
+fi
+
+note "Test 120: claude-md-tune writes backup before mutating (v0.9.10)"
+new_fixture t120
+export HOME="${ROOT_TMP}/t120-home"
+mkdir -p "${HOME}/.claude"
+printf '# Original content\n' > "${HOME}/.claude/CLAUDE.md"
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+backups="$(ls "${HOME}/.claude/lattice/claude-md-backups/" 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${backups}" -ge 1 ]; then
+  ok "pre-edit backup written (${backups} backup(s) found)"
+else
+  fail "no backup found in ${HOME}/.claude/lattice/claude-md-backups/"
+fi
+
+note "Test 121: claude-md-restore --latest reverts to pre-tune state (v0.9.10)"
+new_fixture t121
+export HOME="${ROOT_TMP}/t121-home"
+mkdir -p "${HOME}/.claude"
+printf 'ORIGINAL_MARKER\n' > "${HOME}/.claude/CLAUDE.md"
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+"${LATTICE}" claude-md-restore --latest >/dev/null 2>&1
+if grep -qF "ORIGINAL_MARKER" "${HOME}/.claude/CLAUDE.md" \
+   && ! grep -qF "LATTICE-MANAGED-BLOCK-START" "${HOME}/.claude/CLAUDE.md"; then
+  ok "claude-md-restore --latest reverted CLAUDE.md to pre-tune state"
+else
+  fail "restore did not revert: $(head -5 "${HOME}/.claude/CLAUDE.md")"
+fi
+
+note "Test 122: claude-md-restore --list shows backup timestamps (v0.9.10)"
+new_fixture t122
+export HOME="${ROOT_TMP}/t122-home"
+mkdir -p "${HOME}/.claude"
+printf 'x\n' > "${HOME}/.claude/CLAUDE.md"
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+"${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+out="$("${LATTICE}" claude-md-restore --list 2>&1)"
+if echo "${out}" | grep -qE 'TIMESTAMP' && [ "$(echo "${out}" | grep -cE '^[0-9]{8}T[0-9]{6}Z')" -ge 2 ]; then
+  ok "claude-md-restore --list shows multiple backups"
+else
+  fail "list output unexpected: ${out}"
+fi
+
 note "Test 111: audit-env-contract emits HIGH for catastrophic literals (v0.9.9, #31)"
 new_fixture t111
 mkdir -p src
