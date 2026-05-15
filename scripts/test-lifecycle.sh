@@ -1296,6 +1296,64 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 107: review --file appends fingerprint to .filed.jsonl (v0.9.8)"
+new_fixture t107
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"list","args":["list"],"exit":0,"duration_ms":50,"invoked_via":"fullpath","cwd":"/x"}
+JSONL
+out="$(LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" review --day "${day}" --file --yes 2>&1)"
+filed_log=".lattice/sessions/.filed.jsonl"
+if [ -f "${filed_log}" ] \
+   && grep -q '"fingerprint":"[0-9a-f]\{64\}"' "${filed_log}" \
+   && grep -q '"kind":"fullpath_workaround"' "${filed_log}" \
+   && echo "${out}" | grep -q 'FILED.*fullpath_workaround' \
+   && echo "${out}" | grep -q '1 filed, 0 skipped, 0 errored'; then
+  ok "review --file filed candidate + appended fingerprint record"
+else
+  fail "review --file did not file correctly: out=${out}; log=$(cat "${filed_log}" 2>/dev/null)"
+fi
+
+note "Test 108: review --file is idempotent (re-run skips filed candidates) (v0.9.8)"
+# Reuse t107 fixture state — log file + .filed.jsonl already populated.
+out="$(LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" review --day "${day}" --file --yes 2>&1)"
+filed_count="$(grep -c '"fingerprint"' "${filed_log}" 2>/dev/null || echo 0)"
+if echo "${out}" | grep -q '0 filed, 1 skipped' && [ "${filed_count}" = "1" ]; then
+  ok "review --file re-run skipped already-filed candidate (no duplicates)"
+else
+  fail "review --file not idempotent: out=${out}; filed_count=${filed_count}"
+fi
+
+note "Test 109: review --file refuses without --yes on non-TTY stdin (v0.9.8)"
+new_fixture t109
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"list","args":["list"],"exit":0,"duration_ms":50,"invoked_via":"fullpath","cwd":"/x"}
+JSONL
+# stdin redirected from /dev/null = not a TTY
+out="$(LATTICE_TELEMETRY_DEBUG=1 "${LATTICE}" review --day "${day}" --file </dev/null 2>&1 || true)"
+if echo "${out}" | grep -q "non-TTY stdin; refusing without --yes"; then
+  ok "review --file safety-guards non-TTY without --yes"
+else
+  fail "review --file did not refuse on non-TTY: ${out}"
+fi
+
+note "Test 110: review --json includes stable_key for external dedup (v0.9.8)"
+new_fixture t110
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"derve","args":["derve"],"exit":2,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" --json 2>&1)"
+if echo "${out}" | grep -q '"stable_key":"unknown_subcommand:derve"'; then
+  ok "review --json emits stable_key per candidate"
+else
+  fail "review --json missing stable_key: ${out}"
+fi
+
 note "Test 101: review surfaces fullpath_workaround predicate (v0.9.7)"
 new_fixture t101
 mkdir -p .lattice/sessions

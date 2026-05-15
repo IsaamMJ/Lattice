@@ -2,6 +2,29 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] — 2026-05-15
+
+**Observer-pattern fix complete.** v0.9.6 captured the events. v0.9.7 derived candidates. v0.9.8 closes the loop: candidates become GitHub issues with one keystroke and idempotent dedup. After this release, "did the session file the bugs it encountered?" is no longer a memory check — it's a structural property of the system.
+
+### Added
+- **`lattice review --file [--yes]`** — pipes friction candidates through `lattice report` (existing v0.9.3 channel), auto-creating GitHub issues. `--yes` skips per-candidate confirmation for non-interactive runs.
+- **Idempotent dedup** via `.lattice/sessions/.filed.jsonl` keyed on sha256 fingerprints of stable candidate keys (NOT titles, which contain volatile occurrence counts). Re-running `review --file` is safe — already-filed candidates skip cleanly.
+- **`stable_key` field** in candidate records (exposed in `--json` output). Lets external tooling apply the same dedup logic.
+- **Category mapping** kind → report category: `fullpath_workaround`/`repeated_failure`/`failed_then_succeeded` → `bug`, `unknown_subcommand` → `ux`, `slow_command` → `perf`.
+- **`lattice context` awareness hint** — when the MAT log for today has unfiled friction candidates, prints a "Friction candidates" section at the top of `next actions` with the exact command to review/file them. Closes the awareness loop — sessions can no longer "not know" pending observations exist.
+- **Non-TTY safety guard**: `review --file` without `--yes` refuses to proceed when stdin isn't a TTY, preventing accidental mass-filing from automation that forgot the `--yes` opt-in.
+
+### Tests
+- 111 → 115 lifecycle tests. New: `--file` appends fingerprint record (#107), idempotent re-run skips filed (#108), non-TTY safety guard (#109), `--json` exposes stable_key (#110).
+
+### Why this matters — the full arc
+- v0.9.3 made filing easy (manual channel).
+- v0.9.6 made recording automatic (MAT log).
+- v0.9.7 made detection automatic (predicates).
+- v0.9.8 makes filing automatic (with confirmation).
+
+The chain: every Lattice invocation → trace event → predicate → candidate → optional one-keystroke filing → GitHub issue → triage in v1.0. The disease ("Claude only files when prompted") has no surface left to attach to. Default behavior is now "report unless explicitly dismissed" instead of "say nothing unless prompted."
+
 ## [0.9.7] — 2026-05-15
 
 **Friction predicates + `lattice review` — second half of the observer-pattern fix.** v0.9.6 put the passive MAT log layer in place. v0.9.7 reads it: five high-precision predicates derive friction candidates automatically. Claude (or any session) runs `lattice review` and gets a structured list of probable bugs/UX gaps the session encountered but didn't notice as filable.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.7)
+# lattice — unified CLI dispatcher (v0.9.8)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -3142,6 +3142,22 @@ cmd_context() {
     echo ""
   fi
 
+  # MAT friction awareness (v0.9.8). Close the awareness loop: if the session
+  # log has unfiled friction candidates, surface the count + filing command at
+  # the top of `next actions` so it's the path of least resistance, not an
+  # opt-in scavenger hunt. Silent when there's nothing or no log yet.
+  local _today _candcount
+  _today="$(date -u +%Y%m%d 2>/dev/null || echo unknown)"
+  if [ -f ".lattice/sessions/${_today}.jsonl" ]; then
+    _candcount="$(cmd_review --day "${_today}" --quiet 2>/dev/null || echo 0)"
+    if [ "${_candcount:-0}" -gt 0 ] 2>/dev/null; then
+      echo "## Friction candidates"
+      printf "  %s candidate(s) from today's session log — review: lattice review\n" "${_candcount}"
+      printf '  file all (idempotent):                 lattice review --file --yes\n'
+      echo ""
+    fi
+  fi
+
   echo "## Next actions"
   echo "  lattice list --tier CRITICAL,HIGH        # priority queue"
   echo "  lattice next                             # single highest-priority finding"
@@ -3528,12 +3544,17 @@ _review_known_cmd() {
 }
 
 cmd_review() {
-  local day="" mode="pretty"
+  local day="" mode="pretty" auto_yes=0
+  # v0.9.8: --file feeds candidates into `lattice report` with idempotent
+  # dedup via `.lattice/sessions/.filed.jsonl`. --yes skips per-candidate
+  # confirmation (CI / autonomous-agent friendly).
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --day)   day="$2"; shift 2 ;;
       --json)  mode="json"; shift ;;
       --quiet) mode="quiet"; shift ;;
+      --file)  mode="file"; shift ;;
+      --yes|-y) auto_yes=1; shift ;;
       -*)      die "review: unknown flag: $1" ;;
       *)       die "review: extra arg: $1" ;;
     esac
@@ -3566,11 +3587,11 @@ cmd_review() {
   # array (kind|severity|title|count|sample_ts) joined by tab so we can emit
   # in either pretty or JSON form without re-running.
   local -a CANDIDATES=()
-  # Helper: append a tab-joined candidate row. Implemented inline (not a
-  # nested function — bash does not accept `local emit()` as a definition,
-  # and a script-scope helper would leak globally for one-line use).
+  # Helper: append a tab-joined candidate row. 7th field (stable_key) is the
+  # dedup fingerprint input for v0.9.8 --file mode — keeps the row identity
+  # stable across days/counts so re-filing doesn't double-create issues.
   _emit_candidate() {
-    CANDIDATES+=("$1"$'\t'"$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\t'"$6")
+    CANDIDATES+=("$1"$'\t'"$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\t'"$6"$'\t'"${7:-$1}")
   }
 
   # --- predicate: fullpath_workaround
@@ -3586,7 +3607,7 @@ cmd_review() {
     _emit_candidate "fullpath_workaround" "MED" \
       "lattice CLI invoked via full path ${fp_count}x — PATH shim not resolved" \
       "v0.8.3 ships an install-time shim into ~/.local/bin and a PATH guard in shell rc. On ${fp_count} invocation(s) today the dispatcher was reached via its full path instead, which means the shim never made it onto PATH for this shell. Re-run install.sh or inspect 'lattice doctor' output." \
-      "${fp_count}" "${fp_sample}"
+      "${fp_count}" "${fp_sample}" "fullpath_workaround"
   fi
 
   # --- predicate: unknown_subcommand
@@ -3602,7 +3623,7 @@ cmd_review() {
     _emit_candidate "unknown_subcommand" "LOW" \
       "session tried unknown subcommand(s) ${unk_count}x — first: '${unk_cmd}'" \
       "Sessions invoked subcommand names that don't exist in this version's dispatcher. Either a discoverability gap (the right command exists under a different name) or stale memory of removed/renamed commands. Worth comparing to 'lattice help' output and considering aliases or did-you-mean hints." \
-      "${unk_count}" "${unk_sample}"
+      "${unk_count}" "${unk_sample}" "unknown_subcommand:${unk_cmd}"
   fi
 
   # --- predicate: repeated_failure (same cmd, exit!=0, >=2 occurrences)
@@ -3620,7 +3641,7 @@ cmd_review() {
       _emit_candidate "repeated_failure" "MED" \
         "lattice ${c} failed ${fail_by_cmd[${c}]}x in one day — reproducible bug candidate" \
         "Same subcommand exited non-zero multiple times in the same day. Either a real bug the session worked around (filed candidate) or a misuse pattern (still useful as a UX signal — surface the actual error in usage)." \
-        "${fail_by_cmd[${c}]}" "${fail_sample[${c}]}"
+        "${fail_by_cmd[${c}]}" "${fail_sample[${c}]}" "repeated_failure:${c}"
     fi
   done
 
@@ -3644,7 +3665,7 @@ cmd_review() {
     _emit_candidate "failed_then_succeeded" "LOW" \
       "lattice ${c} failed then succeeded ${ftss_count[${c}]}x — silent workaround" \
       "Session retried the same subcommand and got past the failure. The original failure is a bug candidate even though the workaround unblocked the session — exactly the silent-correctness class the manual report channel was built for." \
-      "${ftss_count[${c}]}" "${ftss_sample[${c}]}"
+      "${ftss_count[${c}]}" "${ftss_sample[${c}]}" "failed_then_succeeded:${c}"
   done
 
   # --- predicate: slow_command (duration_ms > 30000)
@@ -3660,7 +3681,7 @@ cmd_review() {
     _emit_candidate "slow_command" "LOW" \
       "lattice ${slow_cmd} took >30s ${slow_count}x — perf or stuck-loop candidate" \
       "Duration above 30s on a Lattice CLI invocation. Most subcommands should be sub-second; durations this long usually indicate filesystem scan blow-up, regex backtracking, or a stuck loop. Worth profiling." \
-      "${slow_count}" "${slow_sample}"
+      "${slow_count}" "${slow_sample}" "slow_command:${slow_cmd}"
   fi
 
   # --- Output --------------------------------------------------------------
@@ -3674,22 +3695,110 @@ cmd_review() {
   if [ "${mode}" = "json" ]; then
     local entry
     for entry in "${CANDIDATES[@]}"; do
-      local kind sev title body cnt ts
-      kind="${entry%%	*}";       entry="${entry#*	}"
-      sev="${entry%%	*}";        entry="${entry#*	}"
-      title="${entry%%	*}";      entry="${entry#*	}"
-      body="${entry%%	*}";       entry="${entry#*	}"
-      cnt="${entry%%	*}";        entry="${entry#*	}"
-      ts="${entry}"
+      local kind sev title body cnt ts key
+      kind="${entry%%	*}";  entry="${entry#*	}"
+      sev="${entry%%	*}";   entry="${entry#*	}"
+      title="${entry%%	*}"; entry="${entry#*	}"
+      body="${entry%%	*}";  entry="${entry#*	}"
+      cnt="${entry%%	*}";   entry="${entry#*	}"
+      ts="${entry%%	*}";    entry="${entry#*	}"
+      key="${entry}"
       # Inline escape — same rules as the MAT writer in _write_mat_entry.
       local _k="${kind//\\/\\\\}"; _k="${_k//\"/\\\"}"; _k="${_k//$'\n'/\\n}"
       local _s="${sev//\\/\\\\}";  _s="${_s//\"/\\\"}";  _s="${_s//$'\n'/\\n}"
       local _t="${title//\\/\\\\}"; _t="${_t//\"/\\\"}"; _t="${_t//$'\n'/\\n}"
       local _b="${body//\\/\\\\}";  _b="${_b//\"/\\\"}";  _b="${_b//$'\n'/\\n}"
       local _ts="${ts//\\/\\\\}";   _ts="${_ts//\"/\\\"}"; _ts="${_ts//$'\n'/\\n}"
-      printf '{"kind":"%s","severity":"%s","title":"%s","body":"%s","evidence_count":%s,"sample_ts":"%s"}\n' \
-        "${_k}" "${_s}" "${_t}" "${_b}" "${cnt}" "${_ts}"
+      local _key="${key//\\/\\\\}"; _key="${_key//\"/\\\"}"; _key="${_key//$'\n'/\\n}"
+      printf '{"kind":"%s","severity":"%s","title":"%s","body":"%s","evidence_count":%s,"sample_ts":"%s","stable_key":"%s"}\n' \
+        "${_k}" "${_s}" "${_t}" "${_b}" "${cnt}" "${_ts}" "${_key}"
     done
+    return 0
+  fi
+
+  if [ "${mode}" = "file" ]; then
+    if [ "${ncand}" -eq 0 ]; then
+      echo "[${PROG}] review --file (${day}): 0 candidates, nothing to file"
+      return 0
+    fi
+    mkdir -p .lattice/sessions 2>/dev/null || true
+    local filed_log=".lattice/sessions/.filed.jsonl"
+    local filed=0 skipped=0 errored=0
+    local entry kind sev title body cnt ts key fp category
+    for entry in "${CANDIDATES[@]}"; do
+      kind="${entry%%	*}";  entry="${entry#*	}"
+      sev="${entry%%	*}";   entry="${entry#*	}"
+      title="${entry%%	*}"; entry="${entry#*	}"
+      body="${entry%%	*}";  entry="${entry#*	}"
+      cnt="${entry%%	*}";   entry="${entry#*	}"
+      ts="${entry%%	*}";    entry="${entry#*	}"
+      key="${entry}"
+      # Idempotent fingerprint over the stable_key (not over title — title
+      # contains volatile occurrence counts).
+      fp="$(printf '%s' "${key}" | sha256sum 2>/dev/null | cut -d' ' -f1)"
+      if [ -z "${fp}" ]; then
+        echo "[${PROG}] review --file: sha256sum unavailable; cannot dedup safely. Aborting." >&2
+        return 1
+      fi
+      if [ -f "${filed_log}" ] && grep -q "\"fingerprint\":\"${fp}\"" "${filed_log}" 2>/dev/null; then
+        skipped=$((skipped + 1))
+        echo "[${PROG}] skip (already filed): [${kind}] ${title}"
+        continue
+      fi
+      # Optional per-candidate prompt unless --yes
+      if [ "${auto_yes}" -ne 1 ]; then
+        if [ ! -t 0 ]; then
+          echo "[${PROG}] review --file: non-TTY stdin; refusing without --yes" >&2
+          return 2
+        fi
+        printf '\nfile [%s] %s? [y/N] ' "${kind}" "${title}" >&2
+        local ans; read -r ans </dev/tty || ans=""
+        case "${ans}" in
+          y|Y|yes|YES) ;;
+          *) echo "[${PROG}] skipped (user)"; skipped=$((skipped + 1)); continue ;;
+        esac
+      fi
+      # Map kind -> lattice report category
+      case "${kind}" in
+        fullpath_workaround)   category="bug"  ;;
+        unknown_subcommand)    category="ux"   ;;
+        repeated_failure)      category="bug"  ;;
+        failed_then_succeeded) category="bug"  ;;
+        slow_command)          category="perf" ;;
+        *)                     category="bug"  ;;
+      esac
+      # Body gets the predicate sample timestamp + evidence footer so the
+      # filed issue is traceable back to the MAT log on this machine.
+      local annotated_body
+      annotated_body="${body}
+
+---
+*Auto-detected by \`lattice review\` predicate \`${kind}\` on ${day}.*
+- evidence_count: ${cnt}
+- sample_ts: ${ts}
+- fingerprint: ${fp}"
+      # Invoke lattice report. In normal mode this POSTs to the Worker and
+      # auto-files a GitHub issue. In LATTICE_TELEMETRY_DEBUG=1 mode it just
+      # prints the payload (tests rely on that for hermetic runs).
+      if bash "${BASH_SOURCE[0]:-$0}" report "${category}" \
+          --title "${title}" \
+          --body "${annotated_body}" \
+          --severity "${sev}" >/dev/null 2>&1; then
+        filed=$((filed + 1))
+        # Append filed-fingerprint record so re-runs dedup.
+        local filed_at
+        filed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '{"fingerprint":"%s","kind":"%s","filed_at":"%s","day":"%s"}\n' \
+          "${fp}" "${kind}" "${filed_at}" "${day}" \
+          >> "${filed_log}" 2>/dev/null || true
+        echo "[${PROG}] FILED: [${kind}] ${title}"
+      else
+        errored=$((errored + 1))
+        echo "[${PROG}] FAILED to file: [${kind}] ${title}" >&2
+      fi
+    done
+    echo ""
+    echo "[${PROG}] review --file (${day}): ${filed} filed, ${skipped} skipped, ${errored} errored"
     return 0
   fi
 
