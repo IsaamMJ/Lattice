@@ -2,6 +2,38 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] — 2026-05-15
+
+**New audit dimension: env-contract.** Closes #31 — env-var silent-fallback detection. The design pressure-tested through two review rounds: shipped as a dimension inside the existing `/audit-sweep` flow (default-on, runs once per sweep), NOT as a standalone command that would have joined the dead-command pile (`triage`, `cluster`, `timeline`, `pr-body` — all 0 invocations).
+
+### Added
+- **`lattice audit-env-contract [--path .] [--write]`** — detector entry point. Designed to be invoked BY `/audit-sweep`, not typed by humans. Survival depends on living inside a habit-loop the user already runs (audit-sweep gets >1000 invocations/month).
+- **Five pattern families** covered (Node/TS canonical + modern + Python + Dart):
+  - `process.env.X || 'literal'`
+  - `process.env.X ?? 'literal'` (TS strict-mode nullish coalescing)
+  - `const { X = 'literal' } = process.env` (destructured defaults)
+  - `os.environ.get('X', 'literal')` (Python)
+  - `String.fromEnvironment('X', defaultValue: 'literal')` (Dart)
+- **Tier classification by fallback-value plausibility** — without this, the detector floods findings and gets tuned out within a week:
+  - **HIGH**: domain-specific literals (`'FBS'`, `'dev-secret'`, `'postgres://admin@prod/db'`, `'admin'`). Catastrophic if real.
+  - **MEDIUM**: placeholder shapes (`'TODO'`, `'changeme'`, `'<your-key>'`, `'REPLACE_ME'`).
+  - **LOW**: sane dev defaults (`'3000'`, `'localhost'`, `''`, `'false'`, `'info'`, pure digits).
+- **Contract-file cross-check (optional)** — if `docs/env.contract.md` exists, emits `DRIFT-env-not-in-contract-<KEY>` for any env var referenced in code but missing from the contract. Cheap (~30 LOC), very high signal when the contract file exists, silent when absent. Partial assist toward #34 (full action-time enforcement still needs the runtime-state mechanism that grep alone can't see).
+- **`env-contract` added to `VALID_DIMENSIONS`** in `lattice-regenerate.sh` so emitted findings pass `lattice validate`.
+- **`/audit-sweep` updated** to include `env-contract` in the default dimension set + Step 0 invocation pre-module-dispatch (env is project-wide, not per-module).
+- **New finding fields** (optional, env-contract dimension only): `env_key`, `fallback_value`.
+
+### Tests
+- 115 → 121 lifecycle tests. New: HIGH-tier classification (#111), LOW-tier classification (#112), `??` + destructured patterns (#113), Python + Dart (#114), `--write` produces validate-passing YAML (#115), contract cross-check selectively flags missing vars (#116).
+
+### What this closes
+- **#31** — closed.
+- **#34** — partly addressed via contract-file cross-check. Full runtime-state enforcement (pm2 `--update-env` wipes, etc) explicitly NOT closed — that needs an action-time mechanism out of grep's reach. Stays open as v0.9.10+ scope.
+- **#32, #33** — untouched. Need their own slices once riseCraft generates more evidence.
+
+### Why this matters (the design discipline)
+The first instinct was `lattice env-audit` as a standalone command. The usage data (4 of 34 commands at 0 invocations) said that path was the dead-command trap. Pivoted to dimension-inside-audit-sweep because audit-sweep is already in a habit loop. Tier classification was the second discipline catch: a flat "RISK" tier on every match would have flooded findings within a week and got the dimension tuned out. Both changes came from review rounds, not the first draft — discipline phase worked.
+
 ## [0.9.8] — 2026-05-15
 
 **Observer-pattern fix complete.** v0.9.6 captured the events. v0.9.7 derived candidates. v0.9.8 closes the loop: candidates become GitHub issues with one keystroke and idempotent dedup. After this release, "did the session file the bugs it encountered?" is no longer a memory check — it's a structural property of the system.

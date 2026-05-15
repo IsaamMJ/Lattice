@@ -1296,6 +1296,117 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 111: audit-env-contract emits HIGH for catastrophic literals (v0.9.9, #31)"
+new_fixture t111
+mkdir -p src
+cat > src/db.ts <<'TS'
+const DATABASE_URL = process.env.DATABASE_URL || 'postgres://admin:secret@prod/db';
+const SKU = process.env.THYROCARE_SKU_ID || 'FBS';
+TS
+out="$("${LATTICE}" audit-env-contract --path . 2>&1)"
+if echo "${out}" | grep -qE 'HIGH[[:space:]]+DATABASE_URL' \
+   && echo "${out}" | grep -qE 'HIGH[[:space:]]+THYROCARE_SKU_ID'; then
+  ok "env-contract tiers domain-specific literals as HIGH"
+else
+  fail "expected HIGH classification missing: ${out}"
+fi
+
+note "Test 112: audit-env-contract emits LOW for sane defaults (v0.9.9, #31)"
+new_fixture t112
+mkdir -p src
+cat > src/cfg.ts <<'TS'
+const PORT = process.env.PORT || '3000';
+const HOST = process.env.HOST || 'localhost';
+const LOG = process.env.LOG_LEVEL || 'info';
+TS
+out="$("${LATTICE}" audit-env-contract --path . 2>&1)"
+if echo "${out}" | grep -qE 'LOW[[:space:]]+PORT' \
+   && echo "${out}" | grep -qE 'LOW[[:space:]]+HOST' \
+   && echo "${out}" | grep -qE 'LOW[[:space:]]+LOG_LEVEL' \
+   && ! echo "${out}" | grep -qE 'HIGH'; then
+  ok "env-contract classifies dev defaults as LOW (no false-HIGH)"
+else
+  fail "LOW classification wrong: ${out}"
+fi
+
+note "Test 113: audit-env-contract covers ?? and destructured defaults (v0.9.9, #31)"
+new_fixture t113
+mkdir -p src
+cat > src/strict.ts <<'TS'
+const X = process.env.JWT_SECRET ?? 'change-me-prod-secret';
+const { API_TOKEN = 'real-looking-token' } = process.env;
+TS
+out="$("${LATTICE}" audit-env-contract --path . 2>&1)"
+# JWT_SECRET should be HIGH (matches via ??), API_TOKEN should be HIGH (matches via destructured)
+if echo "${out}" | grep -qE '(HIGH|MEDIUM)[[:space:]]+JWT_SECRET' \
+   && echo "${out}" | grep -qE '(HIGH|MEDIUM)[[:space:]]+API_TOKEN'; then
+  ok "env-contract catches ?? + destructured patterns (not just ||)"
+else
+  fail "?? or destructured pattern missed: ${out}"
+fi
+
+note "Test 114: audit-env-contract covers Python + Dart (v0.9.9, #31)"
+new_fixture t114
+mkdir -p svc lib
+cat > svc/cfg.py <<'PY'
+import os
+SKU = os.environ.get('THYROCARE_SKU_ID', 'FBS')
+PY
+cat > lib/main.dart <<'DART'
+const apiKey = String.fromEnvironment('API_KEY', defaultValue: 'placeholder-secret');
+DART
+out="$("${LATTICE}" audit-env-contract --path . 2>&1)"
+if echo "${out}" | grep -qE 'HIGH[[:space:]]+THYROCARE_SKU_ID' \
+   && echo "${out}" | grep -qE '(HIGH|MEDIUM)[[:space:]]+API_KEY'; then
+  ok "env-contract handles Python os.environ.get + Dart String.fromEnvironment"
+else
+  fail "Python or Dart pattern missed: ${out}"
+fi
+
+note "Test 115: audit-env-contract --write emits valid YAML findings (v0.9.9, #31)"
+new_fixture t115
+mkdir -p src
+cat > src/db.ts <<'TS'
+const DB = process.env.DATABASE_URL || 'postgres://admin@prod/db';
+TS
+"${LATTICE}" audit-env-contract --path . --write >/dev/null 2>&1
+f=".lattice/findings/open/HIGH-env-fallback-DATABASE_URL.yml"
+if [ -f "${f}" ] \
+   && grep -q '^dimension: env-contract$' "${f}" \
+   && grep -q '^tier: HIGH$' "${f}" \
+   && grep -q "^env_key: \"DATABASE_URL\"$" "${f}"; then
+  # Also: must validate cleanly via lattice validate
+  if "${LATTICE}" validate >/tmp/lattice-t115-validate.out 2>&1; then
+    ok "audit-env-contract emits valid YAML that survives lattice validate"
+  else
+    fail "emitted YAML failed validate: $(cat /tmp/lattice-t115-validate.out)"
+  fi
+else
+  fail "expected YAML missing or wrong: $(cat "${f}" 2>/dev/null)"
+fi
+
+note "Test 116: audit-env-contract contract-file cross-check emits DRIFT (v0.9.9, #31)"
+new_fixture t116
+mkdir -p src docs
+cat > src/db.ts <<'TS'
+const DB = process.env.DATABASE_URL || 'localhost';
+const TOK = process.env.STRIPE_KEY || 'changeme';
+TS
+cat > docs/env.contract.md <<'MD'
+# Env Contract
+| Var | Required | Source |
+|-----|----------|--------|
+| DATABASE_URL | yes | .env |
+MD
+"${LATTICE}" audit-env-contract --path . --write >/dev/null 2>&1
+drift=".lattice/findings/open/DRIFT-env-not-in-contract-STRIPE_KEY.yml"
+not_drift=".lattice/findings/open/DRIFT-env-not-in-contract-DATABASE_URL.yml"
+if [ -f "${drift}" ] && [ ! -f "${not_drift}" ]; then
+  ok "contract cross-check flags STRIPE_KEY (missing) but not DATABASE_URL (present)"
+else
+  fail "contract cross-check wrong: drift=$([ -f "${drift}" ] && echo yes || echo no) not_drift=$([ -f "${not_drift}" ] && echo yes || echo no)"
+fi
+
 note "Test 107: review --file appends fingerprint to .filed.jsonl (v0.9.8)"
 new_fixture t107
 mkdir -p .lattice/sessions

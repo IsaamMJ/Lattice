@@ -1,6 +1,6 @@
 ---
-description: Run audit + scale + security (default) across every module via one dispatch per module (module-scoped agents), aggregate into one master findings file with cross-cutting pattern detection. Optionally include flow / coverage dimensions.
-argument-hint: <project-root> [audit|scale|security|flow|coverage] [auto] [<module-paths...>]
+description: Run audit + scale + security + env-contract (default) across every module via one dispatch per module (module-scoped agents), aggregate into one master findings file with cross-cutting pattern detection. Optionally include flow / coverage dimensions.
+argument-hint: <project-root> [audit|scale|security|env-contract|flow|coverage] [auto] [<module-paths...>]
 ---
 
 Sweep arguments: $ARGUMENTS
@@ -14,6 +14,7 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 | `audit` | run only the audit dimension |
 | `scale` | run only the scale dimension |
 | `security` | run only the security dimension |
+| `env-contract` | run only the env-contract dimension (v0.9.9 — default-on, see Step 0 below) |
 | `flow` | run only the flow dimension (v0.6.4 — opt-in only, see below) |
 | `coverage` | run only the coverage dimension (v0.6.4 — opt-in only) |
 | `auto` | auto-apply drafted checklist entries to CLAUDE.md and commit at end |
@@ -21,8 +22,8 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 | `.` or any other path | project root (defaults to `.` if none given) |
 
 **Dimension filtering**:
-- If NO dimension token is present, run **audit + scale + security** (default — flow / coverage are opt-in).
-- If any of `audit` / `scale` / `security` / `flow` / `coverage` are present, run ONLY those.
+- If NO dimension token is present, run **audit + scale + security + env-contract** (default — flow / coverage are opt-in).
+- If any of `audit` / `scale` / `security` / `env-contract` / `flow` / `coverage` are present, run ONLY those.
 - `flow` and `coverage` are v0.6.4 dimensions and are NOT in the default sweep yet — explicitly include them when you want flow / coverage findings mixed into sweep output (`/audit-sweep . flow` or `/audit-sweep . security flow`). They invoke the same methodology as `/flow-audit` (coverage has no separate skill — its patterns run inline), just dispatched per-module.
 
 **Module filtering**: If one or more `src/modules/X` paths are given, audit ONLY those modules. If none given, auto-discover via `Glob src/modules/*/`.
@@ -44,6 +45,20 @@ A 9-module project = 27 skill invocations under the old per-skill model. v0.5 co
 User invokes: `/audit-sweep <project-root>` (e.g. `/audit-sweep .` or `/audit-sweep . security`)
 
 ## Methodology
+
+### Step 0 — Project-wide env-contract pass (v0.9.9)
+
+If `env-contract` is in the active dimension set (default-on unless filtered out), run ONCE at sweep start, before per-module dispatch:
+
+```
+bash scripts/lattice audit-env-contract --write --path <project-root>
+# OR if installed globally:
+~/.claude/lattice/scripts/lattice audit-env-contract --write --path <project-root>
+```
+
+This detects env-var silent-fallback patterns (`process.env.X || 'literal'`, `??`, destructured defaults, `os.environ.get`, `String.fromEnvironment`) across Node/TS/Python/Dart, classifies each by fallback-value plausibility (HIGH/MEDIUM/LOW), and emits findings directly into `.lattice/findings/open/`. If `docs/env.contract.md` exists, also emits `DRIFT-env-not-in-contract-<KEY>` for env vars referenced in code but missing from the contract.
+
+This dimension is project-wide (not per-module) because env vars are global, so it runs once at the top instead of duplicating in every module dispatch.
 
 ### Step 1 — Enumerate modules + generate sweep_id
 1. Glob `<project-root>/src/modules/*/` to enumerate module directories.

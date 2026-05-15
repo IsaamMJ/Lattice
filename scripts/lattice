@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.8)
+# lattice — unified CLI dispatcher (v0.9.9)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -3533,7 +3533,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -3826,6 +3826,269 @@ cmd_review() {
 }
 
 # ---------------------------------------------------------------------------
+# audit-env-contract — env-contract dimension scanner (v0.9.9, closes #31).
+#
+# Detects env-var fallback patterns across Node/TS, Python, and Dart. Classifies
+# each finding by fallback-value plausibility (HIGH/MED/LOW) so the audit stays
+# signal-rich instead of being tuned out as noise. Optional cross-check against
+# a checked-in `docs/env.contract.md` file emits DRIFT-env-not-in-contract for
+# any env var referenced in code but missing from the contract.
+#
+# Designed to be invoked BY the `/audit-sweep` skill, NOT typed by humans —
+# this is a sweep dimension, not a standalone tool. Survival depends on living
+# inside a habit-loop (audit-sweep already gets 1000+ invocations/month).
+#
+# Usage:
+#   lattice audit-env-contract [--path .] [--write]
+#     (no --write: prints findings to stdout; --write emits YAML to
+#      .lattice/findings/open/<slug>.yml for the lifecycle to pick up)
+#
+# Patterns detected (five families):
+#   1. process.env.X || 'literal'              # JS/TS, the canonical case
+#   2. process.env.X ?? 'literal'              # JS/TS strict-mode TS
+#   3. const { X = 'literal' } = process.env   # JS/TS destructured defaults
+#   4. getEnv('X', 'literal') / env('X', ...)  # helper-wrapped patterns
+#   5. os.environ.get('X', 'literal')          # Python
+#   6. String.fromEnvironment('X', defaultValue: 'literal')  # Dart
+#
+# Classification heuristic (tunable via _env_plausibility_tier):
+#   LOW    sane dev defaults — '3000', 'localhost', '', '0', 'false', 'info', ...
+#   MEDIUM placeholder shapes — 'TODO', 'changeme', '<...>', 'REPLACE_ME', ...
+#   HIGH   anything else — looks domain-specific, probably catastrophic if real
+#
+# Heuristic errs on alarm: better 3 HIGH false-positives than 1 missed disaster.
+# Allowlist for LOW grows as real usage tells us what's fine.
+# ---------------------------------------------------------------------------
+_env_plausibility_tier() {
+  # Echoes LOW/MEDIUM/HIGH based on fallback-literal shape.
+  local v="$1"
+  # Strip surrounding quotes
+  v="${v#\'}"; v="${v%\'}"
+  v="${v#\"}"; v="${v%\"}"
+  # Empty / unset / common dev defaults => LOW
+  case "${v}" in
+    ""|" "|"unset"|"none"|"null"|"undefined") echo "LOW"; return ;;
+    "localhost"|"127.0.0.1"|"0.0.0.0") echo "LOW"; return ;;
+    "true"|"false"|"yes"|"no"|"on"|"off") echo "LOW"; return ;;
+    "0"|"1") echo "LOW"; return ;;
+    "development"|"dev"|"local"|"test"|"production") echo "LOW"; return ;;
+    "info"|"debug"|"warn"|"warning"|"error"|"trace"|"verbose"|"silent") echo "LOW"; return ;;
+    "GET"|"POST"|"PUT"|"DELETE"|"PATCH") echo "LOW"; return ;;
+  esac
+  # Pure digit string (ports, counts, timeouts) => LOW
+  if [[ "${v}" =~ ^[0-9]+$ ]]; then echo "LOW"; return; fi
+  # Common placeholder shapes => MEDIUM
+  case "${v}" in
+    TODO|todo|Todo|FIXME|fixme|changeme|CHANGEME|placeholder|PLACEHOLDER) echo "MEDIUM"; return ;;
+    REPLACE|REPLACE_ME|replace-me|your-key|YOUR_KEY|your-secret|YOUR_SECRET) echo "MEDIUM"; return ;;
+  esac
+  if [[ "${v}" == \<*\> ]]; then echo "MEDIUM"; return; fi  # <your-key> shape
+  if [[ "${v}" == *placeholder* ]] || [[ "${v}" == *PLACEHOLDER* ]]; then echo "MEDIUM"; return; fi
+  # Default: looks real => HIGH
+  echo "HIGH"
+}
+
+_env_emit_finding() {
+  # args: tier, env_key, fallback_value, file, line, write_mode, slug_seq
+  local tier="$1" key="$2" fallback="$3" file="$4" line="$5" write="$6" seq="$7"
+  local slug="${tier}-env-fallback-${key}"
+  # If multiple findings share the same key+tier (e.g. two callsites), suffix.
+  [ "${seq}" -gt 0 ] && slug="${slug}-${seq}"
+  local short_fb="${fallback//\'/}"; short_fb="${short_fb//\"/}"
+  local short_fb_display="${short_fb}"
+  [ "${#short_fb}" -gt 30 ] && short_fb_display="${short_fb:0:27}..."
+  if [ "${write}" != "1" ]; then
+    printf '%-7s %-30s %-15s %s:%s\n' "${tier}" "${key}" "[${short_fb_display}]" "${file}" "${line}"
+    return 0
+  fi
+  ensure_project_dirs
+  mkdir -p .lattice/findings/open
+  local dest=".lattice/findings/open/${slug}.yml"
+  local now today
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  today="$(date -u +%Y-%m-%d)"
+  local sweep_id="${LATTICE_SWEEP_ID:-$(date -u +%Y%m%d)$(printf '%06x' "$$" | tail -c6)}"
+  # Escape body content for safe YAML quoting
+  local esc_fb="${fallback//\\/\\\\}"
+  esc_fb="${esc_fb//\"/\\\"}"
+  cat > "${dest}" <<YML
+id: ${slug}-id
+rule: env-fallback
+dimension: env-contract
+tier: ${tier}
+module: $(dirname "${file}")
+file: ${file}
+line: ${line}
+title: "env var ${key} silently falls back to ${short_fb_display}"
+fix: "make ${key} required at startup or use a validation lib (zod/joi/pydantic); fallback hides missing config until it bites in prod"
+env_key: "${key}"
+fallback_value: "${esc_fb}"
+verify_pattern: "process\\\\.env\\\\.${key}\\\\s*(\\\\|\\\\||\\\\?\\\\?)"
+verify_file: "${file}"
+sweep_date: ${today}
+sweep_id: ${sweep_id}
+auditor: lattice/audit-env-contract@0.9.9
+status: open
+exposure: code-time
+detected_at: ${now}
+YML
+  echo "[${PROG}] emitted: ${dest}" >&2
+}
+
+cmd_audit_env_contract() {
+  local target_path="."
+  local write=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --path)  target_path="$2"; shift 2 ;;
+      --write) write=1; shift ;;
+      -*)      die "audit-env-contract: unknown flag: $1" ;;
+      *)       die "audit-env-contract: extra arg: $1" ;;
+    esac
+  done
+  [ -d "${target_path}" ] || die "audit-env-contract: path not found: ${target_path}"
+
+  if [ "${write}" -ne 1 ]; then
+    printf '%-7s %-30s %-15s %s\n' "TIER" "ENV_KEY" "FALLBACK" "LOCATION"
+  fi
+
+  # Track key+tier counts so multiple callsites get suffix slugs without
+  # colliding on filename when --write is set.
+  declare -A seq_by_slug=()
+  local found=0
+
+  _process_match() {
+    local file="$1" line="$2" key="$3" fallback="$4"
+    [ -z "${key}" ] && return 0
+    [ -z "${fallback}" ] && return 0
+    local tier
+    tier="$(_env_plausibility_tier "${fallback}")"
+    local sk="${tier}-${key}"
+    local seq="${seq_by_slug[${sk}]:-0}"
+    _env_emit_finding "${tier}" "${key}" "${fallback}" "${file}" "${line}" "${write}" "${seq}"
+    seq_by_slug["${sk}"]=$((seq + 1))
+    found=$((found + 1))
+  }
+
+  # --- Pattern 1+2: process.env.X || 'lit' / process.env.X ?? 'lit' --------
+  while IFS=: read -r file line rest; do
+    [ -z "${file}" ] && continue
+    # rest could look like: `const x = process.env.FOO || 'bar';`
+    # Extract key (after process.env.) and fallback (after || or ??)
+    local key fallback
+    key="$(printf '%s' "${rest}" | sed -nE "s/.*process\\.env\\.([A-Z][A-Z0-9_]*).*/\\1/p")"
+    fallback="$(printf '%s' "${rest}" | sed -nE "s/.*process\\.env\\.[A-Z][A-Z0-9_]*[[:space:]]*(\\|\\||\\?\\?)[[:space:]]*((['\"][^'\"]*['\"])).*/\\2/p")"
+    [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
+  done < <(grep -REn "process\.env\.[A-Z][A-Z0-9_]*[[:space:]]*(\|\||\?\?)[[:space:]]*['\"]" \
+            --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' \
+            --include='*.mjs' --include='*.cjs' \
+            "${target_path}" 2>/dev/null)
+
+  # --- Pattern 3: const { X = 'lit' } = process.env -----------------------
+  # Anchor matches INSIDE `{...}` braces so we don't accidentally grab the
+  # `env` token from `process.env` as the key (greedy-regex foot-gun caught
+  # in v0.9.9 smoke-test on `const { API_TOKEN = 'TODO' } = process.env`).
+  while IFS=: read -r file line rest; do
+    [ -z "${file}" ] && continue
+    local key fallback inside
+    # Extract the contents of the {...} block first
+    inside="$(printf '%s' "${rest}" | sed -nE "s/.*\{([^}]*)\}[[:space:]]*=[[:space:]]*process\\.env.*/\\1/p")"
+    [ -z "${inside}" ] && continue
+    # Anchor at the start of `inside` (the {...} body) so leading greedy `.*`
+    # doesn't grab the trailing letters of an earlier word as the key.
+    # Caught on `const { API_TOKEN = 'TODO' } = process.env` where the loose
+    # regex was returning `EN` (last 2 chars of `process.env`).
+    key="$(printf '%s' "${inside}" | sed -nE "s/^[[:space:]]*([A-Z][A-Z0-9_]+)[[:space:]]*=[[:space:]]*['\"][^'\"]*['\"].*/\\1/p")"
+    fallback="$(printf '%s' "${inside}" | sed -nE "s/^[[:space:]]*[A-Z][A-Z0-9_]+[[:space:]]*=[[:space:]]*(['\"][^'\"]*['\"]).*/\\1/p")"
+    [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
+  done < <(grep -REn "\{[^}]*[A-Z][A-Z0-9_]+[[:space:]]*=[[:space:]]*['\"][^'\"]*['\"][^}]*\}[[:space:]]*=[[:space:]]*process\.env" \
+            --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' \
+            "${target_path}" 2>/dev/null)
+
+  # --- Pattern 5: os.environ.get('X', 'lit') ------------------------------
+  while IFS=: read -r file line rest; do
+    [ -z "${file}" ] && continue
+    local key fallback
+    key="$(printf '%s' "${rest}" | sed -nE "s/.*os\\.environ\\.get\\([[:space:]]*['\"]([A-Z][A-Z0-9_]*)['\"][[:space:]]*,[[:space:]]*['\"][^'\"]*['\"].*/\\1/p")"
+    fallback="$(printf '%s' "${rest}" | sed -nE "s/.*os\\.environ\\.get\\([[:space:]]*['\"][A-Z][A-Z0-9_]*['\"][[:space:]]*,[[:space:]]*(['\"][^'\"]*['\"]).*/\\1/p")"
+    [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
+  done < <(grep -REn "os\.environ\.get\([[:space:]]*['\"][A-Z][A-Z0-9_]*['\"][[:space:]]*,[[:space:]]*['\"]" \
+            --include='*.py' \
+            "${target_path}" 2>/dev/null)
+
+  # --- Pattern 6: String.fromEnvironment('X', defaultValue: 'lit') -------
+  while IFS=: read -r file line rest; do
+    [ -z "${file}" ] && continue
+    local key fallback
+    key="$(printf '%s' "${rest}" | sed -nE "s/.*String\\.fromEnvironment\\([[:space:]]*['\"]([A-Z][A-Z0-9_]*)['\"].*/\\1/p")"
+    fallback="$(printf '%s' "${rest}" | sed -nE "s/.*defaultValue:[[:space:]]*(['\"][^'\"]*['\"]).*/\\1/p")"
+    [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
+  done < <(grep -REn "String\.fromEnvironment\([[:space:]]*['\"][A-Z][A-Z0-9_]*['\"].*defaultValue" \
+            --include='*.dart' \
+            "${target_path}" 2>/dev/null)
+
+  # --- Contract-file cross-check (optional, only if docs/env.contract.md
+  #     exists). Emits DRIFT-env-not-in-contract findings for any env var
+  #     referenced in code but missing from the contract. Cheap, very-high
+  #     signal when the contract file exists. Skipped silently when absent.
+  if [ -f "${target_path}/docs/env.contract.md" ]; then
+    local contract_keys
+    contract_keys="$(grep -oE '\b[A-Z][A-Z0-9_]+\b' "${target_path}/docs/env.contract.md" 2>/dev/null | sort -u)"
+    local code_keys
+    code_keys="$(grep -REho '\bprocess\.env\.[A-Z][A-Z0-9_]+|os\.environ\.get\(['\''"][A-Z][A-Z0-9_]+|String\.fromEnvironment\(['\''"][A-Z][A-Z0-9_]+' \
+                 --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' --include='*.py' --include='*.dart' \
+                 "${target_path}" 2>/dev/null \
+                 | sed -E 's/.*[\.\(]['\''"]?([A-Z][A-Z0-9_]+).*/\1/' \
+                 | sort -u)"
+    if [ -n "${code_keys}" ]; then
+      local k
+      while IFS= read -r k; do
+        [ -z "${k}" ] && continue
+        if ! printf '%s\n' "${contract_keys}" | grep -qFx "${k}"; then
+          # Emit DRIFT finding
+          if [ "${write}" -eq 1 ]; then
+            ensure_project_dirs
+            mkdir -p .lattice/findings/open
+            local drift_slug="DRIFT-env-not-in-contract-${k}"
+            local drift_dest=".lattice/findings/open/${drift_slug}.yml"
+            local today; today="$(date -u +%Y-%m-%d)"
+            local sweep_id="${LATTICE_SWEEP_ID:-$(date -u +%Y%m%d)$(printf '%06x' "$$" | tail -c6)}"
+            cat > "${drift_dest}" <<YML
+id: ${drift_slug}-id
+rule: env-not-in-contract
+dimension: env-contract
+tier: DRIFT
+module: env
+file: docs/env.contract.md
+line: 1
+title: "env var ${k} referenced in code but missing from docs/env.contract.md"
+fix: "add ${k} to docs/env.contract.md with its source-of-truth + required/optional + default policy, OR remove the code reference"
+env_key: "${k}"
+sweep_date: ${today}
+sweep_id: ${sweep_id}
+auditor: lattice/audit-env-contract@0.9.9
+status: open
+exposure: contract-drift
+YML
+            echo "[${PROG}] emitted: ${drift_dest} (DRIFT — env-not-in-contract)" >&2
+          else
+            printf '%-7s %-30s %-15s %s\n' "DRIFT" "${k}" "[not-in-contract]" "docs/env.contract.md"
+          fi
+          found=$((found + 1))
+        fi
+      done <<< "${code_keys}"
+    fi
+  fi
+
+  if [ "${write}" -eq 1 ]; then
+    echo "[${PROG}] audit-env-contract: ${found} finding(s) written to .lattice/findings/open/"
+  else
+    [ "${found}" -eq 0 ] && echo "[${PROG}] audit-env-contract: 0 findings (no env-var fallback patterns matched)"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -3902,6 +4165,7 @@ case "${sub}" in
   report)             cmd_report "$@" ;;
   sessions)           cmd_sessions "$@" ;;
   review)             cmd_review "$@" ;;
+  audit-env-contract) cmd_audit_env_contract "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

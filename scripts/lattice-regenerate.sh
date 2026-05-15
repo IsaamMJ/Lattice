@@ -186,6 +186,9 @@ function parseYaml(text) {
 const VALID_DIMENSIONS = new Set([
   'audit', 'scale', 'security', 'flow', 'coverage',
   'configuration', 'quality', 'product',
+  // v0.9.9 (#31): env-contract dimension — env-var silent-fallback detection
+  // + optional contract-file cross-check. Default-on inside /audit-sweep.
+  'env-contract',
 ]);
 
 // v0.8.2 (#19): suggest the closest valid value when a schema enum is rejected.
