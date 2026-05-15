@@ -1296,6 +1296,99 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 101: review surfaces fullpath_workaround predicate (v0.9.7)"
+new_fixture t101
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"list","args":["list"],"exit":0,"duration_ms":50,"invoked_via":"fullpath","cwd":"/x"}
+{"ts":"2026-05-15T03:00:05Z","cmd":"list","args":["list"],"exit":0,"duration_ms":50,"invoked_via":"fullpath","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" 2>&1)"
+if echo "${out}" | grep -q 'fullpath_workaround' && echo "${out}" | grep -q '2x'; then
+  ok "review detected fullpath_workaround with correct count"
+else
+  fail "review did not surface fullpath_workaround: ${out}"
+fi
+
+note "Test 102: review surfaces repeated_failure predicate (v0.9.7)"
+new_fixture t102
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"close","args":["close","x"],"exit":1,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+{"ts":"2026-05-15T03:00:05Z","cmd":"close","args":["close","x"],"exit":1,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+{"ts":"2026-05-15T03:00:10Z","cmd":"close","args":["close","x"],"exit":1,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" 2>&1)"
+if echo "${out}" | grep -q 'repeated_failure' && echo "${out}" | grep -q 'close failed 3x'; then
+  ok "review detected repeated_failure (3x)"
+else
+  fail "review did not surface repeated_failure: ${out}"
+fi
+
+note "Test 103: review surfaces failed_then_succeeded predicate (v0.9.7)"
+new_fixture t103
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"verify","args":["verify","x"],"exit":1,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+{"ts":"2026-05-15T03:00:05Z","cmd":"verify","args":["verify","x"],"exit":0,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" 2>&1)"
+if echo "${out}" | grep -q 'failed_then_succeeded'; then
+  ok "review detected failed_then_succeeded silent workaround"
+else
+  fail "review did not surface failed_then_succeeded: ${out}"
+fi
+
+note "Test 104: review surfaces unknown_subcommand predicate (v0.9.7)"
+new_fixture t104
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"derve","args":["derve"],"exit":2,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" 2>&1)"
+if echo "${out}" | grep -q 'unknown_subcommand' && echo "${out}" | grep -q "'derve'"; then
+  ok "review detected unknown_subcommand 'derve'"
+else
+  fail "review did not surface unknown_subcommand: ${out}"
+fi
+
+note "Test 105: review --json emits one JSON object per candidate (v0.9.7)"
+new_fixture t105
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"list","args":["list"],"exit":0,"duration_ms":50,"invoked_via":"fullpath","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" --json 2>&1)"
+if echo "${out}" | grep -q '"kind":"fullpath_workaround"' \
+   && echo "${out}" | grep -q '"severity":"MED"' \
+   && echo "${out}" | grep -q '"evidence_count":1'; then
+  ok "review --json emits structured candidate"
+else
+  fail "review --json output malformed: ${out}"
+fi
+
+note "Test 106: review --quiet prints candidate count only (v0.9.7)"
+new_fixture t106
+mkdir -p .lattice/sessions
+day=$(date -u +%Y%m%d)
+cat > ".lattice/sessions/${day}.jsonl" <<JSONL
+{"ts":"2026-05-15T03:00:00Z","cmd":"list","args":["list"],"exit":0,"duration_ms":50,"invoked_via":"fullpath","cwd":"/x"}
+{"ts":"2026-05-15T03:00:05Z","cmd":"close","args":["close","x"],"exit":1,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+{"ts":"2026-05-15T03:00:10Z","cmd":"close","args":["close","x"],"exit":1,"duration_ms":50,"invoked_via":"path","cwd":"/x"}
+JSONL
+out="$("${LATTICE}" review --day "${day}" --quiet 2>&1)"
+# 2 candidates expected: fullpath_workaround + repeated_failure
+if [ "${out}" = "2" ]; then
+  ok "review --quiet reports candidate count (2)"
+else
+  fail "review --quiet wrong count: '${out}' (expected '2')"
+fi
+
 note "Test 95: MAT log records subcommand + exit code (v0.9.6)"
 new_fixture t95
 "${LATTICE}" list >/dev/null 2>&1

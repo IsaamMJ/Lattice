@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.6)
+# lattice — unified CLI dispatcher (v0.9.7)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -3477,6 +3477,246 @@ cmd_sessions() {
 }
 
 # ---------------------------------------------------------------------------
+# review — derive friction candidates from the MAT log (v0.9.7).
+#
+# Reads `.lattice/sessions/<day>.jsonl` (default today) and runs a set of
+# predicates over the events. Each match emits a candidate of the form:
+#   {kind, severity, title, body, evidence_count, sample_ts}
+#
+# Predicates (initial set, kept narrow + high-precision):
+#
+#   fullpath_workaround
+#     ANY event with invoked_via=fullpath. Means the session used
+#     `~/.claude/lattice/scripts/lattice` instead of the PATH-resolved
+#     `lattice`. Direct evidence the PATH shim is broken on this machine.
+#     Severity: MED (real recurring friction, partial v0.8.3 fix).
+#
+#   unknown_subcommand
+#     Any event where exit=2 AND cmd is not a known subcommand name. A
+#     discoverability / typo signal. Severity: LOW.
+#
+#   repeated_failure
+#     Same cmd exited non-zero >=2 times within the session day. Likely
+#     a real reproducible bug the session worked around. Severity: MED.
+#
+#   failed_then_succeeded
+#     Same cmd transitioned exit!=0 -> exit=0 within the session. The
+#     initial failure is a bug candidate even though the second try worked
+#     (a session "got past it" without filing). Severity: LOW.
+#
+#   slow_command
+#     Any event with duration_ms > 30000. Foreground stall, scanning issue,
+#     or stuck loop. Severity: LOW.
+#
+# Output modes:
+#   lattice review                  # pretty table + summary (default = today)
+#   lattice review --day YYYYMMDD   # specific day
+#   lattice review --json           # one JSON object per line per candidate
+#   lattice review --quiet          # only emit the candidate count (CI gate)
+#
+# v0.9.8 will add `--file [--yes]` to feed each candidate into
+# `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
+# ---------------------------------------------------------------------------
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review version help"
+
+_review_known_cmd() {
+  local needle="$1" w
+  for w in ${_KNOWN_SUBS}; do
+    [ "${w}" = "${needle}" ] && return 0
+  done
+  return 1
+}
+
+cmd_review() {
+  local day="" mode="pretty"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --day)   day="$2"; shift 2 ;;
+      --json)  mode="json"; shift ;;
+      --quiet) mode="quiet"; shift ;;
+      -*)      die "review: unknown flag: $1" ;;
+      *)       die "review: extra arg: $1" ;;
+    esac
+  done
+  [ -z "${day}" ] && day="$(date -u +%Y%m%d)"
+  local log=".lattice/sessions/${day}.jsonl"
+  if [ ! -f "${log}" ]; then
+    [ "${mode}" = "quiet" ] && { echo "0"; return 0; }
+    [ "${mode}" = "json" ] && return 0
+    echo "[${PROG}] review: no session log for ${day} (${log})"
+    return 0
+  fi
+
+  # Pass 1: collect per-line tuples into parallel arrays. JSON parsing here is
+  # whitelisted-shape sed (the writer at _write_mat_entry is the only producer).
+  local -a EVT_TS=() EVT_CMD=() EVT_EXIT=() EVT_DUR=() EVT_VIA=()
+  local line
+  while IFS= read -r line; do
+    [ -z "${line}" ] && continue
+    EVT_TS+=(   "$(printf '%s' "${line}" | sed -E 's/.*"ts":"([^"]*)".*/\1/')")
+    EVT_CMD+=(  "$(printf '%s' "${line}" | sed -E 's/.*"cmd":"([^"]*)".*/\1/')")
+    EVT_EXIT+=( "$(printf '%s' "${line}" | sed -E 's/.*"exit":([0-9-]+).*/\1/')")
+    EVT_DUR+=(  "$(printf '%s' "${line}" | sed -E 's/.*"duration_ms":([0-9]+).*/\1/')")
+    EVT_VIA+=(  "$(printf '%s' "${line}" | sed -E 's/.*"invoked_via":"([^"]*)".*/\1/')")
+  done < "${log}"
+
+  local n=${#EVT_TS[@]}
+
+  # Pass 2: run predicates. Each predicate writes 0..1 candidates to a flat
+  # array (kind|severity|title|count|sample_ts) joined by tab so we can emit
+  # in either pretty or JSON form without re-running.
+  local -a CANDIDATES=()
+  # Helper: append a tab-joined candidate row. Implemented inline (not a
+  # nested function — bash does not accept `local emit()` as a definition,
+  # and a script-scope helper would leak globally for one-line use).
+  _emit_candidate() {
+    CANDIDATES+=("$1"$'\t'"$2"$'\t'"$3"$'\t'"$4"$'\t'"$5"$'\t'"$6")
+  }
+
+  # --- predicate: fullpath_workaround
+  local fp_count=0 fp_sample=""
+  local i
+  for ((i=0; i<n; i++)); do
+    if [ "${EVT_VIA[$i]}" = "fullpath" ]; then
+      fp_count=$((fp_count + 1))
+      [ -z "${fp_sample}" ] && fp_sample="${EVT_TS[$i]}"
+    fi
+  done
+  if [ "${fp_count}" -gt 0 ]; then
+    _emit_candidate "fullpath_workaround" "MED" \
+      "lattice CLI invoked via full path ${fp_count}x — PATH shim not resolved" \
+      "v0.8.3 ships an install-time shim into ~/.local/bin and a PATH guard in shell rc. On ${fp_count} invocation(s) today the dispatcher was reached via its full path instead, which means the shim never made it onto PATH for this shell. Re-run install.sh or inspect 'lattice doctor' output." \
+      "${fp_count}" "${fp_sample}"
+  fi
+
+  # --- predicate: unknown_subcommand
+  local unk_count=0 unk_sample="" unk_cmd=""
+  for ((i=0; i<n; i++)); do
+    if [ "${EVT_EXIT[$i]}" = "2" ] && ! _review_known_cmd "${EVT_CMD[$i]}"; then
+      unk_count=$((unk_count + 1))
+      [ -z "${unk_sample}" ] && unk_sample="${EVT_TS[$i]}"
+      [ -z "${unk_cmd}" ] && unk_cmd="${EVT_CMD[$i]}"
+    fi
+  done
+  if [ "${unk_count}" -gt 0 ]; then
+    _emit_candidate "unknown_subcommand" "LOW" \
+      "session tried unknown subcommand(s) ${unk_count}x — first: '${unk_cmd}'" \
+      "Sessions invoked subcommand names that don't exist in this version's dispatcher. Either a discoverability gap (the right command exists under a different name) or stale memory of removed/renamed commands. Worth comparing to 'lattice help' output and considering aliases or did-you-mean hints." \
+      "${unk_count}" "${unk_sample}"
+  fi
+
+  # --- predicate: repeated_failure (same cmd, exit!=0, >=2 occurrences)
+  local -A fail_by_cmd=()
+  local -A fail_sample=()
+  for ((i=0; i<n; i++)); do
+    if [ "${EVT_EXIT[$i]}" != "0" ]; then
+      local c="${EVT_CMD[$i]}"
+      fail_by_cmd["${c}"]=$(( ${fail_by_cmd["${c}"]:-0} + 1 ))
+      [ -z "${fail_sample["${c}"]:-}" ] && fail_sample["${c}"]="${EVT_TS[$i]}"
+    fi
+  done
+  for c in "${!fail_by_cmd[@]}"; do
+    if [ "${fail_by_cmd[${c}]}" -ge 2 ]; then
+      _emit_candidate "repeated_failure" "MED" \
+        "lattice ${c} failed ${fail_by_cmd[${c}]}x in one day — reproducible bug candidate" \
+        "Same subcommand exited non-zero multiple times in the same day. Either a real bug the session worked around (filed candidate) or a misuse pattern (still useful as a UX signal — surface the actual error in usage)." \
+        "${fail_by_cmd[${c}]}" "${fail_sample[${c}]}"
+    fi
+  done
+
+  # --- predicate: failed_then_succeeded (same cmd transitions fail -> ok)
+  local -A last_fail_ts=()
+  local -A ftss_count=()
+  local -A ftss_sample=()
+  for ((i=0; i<n; i++)); do
+    local c="${EVT_CMD[$i]}"
+    if [ "${EVT_EXIT[$i]}" != "0" ]; then
+      last_fail_ts["${c}"]="${EVT_TS[$i]}"
+    else
+      if [ -n "${last_fail_ts["${c}"]:-}" ]; then
+        ftss_count["${c}"]=$(( ${ftss_count["${c}"]:-0} + 1 ))
+        [ -z "${ftss_sample["${c}"]:-}" ] && ftss_sample["${c}"]="${last_fail_ts["${c}"]}"
+        unset 'last_fail_ts['"${c}"']'
+      fi
+    fi
+  done
+  for c in "${!ftss_count[@]}"; do
+    _emit_candidate "failed_then_succeeded" "LOW" \
+      "lattice ${c} failed then succeeded ${ftss_count[${c}]}x — silent workaround" \
+      "Session retried the same subcommand and got past the failure. The original failure is a bug candidate even though the workaround unblocked the session — exactly the silent-correctness class the manual report channel was built for." \
+      "${ftss_count[${c}]}" "${ftss_sample[${c}]}"
+  done
+
+  # --- predicate: slow_command (duration_ms > 30000)
+  local slow_count=0 slow_sample="" slow_cmd=""
+  for ((i=0; i<n; i++)); do
+    if [ "${EVT_DUR[$i]:-0}" -gt 30000 ] 2>/dev/null; then
+      slow_count=$((slow_count + 1))
+      [ -z "${slow_sample}" ] && slow_sample="${EVT_TS[$i]}"
+      [ -z "${slow_cmd}" ] && slow_cmd="${EVT_CMD[$i]}"
+    fi
+  done
+  if [ "${slow_count}" -gt 0 ]; then
+    _emit_candidate "slow_command" "LOW" \
+      "lattice ${slow_cmd} took >30s ${slow_count}x — perf or stuck-loop candidate" \
+      "Duration above 30s on a Lattice CLI invocation. Most subcommands should be sub-second; durations this long usually indicate filesystem scan blow-up, regex backtracking, or a stuck loop. Worth profiling." \
+      "${slow_count}" "${slow_sample}"
+  fi
+
+  # --- Output --------------------------------------------------------------
+  local ncand=${#CANDIDATES[@]}
+
+  if [ "${mode}" = "quiet" ]; then
+    echo "${ncand}"
+    return 0
+  fi
+
+  if [ "${mode}" = "json" ]; then
+    local entry
+    for entry in "${CANDIDATES[@]}"; do
+      local kind sev title body cnt ts
+      kind="${entry%%	*}";       entry="${entry#*	}"
+      sev="${entry%%	*}";        entry="${entry#*	}"
+      title="${entry%%	*}";      entry="${entry#*	}"
+      body="${entry%%	*}";       entry="${entry#*	}"
+      cnt="${entry%%	*}";        entry="${entry#*	}"
+      ts="${entry}"
+      # Inline escape — same rules as the MAT writer in _write_mat_entry.
+      local _k="${kind//\\/\\\\}"; _k="${_k//\"/\\\"}"; _k="${_k//$'\n'/\\n}"
+      local _s="${sev//\\/\\\\}";  _s="${_s//\"/\\\"}";  _s="${_s//$'\n'/\\n}"
+      local _t="${title//\\/\\\\}"; _t="${_t//\"/\\\"}"; _t="${_t//$'\n'/\\n}"
+      local _b="${body//\\/\\\\}";  _b="${_b//\"/\\\"}";  _b="${_b//$'\n'/\\n}"
+      local _ts="${ts//\\/\\\\}";   _ts="${_ts//\"/\\\"}"; _ts="${_ts//$'\n'/\\n}"
+      printf '{"kind":"%s","severity":"%s","title":"%s","body":"%s","evidence_count":%s,"sample_ts":"%s"}\n' \
+        "${_k}" "${_s}" "${_t}" "${_b}" "${cnt}" "${_ts}"
+    done
+    return 0
+  fi
+
+  # pretty mode
+  if [ "${ncand}" -eq 0 ]; then
+    echo "[${PROG}] review (${day}): ${n} event(s), 0 friction candidates"
+    return 0
+  fi
+  echo "[${PROG}] review (${day}): ${n} event(s), ${ncand} friction candidate(s)"
+  echo ""
+  local idx=0 entry
+  for entry in "${CANDIDATES[@]}"; do
+    idx=$((idx + 1))
+    local kind sev title cnt
+    kind="${entry%%	*}";  entry="${entry#*	}"
+    sev="${entry%%	*}";   entry="${entry#*	}"
+    title="${entry%%	*}"; entry="${entry#*	}"
+    entry="${entry#*	}"  # body — skipped in pretty
+    cnt="${entry%%	*}"
+    printf '  %d) [%s] %-6s (%sx) %s\n' "${idx}" "${kind}" "${sev}" "${cnt}" "${title}"
+  done
+  echo ""
+  echo "  next: lattice review --json | jq    # structured form for tooling"
+  echo "        (v0.9.8 will add --file to auto-create issues from candidates)"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -3552,6 +3792,7 @@ case "${sub}" in
   context)            cmd_context "$@" ;;
   report)             cmd_report "$@" ;;
   sessions)           cmd_sessions "$@" ;;
+  review)             cmd_review "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

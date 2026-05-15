@@ -2,6 +2,27 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] — 2026-05-15
+
+**Friction predicates + `lattice review` — second half of the observer-pattern fix.** v0.9.6 put the passive MAT log layer in place. v0.9.7 reads it: five high-precision predicates derive friction candidates automatically. Claude (or any session) runs `lattice review` and gets a structured list of probable bugs/UX gaps the session encountered but didn't notice as filable.
+
+### Added
+- **`lattice review [--day YYYYMMDD] [--json | --quiet]`** — runs predicates over the MAT log, prints/emits candidate list.
+- **Predicates** (initial set, kept narrow + high-precision so noise stays near zero):
+  - `fullpath_workaround` — any `invoked_via: fullpath` event. Direct PATH-shim regression signal.
+  - `unknown_subcommand` — `exit=2` with a cmd name not in the dispatcher's whitelist. Discoverability / typo / removed-command signal.
+  - `repeated_failure` — same cmd exits non-zero ≥2 times in the same day. Reproducible bug candidate.
+  - `failed_then_succeeded` — same cmd transitions exit≠0 → exit=0. Silent workaround signal (the class the manual report channel was built for).
+  - `slow_command` — `duration_ms > 30000`. Perf or stuck-loop candidate.
+- **Output modes:** pretty (default), `--json` (one object per candidate, jq-pipeable), `--quiet` (candidate count only — CI-gate-friendly).
+- All predicates run locally — no network, no telemetry POST. Friction detection stays in the dev's machine until v0.9.8 adds opt-in auto-filing.
+
+### Tests
+- 105 → 111 lifecycle tests. New: fullpath_workaround (#101), repeated_failure (#102), failed_then_succeeded (#103), unknown_subcommand (#104), `--json` output shape (#105), `--quiet` count mode (#106).
+
+### What's next
+- v0.9.8: `lattice review --file [--yes]` — pipes candidates into `lattice report`, with idempotent dedup via `.lattice/sessions/.filed.jsonl` so re-running never double-files. After v0.9.8, the answer to "why does Claude only file when prompted" becomes structurally moot: the session log surfaces candidates → one keystroke files them → memory of "did I file?" becomes irrelevant.
+
 ## [0.9.6] — 2026-05-15
 
 **MAT (Message-Action Trace) log layer — foundation for the observer-pattern fix.** The v0.9.3 manual report channel made filing easy but kept the cognitive load on Claude: notice → judge → act. Three voluntary actions stacked → near-zero reliability across sessions (proven empirically — the riseCraft session only filed when explicitly prompted). v0.9.6 flips the model: Lattice records every command it mediates, so v0.9.7 can derive friction candidates from the log and surface them via `lattice review` — Claude's role becomes *confirm or dismiss*, not *initiate*.
