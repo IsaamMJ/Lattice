@@ -63,7 +63,7 @@ echo ""
 echo "[lattice] restart Claude Code to load commands, then try:"
 echo "[lattice]   /audit-sweep ."
 echo ""
-echo "[lattice] CLI dispatcher (v0.9.3) installed at:"
+echo "[lattice] CLI dispatcher (v0.9.4) installed at:"
 echo "[lattice]   ${SCRIPT_DEST}/lattice"
 echo ""
 

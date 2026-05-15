@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.3)
+# lattice — unified CLI dispatcher (v0.9.4)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -445,7 +445,11 @@ _send_telemetry() {
 
 _on_telemetry_exit() {
   local code=$?
-  if [ ${code} -ne 0 ] && [ -n "${sub:-}" ]; then
+  # Exit 141 = SIGPIPE (128 + 13). Happens when the user pipes lattice output
+  # into a consumer that closes early (e.g. `lattice list | head`). That is a
+  # benign UX pattern, not a bug — skip telemetry so we don't flood the tracker.
+  # Same for 130 (SIGINT — user Ctrl-C) and 143 (SIGTERM).
+  if [ ${code} -ne 0 ] && [ ${code} -ne 141 ] && [ ${code} -ne 130 ] && [ ${code} -ne 143 ] && [ -n "${sub:-}" ]; then
     # Debug mode keeps stderr so the payload is visible; otherwise silent.
     if [ "${LATTICE_TELEMETRY_DEBUG:-0}" = "1" ]; then
       _send_telemetry "${code}" "${sub}" || true
@@ -2750,14 +2754,31 @@ _invariants_derive() {
               | sort -u | head -100)
   fi
 
-  # 3. Frontend HTTP calls (Flutter)
+  # 3. Frontend HTTP calls (Flutter) — emit `method` + `call_site: file:line`.
+  # v0.9.4 (#22): rewrote parser. The v0.9.1-v0.9.3 version used `grep -RhEn` (with
+  # `-h` suppressing the filename) and a sed that tried to strip `file:line` that
+  # was never there, leaving `method:` holding the line number and `target:` holding
+  # the entire source line with leading whitespace. New parser uses `grep -REn`
+  # (filename + line), extracts via awk into stable `<verb>\t<file>:<line>` tuples,
+  # and emits a properly structured YAML entry. Two calls on the same line number
+  # across different files no longer collide.
   local fe_calls=()
   if [ "${has_flutter}" = "1" ] && [ -d lib ]; then
     while IFS= read -r line; do
       [ -n "${line}" ] && fe_calls+=("${line}")
-    done < <(grep -RhEn "(dio|http|api)\.(get|post|put|delete|patch)\(" \
+    done < <(grep -REn "(_?dio|http|api)\.(get|post|put|delete|patch)\(" \
               --include='*.dart' lib/ 2>/dev/null \
-              | sed -E 's/^[^:]+:[0-9]+:[[:space:]]*//; s/.*\.(get|post|put|delete|patch)\(([^,)]+).*/\1 \2/' \
+              | awk -F: '
+                  {
+                    file=$1; lineno=$2;
+                    # Re-join the rest in case the source line itself contained colons.
+                    rest=$0; sub("^[^:]*:[^:]*:", "", rest);
+                    if (match(rest, /\.(get|post|put|delete|patch)\(/)) {
+                      verb=substr(rest, RSTART+1, RLENGTH-2);
+                      printf("%s\t%s:%s\n", verb, file, lineno);
+                    }
+                  }
+                ' \
               | sort -u | head -100)
   fi
 
@@ -2815,9 +2836,11 @@ _invariants_derive() {
       printf '\n# Frontend HTTP calls (heuristic from dio/http/api .verb())\n'
       printf 'frontend_calls:\n'
       for c in "${fe_calls[@]}"; do
-        local v p
-        v="${c%% *}"; p="${c#* }"
-        printf '  - method: %s\n    target: %s\n' "${v}" "${p}"
+        # Tuple format (v0.9.4): "<VERB>\t<file>:<line>"
+        local v site
+        v="${c%%	*}"
+        site="${c#*	}"
+        printf '  - method: %s\n    call_site: %s\n' "${v^^}" "${site}"
       done
     fi
 
@@ -2918,15 +2941,31 @@ cmd_context() {
   fi
 
   # Invariants summary (substrate mode)
+  # v0.9.4 (#24): rewrote renderer. Previous version emitted bare labels
+  # (`stack:`, `modules:`, `edge_functions:`) with empty values because the
+  # data is on the lines BELOW each label (YAML list items), not inline.
+  # New renderer counts/collapses each section explicitly so every line
+  # carries information.
   if [ "${mode}" = "substrate" ]; then
     if [ -f .lattice/invariants/HEAD.yml ]; then
       echo "## Invariants (.lattice/invariants/HEAD.yml)"
-      grep -E '^(commit|stack|modules|edge_functions|routes|db_tables):' .lattice/invariants/HEAD.yml \
-        | head -20 | sed 's/^/  /'
-      local mod_count fn_count route_count tbl_count
-      mod_count="$(grep -cE '^  - path:' .lattice/invariants/HEAD.yml 2>/dev/null || echo 0)"
-      fn_count="$(awk '/^edge_functions:/{f=1;next} /^[a-z]/{f=0} f && /^  -/{c++} END{print c+0}' .lattice/invariants/HEAD.yml 2>/dev/null)"
-      printf '  totals: modules=%s edge_fns=%s\n' "${mod_count}" "${fn_count}"
+      local inv=.lattice/invariants/HEAD.yml
+      local inv_commit stack_list mod_count fn_count route_count tbl_count fe_count
+      inv_commit="$(grep -E '^commit:' "${inv}" | awk '{print $2}')"
+      # stack: list under `stack:` block (`  - flutter`, `  - supabase` …)
+      stack_list="$(awk '/^stack:/{f=1;next} /^[a-z]/{f=0} f && /^  - /{sub(/^  - /,""); print}' "${inv}" 2>/dev/null | paste -sd, - | sed 's/,/, /g')"
+      mod_count="$(grep -cE '^  - path:' "${inv}" 2>/dev/null || echo 0)"
+      fn_count="$(awk '/^edge_functions:/{f=1;next} /^[a-z]/{f=0} f && /^  -/{c++} END{print c+0}' "${inv}" 2>/dev/null)"
+      route_count="$(awk '/^routes:/{f=1;next} /^[a-z]/{f=0} f && /^  - /{c++} END{print c+0}' "${inv}" 2>/dev/null)"
+      fe_count="$(awk '/^frontend_calls:/{f=1;next} /^[a-z]/{f=0} f && /^  - /{c++} END{print c+0}' "${inv}" 2>/dev/null)"
+      tbl_count="$(awk '/^db_tables:/{f=1;next} /^[a-z]/{f=0} f && /^  - /{c++} END{print c+0}' "${inv}" 2>/dev/null)"
+      [ -n "${inv_commit}" ] && printf '  commit: %s\n' "${inv_commit}"
+      [ -n "${stack_list}" ] && printf '  stack: %s\n' "${stack_list}"
+      [ "${mod_count}" -gt 0 ]  && printf '  modules: %s\n' "${mod_count}"
+      [ "${fn_count}" -gt 0 ]   && printf '  edge_functions: %s\n' "${fn_count}"
+      [ "${route_count}" -gt 0 ] && printf '  routes: %s\n' "${route_count}"
+      [ "${fe_count}" -gt 0 ]   && printf '  frontend_calls: %s\n' "${fe_count}"
+      [ "${tbl_count}" -gt 0 ]  && printf '  db_tables: %s\n' "${tbl_count}"
     else
       echo "## Invariants"
       echo "  (none — run: lattice invariants derive)"

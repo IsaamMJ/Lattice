@@ -2,6 +2,21 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] — 2026-05-14
+
+**Bugfix slice — clears the three real bugs surfaced via v0.9.3 `lattice report` channel.** The riseCraft session filed 6 observations the same day v0.9.3 shipped (#22 #23 #24 #25 #26 #27); three are bugs, three are enhancements. This release ships fixes for the bugs (and the SIGPIPE auto-telemetry noise #21). Enhancements deferred to v0.9.5+.
+
+### Fixed
+- **#22 — `lattice invariants derive`: frontend_calls parser emitted malformed entries.** Previous parser used `grep -RhEn` (the `-h` flag strips filenames) and a `sed` that tried to remove a `file:line:` prefix that was never there. Result: `method:` held the line number (`101:`), `target:` held the entire indented source line, no `file:` field anywhere. Two unrelated calls on the same line number across different files would collide. Rewrote with `grep -REn` + an `awk` pipeline that extracts `(file, line, verb)` tuples. New emission: `{method: PUT, call_site: lib/.../auth_remote_source.dart:101}`. Matches the structural shape Lattice already uses for Node routes (`method` + `path`). Also widened the matcher to include `_dio.X(` (leading-underscore field convention common in Dart). This bug made `lattice invariants diff` structurally unsound for its stated purpose — false drifts on every line shift in any file. Now fixed.
+- **#24 — `lattice context`: empty-section rendering even when invariants HEAD existed.** The renderer was `grep -E '^(commit|stack|modules|edge_functions|routes|db_tables):' HEAD.yml | head -20 | sed 's/^/  /'`. In Lattice's YAML those labels sit on their own lines with the data as list items below (`stack:\n  - flutter\n  - supabase`), so grep matched the label only and rendered it bare. Replaced with an explicit per-section count/collapse renderer: `stack: flutter, supabase`, `modules: 37`, `edge_functions: 5`, etc. Bare labels are now impossible — if a section is empty it's omitted entirely.
+- **#21 — `lattice close` (and any subcommand) auto-telemetry on exit 141 (SIGPIPE).** The EXIT trap fired telemetry on every non-zero exit, including 141 which happens whenever the user pipes lattice output into a consumer that closes early (`lattice list | head`, `lattice context | grep -m1 …`, etc.). That's a benign UX pattern, not a bug — but it was filling the tracker with auto-reported "exit 141" noise. Now telemetry skips on 141 (SIGPIPE), 130 (SIGINT — user Ctrl-C), and 143 (SIGTERM). Real failures still telemetered normally.
+
+### Tests
+- 90 → 94 lifecycle tests. New: frontend_calls emits method + call_site (#86), no line-number-shaped method values (#87), context renders inline values not bare labels (#88), telemetry skipped on SIGPIPE 141 (#89).
+
+### Why this matters
+The v0.9.3 manual report channel was supposed to prove that silent-correctness bugs (exit 0 + wrong output) get caught. It did — the riseCraft session filed all six within 24h. v0.9.4 closes the loop: from "bug observed" to "bug fixed and verified" inside the same day, with the regression tests already in place. The compounding feedback loop (Lattice catches bugs in itself via the same channel its users use to report bugs in their projects) is now demonstrably real.
+
 ## [0.9.3] — 2026-05-14
 
 **Closes the silent-correctness blind spot.** Auto-telemetry only catches FAILED commands (non-zero exits). The riseCraft session of 2026-05-14 noted 7 real bugs/observations — 6 of which were silent (exit 0 with wrong output, UX gaps, doc issues) and entirely invisible to the telemetry pipe. v0.9.3 adds a manual channel that ships those through the same Worker.

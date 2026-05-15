@@ -1225,6 +1225,90 @@ fi
 # Cleanup: remove global config so it does not bleed into later test runs
 rm -f "${HOME}/.claude/lattice/config.yml"
 
+# ---------------------------------------------------------------------------
+# v0.9.4 regression tests (#21 SIGPIPE, #22 frontend_calls parser, #24 context render)
+# ---------------------------------------------------------------------------
+
+note "Test 86: invariants derive emits proper method + call_site for frontend_calls (v0.9.4, #22)"
+new_fixture t86
+# Make it look like a Flutter app so the frontend_calls branch fires
+cat > pubspec.yaml <<'YML'
+name: t86
+dependencies:
+  flutter:
+    sdk: flutter
+YML
+mkdir -p lib/x
+cat > lib/x/a.dart <<'DART'
+class A {
+  doIt() async {
+    final r = await dio.put(
+      '/v1/a',
+    );
+    final s = await _dio.get('/v1/b');
+    final t = await http.patch('/v1/c');
+  }
+}
+DART
+git add -A >/dev/null 2>&1
+git -c user.email=t@t -c user.name=t commit -q -m t86 >/dev/null 2>&1
+out="$("${LATTICE}" invariants derive --print 2>&1)"
+# method must be a verb (uppercase, alpha-only); call_site must be file:line
+if echo "${out}" | grep -qE 'method: (PUT|GET|PATCH)$' \
+   && echo "${out}" | grep -qE 'call_site: lib/x/a\.dart:[0-9]+'; then
+  ok "frontend_calls emits method + call_site properly"
+else
+  fail "frontend_calls parser regressed: $(echo "${out}" | sed -n '/frontend_calls/,$p')"
+fi
+
+note "Test 87: invariants frontend_calls never emits a line-number-shaped method (v0.9.4, #22)"
+# Re-use t86 fixture state — still in lib/x/a.dart
+out="$("${LATTICE}" invariants derive --print 2>&1)"
+if echo "${out}" | grep -qE 'method: [0-9]+:'; then
+  fail "frontend_calls method still holds line-number garbage: $(echo "${out}" | grep method:)"
+else
+  ok "no frontend_calls entry has a line-number-shaped method"
+fi
+
+note "Test 88: context renders inline values for invariants sections (v0.9.4, #24)"
+new_fixture t88
+cat > pubspec.yaml <<'YML'
+name: t88
+dependencies:
+  flutter:
+    sdk: flutter
+YML
+mkdir -p lib/m1 lib/m2
+echo 'class A {}' > lib/m1/a.dart
+echo 'class B {}' > lib/m2/b.dart
+git add -A >/dev/null 2>&1
+git -c user.email=t@t -c user.name=t commit -q -m t88 >/dev/null 2>&1
+"${LATTICE}" mode substrate >/dev/null 2>&1
+"${LATTICE}" invariants derive >/dev/null 2>&1
+out="$("${LATTICE}" context 2>&1)"
+# Must NOT have bare label lines (label followed by end-of-line / whitespace-only).
+# Must have inline counts like `modules: 2`.
+if echo "${out}" | grep -qE '^  (stack|modules|edge_functions|routes|db_tables):[[:space:]]*$'; then
+  fail "context still emits bare-label lines: $(echo "${out}" | grep -E '^  (stack|modules):')"
+elif echo "${out}" | grep -qE '^  modules: [0-9]+$' && echo "${out}" | grep -qE '^  stack: '; then
+  ok "context renders inline values (no empty labels)"
+else
+  fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
+fi
+
+note "Test 89: telemetry skipped on SIGPIPE exit 141 (v0.9.4, #21)"
+new_fixture t89
+# Force a SIGPIPE on the lattice pipeline by closing the consumer mid-read.
+# With set -o pipefail this should propagate exit 141 inside lattice. The
+# telemetry trap must NOT send (v0.9.4 fix).
+out="$(unset LATTICE_TELEMETRY; LATTICE_OWNER_MODE=1 LATTICE_TELEMETRY_DEBUG=1 bash -c "set -o pipefail; \"${LATTICE}\" help 2>&1 | head -c 1 >/dev/null" 2>&1 || true)"
+# Even on exit 141, the debug-mode "payload (would send)" string must NOT appear.
+if echo "${out}" | grep -q "payload (would send)"; then
+  fail "telemetry fired on SIGPIPE 141: ${out}"
+else
+  ok "SIGPIPE exit 141 does not trigger telemetry"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"
