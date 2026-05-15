@@ -1296,6 +1296,63 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 130: statusline parses Claude Code stdin and emits all native fields (v0.9.12)"
+new_fixture t130
+write_yaml .lattice/findings/open/CRITICAL-sl.yml sl CRITICAL security
+write_yaml .lattice/findings/open/HIGH-sl2.yml sl2 HIGH audit
+input='{"model":{"display_name":"Sonnet 4.6"},"context_window":{"used_percentage":42.3},"rate_limits":{"five_hour":{"used_percentage":38},"seven_day":{"used_percentage":67}}}'
+out="$(printf '%s' "${input}" | LATTICE_STATUSLINE_NOCOLOR=1 "${LATTICE}" statusline 2>&1)"
+# Use bash glob match instead of grep so multi-byte emoji handling on
+# Git Bash doesn't cause spurious failures. The output IS the truth — we
+# only need to confirm each expected substring is present.
+if [[ "${out}" == *"Sonnet 4.6"* ]] \
+   && [[ "${out}" == *"ctx 42%"* ]] \
+   && [[ "${out}" == *"5h 38%"* ]] \
+   && [[ "${out}" == *"wk 67%"* ]] \
+   && [[ "${out}" == *"1"*"1"* ]]; then
+  # The "1" * "1" pattern just confirms both finding counts are present
+  # near the end of the line. The emoji bytes themselves vary across locales
+  # so we don't pin them.
+  ok "statusline rendered all Claude Code stdin fields + Lattice findings"
+else
+  fail "statusline output missing expected segments: ${out}"
+fi
+
+note "Test 131: statusline degrades gracefully when stdin is empty (v0.9.12)"
+new_fixture t131
+write_yaml .lattice/findings/open/HIGH-sl3.yml sl3 HIGH security
+out="$(LATTICE_STATUSLINE_NOCOLOR=1 "${LATTICE}" statusline </dev/null 2>&1)"
+# Bash glob match to avoid UTF-8 emoji issues. Must contain the "1" count
+# (from the single HIGH finding) but must NOT contain "ctx " (no stdin → no
+# Claude Code fields).
+if [[ "${out}" == *"1"* ]] && [[ "${out}" != *"ctx "* ]]; then
+  ok "statusline gracefully degraded without stdin (no Claude Code fields, Lattice still visible)"
+else
+  fail "statusline degraded incorrectly: ${out}"
+fi
+
+note "Test 132: statusline LATTICE_STATUSLINE_NOCOLOR=1 strips ANSI codes (v0.9.12)"
+new_fixture t132
+write_yaml .lattice/findings/open/HIGH-sl4.yml sl4 HIGH security
+out="$(LATTICE_STATUSLINE_NOCOLOR=1 "${LATTICE}" statusline </dev/null 2>&1)"
+# Must NOT contain ESC byte (\033 / \x1b) when nocolor=1
+if echo "${out}" | grep -q $'\033'; then
+  fail "statusline emitted ANSI codes despite NOCOLOR=1: ${out}"
+else
+  ok "statusline NOCOLOR=1 emits plain text"
+fi
+
+note "Test 133: statusline default emits neon-yellow ANSI escapes (v0.9.12)"
+new_fixture t133
+write_yaml .lattice/findings/open/HIGH-sl5.yml sl5 HIGH security
+out="$("${LATTICE}" statusline </dev/null 2>&1)"
+# Must contain the ESC[38;5;226m sequence (neon yellow) AND the reset ESC[0m
+if echo "${out}" | grep -qE $'\033\\[38;5;226m' && echo "${out}" | grep -qE $'\033\\[0m'; then
+  ok "statusline default emits neon-yellow ANSI codes (38;5;226 + reset)"
+else
+  fail "expected ANSI codes missing: ${out}"
+fi
+
 note "Test 123: project-init creates CLAUDE.md with Lattice project block (v0.9.11)"
 new_fixture t123
 write_yaml .lattice/findings/open/HIGH-pi.yml pi HIGH security

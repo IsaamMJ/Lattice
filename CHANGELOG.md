@@ -2,6 +2,35 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] — 2026-05-15
+
+**Statusline.** Claude Code passes session state (model, context %, 5h + 7-day rate limits, cwd) to a configured statusLine script via stdin JSON natively — no reverse engineering required. v0.9.12 adds `lattice statusline` that consumes this stdin AND merges Lattice-specific state (findings counts, friction count, mode, git branch) into a single colored one-liner.
+
+### Added
+- **`lattice statusline`** subcommand. Designed to be wired into `~/.claude/settings.json` as a `statusLine` command. Reads Claude Code's stdin JSON, parses `model.display_name`, `context_window.used_percentage`, `rate_limits.five_hour.used_percentage`, `rate_limits.seven_day.used_percentage`, `cwd` — no jq dependency, simple sed extraction of the fixed-shape fields.
+- **Lattice segments merged in:**
+  - Open findings count for CRITICAL (🔴) + HIGH (⚠️) tiers
+  - Friction count from `cmd_review --quiet` (omitted when 0)
+  - Mode badge (only when `substrate` or `hybrid`)
+  - Git branch (best-effort)
+- **Neon yellow rendering** by default (xterm-256 color 226 — pure yellow). Opt-out via `LATTICE_STATUSLINE_NOCOLOR=1`.
+- **Graceful degradation:** missing stdin, no `.lattice/`, no git — all silent-skip. Emits at least the literal string `lattice` so the user knows the script is wired (not silently broken).
+
+Example output:
+
+\`\`\`
+Sonnet 4.6 · ctx 42% · 5h 38% · wk 67% · main · 🔴2 ⚠️5 · 1 friction · substrate
+\`\`\`
+
+### Install integration
+- `install.sh` now prints the exact `statusLine` JSON to paste into `~/.claude/settings.json`. Not auto-wired (settings.json is too sensitive to mutate blindly; user paste is one-time and explicit).
+
+### Tests
+- 134 → 138 lifecycle tests. New: stdin parsing covers all 4 Claude Code fields (#130), graceful degradation without stdin (#131), `LATTICE_STATUSLINE_NOCOLOR=1` strips ANSI (#132), default emits neon-yellow ANSI codes (#133).
+
+### Why this matters
+A persistent status bar is the cheapest possible discovery surface: zero CLI invocations, always visible. Lattice findings + friction count being constantly on-screen means every keystroke is informed by the current state of the audit substrate. Combined with v0.9.10's global CLAUDE.md and v0.9.11's project CLAUDE.md, sessions now see Lattice at three different fidelities: instructions (global), state-on-load (project), state-always (statusline).
+
 ## [0.9.11] — 2026-05-15
 
 **Project CLAUDE.md integration.** v0.9.10 made every Claude Code session see Lattice exists (global block). v0.9.11 makes every Claude Code session also see what's IN this project's Lattice — findings by tier, top-3 by priority, active ADRs, telemetry status — auto-refreshed on every lifecycle change.

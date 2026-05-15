@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.11)
+# lattice — unified CLI dispatcher (v0.9.12)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -3540,7 +3540,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4139,6 +4139,129 @@ cmd_claude_md_restore() {
       echo "[${PROG}] restored ${_LATTICE_GLOBAL_MD} from ${target}"
       ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# statusline (v0.9.12) — Claude Code statusLine entry point.
+#
+# Claude Code's `statusLine` setting in ~/.claude/settings.json points at a
+# command; the runtime calls it on each tick, feeds it a JSON object on stdin
+# describing the current session (model, context window %, rate limits, cwd),
+# and renders whatever the command writes to stdout in the status bar.
+#
+# Lattice's statusline merges:
+#   - Native Claude Code fields from stdin (model, ctx %, 5h %, 7d %)
+#   - Git branch (from cwd)
+#   - Lattice findings counts (CRITICAL/HIGH from .lattice/findings/open/)
+#   - Lattice friction count (via cmd_review --quiet)
+#
+# Color: neon-ish yellow (xterm-256 color 226 — pure yellow that's bright
+# without being washed out on most terminals). Opt-out: LATTICE_STATUSLINE_NOCOLOR=1.
+#
+# Output is intentionally one line, ~80-100 chars max. Designed for terminals
+# that get cut off, not for full-width retina monitors.
+# ---------------------------------------------------------------------------
+cmd_statusline() {
+  local nocolor="${LATTICE_STATUSLINE_NOCOLOR:-0}"
+  local yellow="" reset=""
+  if [ "${nocolor}" != "1" ] && [ "${nocolor}" != "true" ]; then
+    yellow=$'\033[38;5;226m'
+    reset=$'\033[0m'
+  fi
+
+  # --- Read Claude Code stdin JSON (if present) -------------------------
+  # No jq dependency — we extract a handful of fixed-shape fields with sed.
+  # If stdin is a TTY (running interactively for testing), there's no JSON,
+  # which is fine — we'll just skip those segments.
+  local stdin_json=""
+  if [ ! -t 0 ]; then
+    stdin_json="$(cat 2>/dev/null || true)"
+  fi
+
+  local model_name="" ctx_pct="" fiveh_pct="" weekly_pct="" stdin_cwd=""
+  if [ -n "${stdin_json}" ]; then
+    model_name="$(printf '%s' "${stdin_json}"   | sed -nE 's/.*"display_name":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+    ctx_pct="$(printf '%s' "${stdin_json}"      | sed -nE 's/.*"context_window"[^}]*"used_percentage":[[:space:]]*([0-9]+\.?[0-9]*).*/\1/p' | head -n1)"
+    fiveh_pct="$(printf '%s' "${stdin_json}"    | sed -nE 's/.*"five_hour"[^}]*"used_percentage":[[:space:]]*([0-9]+\.?[0-9]*).*/\1/p' | head -n1)"
+    weekly_pct="$(printf '%s' "${stdin_json}"   | sed -nE 's/.*"seven_day"[^}]*"used_percentage":[[:space:]]*([0-9]+\.?[0-9]*).*/\1/p' | head -n1)"
+    stdin_cwd="$(printf '%s' "${stdin_json}"    | sed -nE 's/.*"cwd":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
+  fi
+
+  # If stdin gave us a cwd, use it (the script may be running from elsewhere).
+  if [ -n "${stdin_cwd}" ] && [ -d "${stdin_cwd}" ]; then
+    cd "${stdin_cwd}" 2>/dev/null || true
+  fi
+
+  # --- Git branch (best-effort, silent on failure) ----------------------
+  local branch=""
+  if git rev-parse --abbrev-ref HEAD >/dev/null 2>&1; then
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  fi
+
+  # --- Lattice findings counts ------------------------------------------
+  local crit_count=0 high_count=0
+  if [ -d .lattice/findings/open ]; then
+    shopt -s nullglob
+    local f tier
+    for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+      [ -f "${f}" ] || continue
+      tier="$(yaml_field "${f}" "tier")"
+      case "${tier}" in
+        CRITICAL) crit_count=$((crit_count + 1)) ;;
+        HIGH)     high_count=$((high_count + 1)) ;;
+      esac
+    done
+  fi
+
+  # --- Friction count (calls cmd_review --quiet — already deterministic) -
+  local friction=""
+  if [ -d .lattice/sessions ]; then
+    friction="$(cmd_review --quiet 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  fi
+  # Don't display "0 friction" — keeps the line short when nothing's pending
+  [ "${friction}" = "0" ] && friction=""
+
+  # --- Lattice mode (only show if substrate/hybrid, classic is default) --
+  local mode mode_seg=""
+  mode="$(cmd_mode 2>/dev/null || echo classic)"
+  case "${mode}" in
+    substrate|hybrid) mode_seg="${mode}" ;;
+  esac
+
+  # --- Assemble segments ------------------------------------------------
+  local segs=()
+  [ -n "${model_name}" ]  && segs+=("${model_name}")
+  [ -n "${ctx_pct}" ]     && segs+=("ctx ${ctx_pct%.*}%")
+  [ -n "${fiveh_pct}" ]   && segs+=("5h ${fiveh_pct%.*}%")
+  [ -n "${weekly_pct}" ]  && segs+=("wk ${weekly_pct%.*}%")
+  [ -n "${branch}" ]      && segs+=("${branch}")
+  if [ "${crit_count}" -gt 0 ] || [ "${high_count}" -gt 0 ]; then
+    local find_seg=""
+    [ "${crit_count}" -gt 0 ] && find_seg="🔴${crit_count}"
+    if [ "${high_count}" -gt 0 ]; then
+      [ -n "${find_seg}" ] && find_seg="${find_seg} "
+      find_seg="${find_seg}⚠️${high_count}"
+    fi
+    segs+=("${find_seg}")
+  fi
+  [ -n "${friction}" ]    && segs+=("${friction} friction")
+  [ -n "${mode_seg}" ]    && segs+=("${mode_seg}")
+
+  # --- Emit ----------------------------------------------------------
+  local line=""
+  local i
+  for ((i=0; i<${#segs[@]}; i++)); do
+    if [ "${i}" -eq 0 ]; then
+      line="${segs[${i}]}"
+    else
+      line="${line} · ${segs[${i}]}"
+    fi
+  done
+  # Empty line if absolutely nothing to show — just a Lattice marker so the
+  # user knows the script is wired (and not silently broken).
+  [ -z "${line}" ] && line="lattice"
+
+  printf '%s%s%s\n' "${yellow}" "${line}" "${reset}"
 }
 
 # ---------------------------------------------------------------------------
@@ -4823,6 +4946,7 @@ case "${sub}" in
   project-init)       cmd_project_init "$@" ;;
   project-sync)       cmd_project_sync "$@" ;;
   project-restore)    cmd_project_restore "$@" ;;
+  statusline)         cmd_statusline "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;
