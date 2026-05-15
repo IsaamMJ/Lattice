@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.4)
+# lattice — unified CLI dispatcher (v0.9.5)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -1135,16 +1135,31 @@ cmd_triage() {
 cmd_bulk_close() {
   local pattern=""
   local commit=""
+  local reason=""
+  local rationale=""
+  local pending=0
   local yes=0
+  # v0.9.5 (#23): added --reason / --rationale / --pending so a migration that
+  # closes N findings for the same architectural reason (ADR adoption, refactor,
+  # deprecation) can pass the rationale ONCE instead of looping `lattice close`.
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --pattern) pattern="$2"; shift 2 ;;
-      --commit)  commit="$2"; shift 2 ;;
-      --yes|-y)  yes=1; shift ;;
+      --pattern)   pattern="$2"; shift 2 ;;
+      --commit)    commit="$2"; shift 2 ;;
+      --reason)    reason="$2"; shift 2 ;;
+      --rationale) rationale="$2"; shift 2 ;;
+      --pending)   pending=1; shift ;;
+      --yes|-y)    yes=1; shift ;;
       *) die "bulk-close: unknown arg: $1" ;;
     esac
   done
   [ -z "${pattern}" ] && die "bulk-close: --pattern <glob> is required (e.g. --pattern \"LOW-results-*\")"
+  if [ -n "${reason}" ]; then
+    case "${reason}" in
+      fixed|false-positive|wont-fix|out-of-scope|duplicate) ;;
+      *) die "bulk-close: --reason must be one of: fixed | false-positive | wont-fix | out-of-scope | duplicate" ;;
+    esac
+  fi
 
   shopt -s nullglob
   local matches=()
@@ -1180,7 +1195,10 @@ cmd_bulk_close() {
   for f in "${matches[@]}"; do
     local slug="$(basename "${f}" .yml)"
     local args=( "${slug}" )
-    [ -n "${commit}" ] && args+=( "--commit" "${commit}" )
+    [ -n "${commit}" ]    && args+=( "--commit" "${commit}" )
+    [ -n "${reason}" ]    && args+=( "--reason" "${reason}" )
+    [ -n "${rationale}" ] && args+=( "--rationale" "${rationale}" )
+    [ "${pending}" -eq 1 ] && args+=( "--pending" )
     if bash "${HELPER_CLOSE}" "${args[@]}"; then
       closed=$((closed + 1))
     else
@@ -2513,14 +2531,22 @@ cmd_mode() {
 #                         [--relates-to <finding-slug>]  (may repeat)
 # ---------------------------------------------------------------------------
 cmd_decide() {
-  local slug="" title="" because=""
+  local slug="" title="" because="" because_file=""
   local status="active"
   local supersedes="" reverses=""
   local cites=() relates=()
+  # v0.9.5 (#27): real ADRs need paragraph-level rationale, not one-liners.
+  # Now supports:
+  #   --because "single-line text"            (existing)
+  #   --because -                             (read from stdin / here-doc)
+  #   --because-file path/to/rationale.md     (read from a file)
+  # All three feed the same `because:` block. Multi-line content is emitted
+  # as a YAML block scalar (`because: |`) so the YAML stays parseable.
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --title)        title="$2"; shift 2 ;;
       --because)      because="$2"; shift 2 ;;
+      --because-file) because_file="$2"; shift 2 ;;
       --status)       status="$2"; shift 2 ;;
       --supersedes)   supersedes="$2"; shift 2 ;;
       --reverses)     reverses="$2"; shift 2 ;;
@@ -2532,7 +2558,17 @@ cmd_decide() {
   done
   [ -z "${slug}" ] && die "decide: usage: lattice decide <slug> --title \"...\" --because \"...\""
   [ -z "${title}" ] && die "decide: --title required"
-  [ -z "${because}" ] && die "decide: --because required (the rationale)"
+
+  # Resolve --because-file first (overrides --because if both given).
+  if [ -n "${because_file}" ]; then
+    [ -f "${because_file}" ] || die "decide: --because-file not found: ${because_file}"
+    because="$(cat "${because_file}")"
+  elif [ "${because}" = "-" ]; then
+    # Read from stdin (here-doc / pipe). Useful for multi-paragraph rationale.
+    because="$(cat)"
+  fi
+
+  [ -z "${because}" ] && die "decide: --because required (the rationale) — pass text, '-' for stdin, or --because-file <path>"
 
   ensure_project_dirs
   mkdir -p .lattice/decisions
@@ -2563,7 +2599,15 @@ cmd_decide() {
     printf 'status: %s\n' "${status}"
     printf 'created_at: %s\n' "${now}"
     printf 'created_by: %s\n' "${actor}"
-    printf 'because: "%s"\n' "${because//\"/\\\"}"
+    # v0.9.5 (#27): multi-line rationale emitted as YAML block scalar (`|`)
+    # so newlines survive. Single-line preserves the original quoted form so
+    # diffs against older ADRs stay clean.
+    if [[ "${because}" == *$'\n'* ]]; then
+      printf 'because: |\n'
+      printf '%s\n' "${because}" | sed 's/^/  /'
+    else
+      printf 'because: "%s"\n' "${because//\"/\\\"}"
+    fi
     if [ "${status}" = "active" ]; then
       printf 'still_valid_as_of: %s\n' "${today}"
     fi
@@ -2853,17 +2897,25 @@ _invariants_derive() {
     fi
   } > "${tmp}"
 
+  # v0.9.5 (#25): --print is now ADDITIVE (print AND persist) instead of
+  # print-only. Before this fix, `derive --print` printed YAML to stdout but
+  # never wrote .lattice/invariants/HEAD.yml — so the very next `lattice
+  # context` reported "(none — run: lattice invariants derive)" in the same
+  # session. Three subcommands had three different views of "do invariants
+  # exist". Least-surprise: writing is the side effect of deriving; --print
+  # just adds a stdout echo on top of it.
   if [ "${out_mode}" = "print" ]; then
     cat "${tmp}"
-    rm -f "${tmp}"
-    return 0
   fi
 
-  # Write to .lattice/invariants/HEAD.yml + sha-tagged copy
+  # Write to .lattice/invariants/HEAD.yml + sha-tagged copy (always; --print
+  # is additive in v0.9.5+).
   cp "${tmp}" ".lattice/invariants/HEAD.yml"
   cp "${tmp}" ".lattice/invariants/${commit}.yml"
   rm -f "${tmp}"
-  echo "[${PROG}] invariants derived: .lattice/invariants/HEAD.yml (commit ${commit})"
+  if [ "${out_mode}" != "print" ]; then
+    echo "[${PROG}] invariants derived: .lattice/invariants/HEAD.yml (commit ${commit})"
+  fi
 }
 
 _invariants_show() {
@@ -2880,24 +2932,31 @@ _invariants_diff() {
     echo "[${PROG}] no baseline — run: lattice invariants derive"
     return 1
   fi
+  # v0.9.5 (#25): --print now also persists, so we can't pipe `derive --print`
+  # into a temp file without trashing the HEAD.yml baseline we want to diff
+  # against. Snapshot the baseline first, then re-derive, then diff snapshot
+  # vs the freshly-written HEAD.yml.
+  local baseline; baseline="$(mktemp)"
+  cp .lattice/invariants/HEAD.yml "${baseline}"
   local baseline_commit
-  baseline_commit="$(grep -E '^commit:' .lattice/invariants/HEAD.yml | awk '{print $2}')"
+  baseline_commit="$(grep -E '^commit:' "${baseline}" | awk '{print $2}')"
 
-  local tmp_new; tmp_new="$(mktemp)"
-  _invariants_derive --print > "${tmp_new}" 2>/dev/null
+  _invariants_derive >/dev/null 2>&1
   local new_commit
-  new_commit="$(grep -E '^commit:' "${tmp_new}" | awk '{print $2}')"
+  new_commit="$(grep -E '^commit:' .lattice/invariants/HEAD.yml | awk '{print $2}')"
 
   if [ "${baseline_commit}" = "${new_commit}" ]; then
+    # Same commit → derivation is deterministic for fixed source, so diff
+    # should be empty. Report fresh and bail.
     echo "[${PROG}] HEAD invariants are fresh (commit ${baseline_commit}); no diff"
-    rm -f "${tmp_new}"
+    rm -f "${baseline}"
     return 0
   fi
 
   echo "[${PROG}] diff: ${baseline_commit} -> ${new_commit}"
   echo ""
-  diff -u .lattice/invariants/HEAD.yml "${tmp_new}" || true
-  rm -f "${tmp_new}"
+  diff -u "${baseline}" .lattice/invariants/HEAD.yml || true
+  rm -f "${baseline}"
 }
 
 # ---------------------------------------------------------------------------

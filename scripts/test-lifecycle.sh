@@ -1296,6 +1296,95 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 90: bulk-close accepts --reason + --rationale (v0.9.5, #23)"
+new_fixture t90
+write_yaml .lattice/findings/open/LOW-bulk-a.yml bulk-a LOW
+write_yaml .lattice/findings/open/LOW-bulk-b.yml bulk-b LOW
+write_yaml .lattice/findings/open/LOW-bulk-c.yml bulk-c LOW
+"${LATTICE}" bulk-close --pattern 'LOW-bulk-*' \
+  --reason out-of-scope \
+  --rationale "ADR 0001: superseded by new flow" \
+  --commit abcdef1 --yes >/tmp/lattice-t90.out 2>&1 || true
+if [ -f .lattice/findings/closed/LOW-bulk-a.yml ] \
+   && [ -f .lattice/findings/closed/LOW-bulk-b.yml ] \
+   && [ -f .lattice/findings/closed/LOW-bulk-c.yml ] \
+   && grep -q "^close_reason: out-of-scope" .lattice/findings/closed/LOW-bulk-a.yml \
+   && grep -q "ADR 0001" .lattice/findings/closed/LOW-bulk-a.yml; then
+  ok "bulk-close applied --reason + --rationale to all matched findings"
+else
+  fail "bulk-close --reason / --rationale not applied: $(cat /tmp/lattice-t90.out; ls .lattice/findings/closed/)"
+fi
+
+note "Test 91: bulk-close --reason validates the taxonomy (v0.9.5, #23)"
+new_fixture t91
+write_yaml .lattice/findings/open/LOW-val.yml val LOW
+if "${LATTICE}" bulk-close --pattern 'LOW-val' --reason not-a-real-reason --commit abcdef1 --yes >/tmp/lattice-t91.out 2>&1; then
+  fail "bulk-close should reject invalid --reason"
+else
+  if grep -q "fixed | false-positive\|must be one of" /tmp/lattice-t91.out; then
+    ok "bulk-close rejects invalid --reason with helpful message"
+  else
+    fail "bulk-close error unclear: $(cat /tmp/lattice-t91.out)"
+  fi
+fi
+
+note "Test 92: invariants derive --print also persists HEAD.yml (v0.9.5, #25)"
+new_fixture t92
+cat > pubspec.yaml <<'YML'
+name: t92
+dependencies:
+  flutter:
+    sdk: flutter
+YML
+mkdir -p lib/m
+echo 'class M {}' > lib/m/m.dart
+git add -A >/dev/null 2>&1
+git -c user.email=t@t -c user.name=t commit -q -m t92 >/dev/null 2>&1
+out="$("${LATTICE}" invariants derive --print 2>&1)"
+# stdout must contain the YAML (printed)
+# AND HEAD.yml must exist on disk now (persisted, #25 fix)
+if echo "${out}" | grep -q '^commit:' \
+   && [ -f .lattice/invariants/HEAD.yml ] \
+   && grep -q '^commit:' .lattice/invariants/HEAD.yml; then
+  ok "invariants derive --print prints AND persists HEAD.yml"
+else
+  fail "derive --print did not persist or did not print: stdout=${out}; head_exists=$([ -f .lattice/invariants/HEAD.yml ] && echo yes || echo no)"
+fi
+
+note "Test 93: decide --because-file reads multi-line rationale (v0.9.5, #27)"
+new_fixture t93
+cat > /tmp/lattice-t93-because.md <<'EOF'
+The current stack costs $3k/month.
+
+Supabase replaces it for ~$25/month.
+
+Risks: vendor lock-in.
+EOF
+"${LATTICE}" decide t93-supabase --title "Migrate to Supabase" --because-file /tmp/lattice-t93-because.md >/tmp/lattice-t93.out 2>&1
+adr_path="$(cat /tmp/lattice-t93.out | tail -1)"
+if [ -f "${adr_path}" ] \
+   && grep -q "^because: |$" "${adr_path}" \
+   && grep -q "  The current stack costs" "${adr_path}" \
+   && grep -q "  Supabase replaces it" "${adr_path}" \
+   && grep -q "  Risks: vendor lock-in" "${adr_path}"; then
+  ok "decide --because-file produces multi-line YAML block scalar"
+else
+  fail "decide --because-file produced unexpected output: $(cat "${adr_path}" 2>/dev/null || echo NOFILE)"
+fi
+rm -f /tmp/lattice-t93-because.md
+
+note "Test 94: decide --because - reads multi-line from stdin (v0.9.5, #27)"
+new_fixture t94
+adr_out="$(printf 'first paragraph\n\nsecond paragraph' | "${LATTICE}" decide t94-stdin --title "stdin test" --because - 2>&1 | tail -1)"
+if [ -f "${adr_out}" ] \
+   && grep -q "^because: |$" "${adr_out}" \
+   && grep -q "  first paragraph" "${adr_out}" \
+   && grep -q "  second paragraph" "${adr_out}"; then
+  ok "decide --because - reads multi-line stdin"
+else
+  fail "decide --because - failed: $(cat "${adr_out}" 2>/dev/null || echo NOFILE)"
+fi
+
 note "Test 89: telemetry skipped on SIGPIPE exit 141 (v0.9.4, #21)"
 new_fixture t89
 # Force a SIGPIPE on the lattice pipeline by closing the consumer mid-read.

@@ -2,6 +2,21 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] — 2026-05-15
+
+**Enhancement slice — clears the remaining v0.9.3-dogfood requests.** The riseCraft session of 2026-05-14 filed three enhancements alongside the three bugs that v0.9.4 closed. v0.9.5 lands those three: bulk-close becomes useful for real migration scenarios, `invariants derive --print` stops lying, and `decide` accepts paragraph-level rationale instead of one-liners.
+
+### Added / Changed
+- **#23 — `lattice bulk-close --reason --rationale --pending`.** Previously bulk-close only accepted `--pattern`, `--commit`, and `--yes` — so closing 20 findings under the same architectural reason still meant a shell `for` loop calling `lattice close` per-slug. Now `bulk-close` forwards the same close-helper flags. Migration / refactor / deprecation flows close in one invocation. `--reason` is validated against the canonical taxonomy (`fixed | false-positive | wont-fix | out-of-scope | duplicate`).
+- **#25 — `lattice invariants derive --print` now ALSO persists `.lattice/invariants/HEAD.yml`.** Previously `--print` suppressed the file write entirely, so the next `lattice context` reported "(none — run: lattice invariants derive)" in the same session. Three subcommands had three views of "do invariants exist." `--print` is now additive: prints to stdout AND writes to disk. `_invariants_diff` adjusted to snapshot the baseline before re-deriving so diff still works.
+- **#27 — `lattice decide --because-file <path>` and `--because -` (stdin) for paragraph-level rationale.** Real ADRs need multi-paragraph context, alternatives considered, and trade-offs — not a one-liner. Multi-line input is emitted as a YAML block scalar (`because: |`) so it survives `validate` and stays diff-friendly. Single-line input still uses the original quoted form.
+
+### Tests
+- 94 → 99 lifecycle tests. New: bulk-close `--reason` + `--rationale` applied to all matches (#90), bulk-close rejects invalid `--reason` (#91), `derive --print` prints AND persists (#92), `decide --because-file` reads multi-line file (#93), `decide --because -` reads multi-line stdin (#94).
+
+### Why this matters
+v0.9.3 → v0.9.4 → v0.9.5 is the first end-to-end demonstration of the compounding feedback loop: report channel ships → real session uses it → all reported items get fixed within ~24h with regression tests. The deferred-work pile no longer carries observations from the report-channel pilot.
+
 ## [0.9.4] — 2026-05-14
 
 **Bugfix slice — clears the three real bugs surfaced via v0.9.3 `lattice report` channel.** The riseCraft session filed 6 observations the same day v0.9.3 shipped (#22 #23 #24 #25 #26 #27); three are bugs, three are enhancements. This release ships fixes for the bugs (and the SIGPIPE auto-telemetry noise #21). Enhancements deferred to v0.9.5+.
