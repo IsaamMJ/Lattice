@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.5)
+# lattice — unified CLI dispatcher (v0.9.6)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -449,14 +449,99 @@ _on_telemetry_exit() {
   # into a consumer that closes early (e.g. `lattice list | head`). That is a
   # benign UX pattern, not a bug — skip telemetry so we don't flood the tracker.
   # Same for 130 (SIGINT — user Ctrl-C) and 143 (SIGTERM).
-  if [ ${code} -ne 0 ] && [ ${code} -ne 141 ] && [ ${code} -ne 130 ] && [ ${code} -ne 143 ] && [ -n "${sub:-}" ]; then
+  # Resolve subcommand via the dedicated global so loop-scope reassignments
+  # in cmd_doctor (`for sub in findings/open ...`) can't poison this trap.
+  local _scmd="${_LATTICE_SUBCMD:-${sub:-}}"
+  if [ ${code} -ne 0 ] && [ ${code} -ne 141 ] && [ ${code} -ne 130 ] && [ ${code} -ne 143 ] && [ -n "${_scmd}" ]; then
     # Debug mode keeps stderr so the payload is visible; otherwise silent.
     if [ "${LATTICE_TELEMETRY_DEBUG:-0}" = "1" ]; then
-      _send_telemetry "${code}" "${sub}" || true
+      _send_telemetry "${code}" "${_scmd}" || true
     else
-      _send_telemetry "${code}" "${sub}" >/dev/null 2>&1 || true
+      _send_telemetry "${code}" "${_scmd}" >/dev/null 2>&1 || true
     fi
   fi
+  # MAT log (v0.9.6) — local-only post-execution trace, foundation for v0.9.7
+  # friction predicates ("PATH workaround used", "command retried after fail",
+  # "manual yaml edit instead of helper", etc). Writes after telemetry so any
+  # telemetry failure cannot block the local log.
+  _write_mat_entry "${code}" "${_scmd:-unknown}" || true
+}
+
+# ---------------------------------------------------------------------------
+# MAT (Message-Action Trace) log — passive observer layer (v0.9.6).
+#
+# Every `lattice <cmd>` invocation appends one JSON line to
+# `.lattice/sessions/<YYYYMMDD>.jsonl` in the project's cwd. Per-day, per-project
+# rolling. Captures: timestamp, subcommand, raw args, exit code, duration
+# (when shell supports nanosecond `date +%s%N`), invocation method (PATH vs
+# full-path workaround), cwd. Local-only — never POSTed anywhere; v0.9.3
+# manual telemetry is a separate lane with strict sanitization.
+#
+# v0.9.7 will read this log to derive friction candidates and surface them via
+# `lattice review`. The MAT layer is INTENTIONALLY passive so that recording is
+# never optional — Claude/agent sessions cannot "forget" to write events.
+# ---------------------------------------------------------------------------
+_write_mat_entry() {
+  local code="$1" subcmd="$2"
+  # Skip if user disabled via env (parity with usage log)
+  case "${LATTICE_MAT:-1}" in
+    0|off|false|no) return 0 ;;
+  esac
+  # No-op for help/version/sessions itself to avoid infinite chatter
+  case "${subcmd}" in
+    help|--help|-h|version|--version|-v|sessions|unknown) return 0 ;;
+  esac
+  # Must be in a directory where we can write .lattice/ — silently bail otherwise
+  [ -w . ] 2>/dev/null || return 0
+  mkdir -p .lattice/sessions 2>/dev/null || return 0
+
+  local day ts duration_ms args_json invoked_via cwd_esc
+  day="$(date -u +%Y%m%d 2>/dev/null || echo unknown)"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+
+  # Duration: only computable if start nanos captured AND `date +%s%N` is real
+  # (Git Bash on Windows reports literal "%N" — guard against that).
+  duration_ms=0
+  if [ -n "${_LATTICE_START_NS:-}" ] && [ "${_LATTICE_START_NS}" != "0" ]; then
+    local now_ns
+    now_ns="$(date +%s%N 2>/dev/null || echo 0)"
+    if [[ "${now_ns}" =~ ^[0-9]+$ ]] && [[ "${_LATTICE_START_NS}" =~ ^[0-9]+$ ]]; then
+      duration_ms=$(( (now_ns - _LATTICE_START_NS) / 1000000 ))
+      # Guard nonsense values from clock skew / overflow
+      [ "${duration_ms}" -lt 0 ] && duration_ms=0
+    fi
+  fi
+
+  # Build args JSON array from the saved entry argv (set at script start).
+  # Each arg is JSON-escaped; we keep them verbatim because the MAT log is
+  # local-only and is meant to drive friction detection on real argv shapes.
+  args_json="["
+  local first=1 a esc
+  for a in "${_LATTICE_ARGV[@]:-}"; do
+    esc="${a//\\/\\\\}"
+    esc="${esc//\"/\\\"}"
+    esc="${esc//$'\n'/\\n}"
+    esc="${esc//$'\r'/\\r}"
+    esc="${esc//$'\t'/\\t}"
+    if [ "${first}" -eq 1 ]; then
+      args_json+="\"${esc}\""
+      first=0
+    else
+      args_json+=",\"${esc}\""
+    fi
+  done
+  args_json+="]"
+
+  invoked_via="${_LATTICE_INVOKED_VIA:-path}"
+  cwd_esc="$(pwd 2>/dev/null || echo unknown)"
+  cwd_esc="${cwd_esc//\\/\\\\}"
+  cwd_esc="${cwd_esc//\"/\\\"}"
+
+  # One JSON object per line — easy to parse line-by-line in v0.9.7 friction
+  # predicates without pulling jq as a dependency.
+  printf '{"ts":"%s","cmd":"%s","args":%s,"exit":%d,"duration_ms":%d,"invoked_via":"%s","cwd":"%s"}\n' \
+    "${ts}" "${subcmd}" "${args_json}" "${code}" "${duration_ms}" "${invoked_via}" "${cwd_esc}" \
+    >> ".lattice/sessions/${day}.jsonl" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -3312,6 +3397,86 @@ cmd_resolve_pending() {
 }
 
 # ---------------------------------------------------------------------------
+# sessions — inspect the MAT log (v0.9.6).
+#
+#   lattice sessions list              # list every day's session file w/ counts
+#   lattice sessions show              # pretty-print today's session log
+#   lattice sessions show <YYYYMMDD>   # pretty-print a specific day
+#   lattice sessions show --raw [day]  # dump raw JSONL (for piping to jq)
+#
+# The MAT log is the v0.9.6 foundation; v0.9.7 layers friction predicates and
+# `lattice review` on top. v0.9.6 only ships read access so users can verify
+# the trace data is being captured correctly.
+# ---------------------------------------------------------------------------
+cmd_sessions() {
+  local action="${1:-list}"
+  shift 2>/dev/null || true
+  case "${action}" in
+    list)
+      [ -d ".lattice/sessions" ] || { echo "[${PROG}] no .lattice/sessions/ in cwd (no MAT events recorded yet)"; return 0; }
+      shopt -s nullglob
+      local files=(.lattice/sessions/*.jsonl)
+      if [ "${#files[@]}" -eq 0 ]; then
+        echo "[${PROG}] no session files (MAT log is empty)"
+        return 0
+      fi
+      printf '%-12s %8s  %s\n' "DAY" "EVENTS" "PATH"
+      local f day count
+      for f in "${files[@]}"; do
+        day="$(basename "${f}" .jsonl)"
+        count="$(wc -l < "${f}" 2>/dev/null | tr -d ' ' || echo 0)"
+        printf '%-12s %8s  %s\n' "${day}" "${count}" "${f}"
+      done
+      ;;
+    show)
+      local raw=0 day=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --raw) raw=1; shift ;;
+          -*)    die "sessions show: unknown flag: $1" ;;
+          *)     [ -z "${day}" ] && day="$1" || die "sessions show: extra arg: $1"; shift ;;
+        esac
+      done
+      [ -z "${day}" ] && day="$(date -u +%Y%m%d)"
+      local f=".lattice/sessions/${day}.jsonl"
+      if [ ! -f "${f}" ]; then
+        echo "[${PROG}] no session log for ${day} (${f})"
+        return 1
+      fi
+      if [ "${raw}" -eq 1 ]; then
+        cat "${f}"
+        return 0
+      fi
+      # Pretty-print: ts cmd exit dur invoked_via
+      local total=0 fail=0 fullpath=0
+      printf '%-20s %-18s %-5s %-8s %-10s\n' "TS" "CMD" "EXIT" "DUR_MS" "INVOKED"
+      while IFS= read -r line; do
+        [ -z "${line}" ] && continue
+        total=$((total + 1))
+        # Extract fields with grep + sed; the JSON shape is fixed so this is safe.
+        local _ts _cmd _exit _dur _via
+        _ts="$(printf '%s' "${line}" | sed -E 's/.*"ts":"([^"]*)".*/\1/')"
+        _cmd="$(printf '%s' "${line}" | sed -E 's/.*"cmd":"([^"]*)".*/\1/')"
+        _exit="$(printf '%s' "${line}" | sed -E 's/.*"exit":([0-9-]+).*/\1/')"
+        _dur="$(printf '%s' "${line}" | sed -E 's/.*"duration_ms":([0-9]+).*/\1/')"
+        _via="$(printf '%s' "${line}" | sed -E 's/.*"invoked_via":"([^"]*)".*/\1/')"
+        [ "${_exit}" != "0" ] && fail=$((fail + 1))
+        [ "${_via}" = "fullpath" ] && fullpath=$((fullpath + 1))
+        printf '%-20s %-18s %-5s %-8s %-10s\n' "${_ts}" "${_cmd}" "${_exit}" "${_dur}" "${_via}"
+      done < "${f}"
+      echo ""
+      printf '[%s] %s events, %s failures, %s full-path invocations\n' "${PROG}" "${total}" "${fail}" "${fullpath}"
+      if [ "${fullpath}" -gt 0 ]; then
+        echo "[${PROG}] hint: full-path invocations indicate PATH workaround — see install.sh shim auto-install"
+      fi
+      ;;
+    *)
+      die "sessions: usage: lattice sessions <list|show> [day]"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -3319,7 +3484,30 @@ if [ "$#" -eq 0 ]; then
   exit 0
 fi
 
+# MAT entry capture (v0.9.6) — snapshot before subcommand dispatch so the EXIT
+# trap can write a complete trace event regardless of where execution ended.
+# _LATTICE_ARGV holds the FULL argv (subcommand + flags) for the trace log.
+_LATTICE_ARGV=( "$@" )
+_LATTICE_START_NS="$(date +%s%N 2>/dev/null || echo 0)"
+# Filter the bogus `%N` literal Git Bash on Windows can return when nanos
+# aren't supported — keeps duration_ms a clean integer downstream.
+case "${_LATTICE_START_NS}" in
+  *N|*n) _LATTICE_START_NS=0 ;;
+esac
+# Invocation-method detector: "fullpath" when the user (or a Claude session)
+# ran `~/.claude/lattice/scripts/lattice ...` instead of the PATH-resolved
+# `lattice`. That string is a primary friction signal — see v0.9.7 predicates.
+_LATTICE_INVOKED_VIA="path"
+case "${BASH_SOURCE[0]:-$0}" in
+  */.claude/lattice/scripts/lattice|*/.claude/lattice/scripts/lattice.sh)
+    _LATTICE_INVOKED_VIA="fullpath" ;;
+esac
+
 sub="$1"; shift || true
+# Dedicated subcommand global for EXIT-time handlers. Some subcommands
+# (cmd_doctor) use `for sub in ...` without local-scoping, clobbering the
+# top-level `sub`. _LATTICE_SUBCMD is only set here, never reassigned.
+_LATTICE_SUBCMD="${sub}"
 trap _on_telemetry_exit EXIT
 _maybe_show_telemetry_disclosure
 maybe_update_check "${sub}" || true
@@ -3363,6 +3551,7 @@ case "${sub}" in
   invariants)         cmd_invariants "$@" ;;
   context)            cmd_context "$@" ;;
   report)             cmd_report "$@" ;;
+  sessions)           cmd_sessions "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

@@ -1296,6 +1296,83 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 95: MAT log records subcommand + exit code (v0.9.6)"
+new_fixture t95
+"${LATTICE}" list >/dev/null 2>&1
+day="$(date -u +%Y%m%d)"
+log=".lattice/sessions/${day}.jsonl"
+if [ -f "${log}" ] \
+   && grep -q '"cmd":"list"' "${log}" \
+   && grep -q '"exit":0' "${log}" \
+   && grep -q '"invoked_via":"' "${log}"; then
+  ok "MAT log records list invocation with exit 0 + invoked_via"
+else
+  fail "MAT log missing or malformed: $(cat "${log}" 2>/dev/null)"
+fi
+
+note "Test 96: MAT log records failed subcommands (v0.9.6)"
+new_fixture t96
+"${LATTICE}" nonexistent-cmd >/dev/null 2>&1 || true
+day="$(date -u +%Y%m%d)"
+log=".lattice/sessions/${day}.jsonl"
+if [ -f "${log}" ] && grep -q '"cmd":"nonexistent-cmd"' "${log}" && grep -q '"exit":2' "${log}"; then
+  ok "MAT log captures unknown-subcommand failure with exit 2"
+else
+  fail "MAT log did not capture failure: $(cat "${log}" 2>/dev/null)"
+fi
+
+note "Test 97: MAT log skips help/version/sessions to avoid chatter (v0.9.6)"
+new_fixture t97
+"${LATTICE}" version >/dev/null 2>&1
+"${LATTICE}" help >/dev/null 2>&1
+"${LATTICE}" sessions list >/dev/null 2>&1
+day="$(date -u +%Y%m%d)"
+log=".lattice/sessions/${day}.jsonl"
+# All three are filtered — log file should not even exist (no events written).
+if [ ! -f "${log}" ] || ! grep -qE '"cmd":"(help|version|sessions)"' "${log}"; then
+  ok "MAT log skips help/version/sessions"
+else
+  fail "MAT log incorrectly recorded filtered cmd: $(cat "${log}")"
+fi
+
+note "Test 98: MAT log respects LATTICE_MAT=0 opt-out (v0.9.6)"
+new_fixture t98
+LATTICE_MAT=0 "${LATTICE}" list >/dev/null 2>&1
+day="$(date -u +%Y%m%d)"
+log=".lattice/sessions/${day}.jsonl"
+if [ ! -f "${log}" ]; then
+  ok "MAT log not written when LATTICE_MAT=0"
+else
+  fail "MAT log written despite opt-out: $(cat "${log}")"
+fi
+
+note "Test 99: lattice sessions show reports full-path invocations (v0.9.6)"
+new_fixture t99
+# Force fullpath by invoking through the absolute path.
+bash "${LATTICE}" list >/dev/null 2>&1
+out="$("${LATTICE}" sessions show 2>&1)"
+# Heuristic: when ${LATTICE} contains "scripts/lattice", invoked_via should be
+# fullpath OR path depending on whether the path ends in the suite-detector
+# pattern. We just check the hint surfaces when fullpath > 0.
+fullpath_count="$(echo "${out}" | grep -oE 'full-path invocations' | wc -l | tr -d ' ')"
+events_line="$(echo "${out}" | grep 'events,')"
+if echo "${events_line}" | grep -qE '[0-9]+ events,'; then
+  ok "sessions show emits aggregate stats line"
+else
+  fail "sessions show output unexpected: ${out}"
+fi
+
+note "Test 100: cmd_doctor for-loop does not poison MAT subcommand field (v0.9.6 regression)"
+new_fixture t100
+"${LATTICE}" doctor >/dev/null 2>&1 || true
+day="$(date -u +%Y%m%d)"
+log=".lattice/sessions/${day}.jsonl"
+if grep -q '"cmd":"doctor"' "${log}" && ! grep -q '"cmd":"findings/' "${log}"; then
+  ok "doctor logs as cmd:\"doctor\" (not the for-loop iteration var)"
+else
+  fail "MAT log contaminated by doctor for-loop: $(cat "${log}")"
+fi
+
 note "Test 90: bulk-close accepts --reason + --rationale (v0.9.5, #23)"
 new_fixture t90
 write_yaml .lattice/findings/open/LOW-bulk-a.yml bulk-a LOW

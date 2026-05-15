@@ -2,6 +2,26 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] — 2026-05-15
+
+**MAT (Message-Action Trace) log layer — foundation for the observer-pattern fix.** The v0.9.3 manual report channel made filing easy but kept the cognitive load on Claude: notice → judge → act. Three voluntary actions stacked → near-zero reliability across sessions (proven empirically — the riseCraft session only filed when explicitly prompted). v0.9.6 flips the model: Lattice records every command it mediates, so v0.9.7 can derive friction candidates from the log and surface them via `lattice review` — Claude's role becomes *confirm or dismiss*, not *initiate*.
+
+### Added
+- **`.lattice/sessions/<YYYYMMDD>.jsonl`** — per-project, per-day rolling MAT log. Every `lattice <cmd>` writes one JSON line on exit: `{ts, cmd, args, exit, duration_ms, invoked_via, cwd}`. Passive — recording is not optional. Local-only — never POSTed anywhere (telemetry remains a separate, sanitized, opt-in lane).
+- **`invoked_via` field** captures `path` vs `fullpath` (= user/session ran `~/.claude/lattice/scripts/lattice ...` instead of the PATH-resolved `lattice`). Direct evidence of PATH workaround — a primary friction signal that v0.9.7 predicates will surface automatically.
+- **`lattice sessions list`** — table of every recorded day with event counts.
+- **`lattice sessions show [YYYYMMDD]`** — pretty-print the day's session log; defaults to today. `--raw` flag dumps JSONL for downstream piping (jq, awk).
+- **`LATTICE_MAT=0` env opt-out** for tests / hermetic CI.
+
+### Fixed
+- **Regression: `cmd_doctor` for-loop poisoned the EXIT-trap subcommand field.** `for sub in findings/open findings/closed` (line 2178) reassigned the global `sub` without `local`, so telemetry + MAT log were tagging doctor events with `cmd: "findings/closed"`. Introduced `_LATTICE_SUBCMD` global, set once at dispatch entry, never reassigned. Telemetry-fingerprint impact: minimal (`doctor` was already excluded from telemetry); MAT impact: cosmetic but caught immediately on first dogfood.
+
+### Tests
+- 99 → 105 lifecycle tests. New: MAT log records cmd + exit + invoked_via (#95), captures failures (#96), skips help/version/sessions (#97), respects `LATTICE_MAT=0` (#98), `sessions show` reports aggregates (#99), doctor for-loop regression guard (#100).
+
+### Why this matters
+This is the structural answer to "why does Claude only file bugs when explicitly told to." The cure isn't to nudge Claude harder — it's to remove the voluntariness entirely. v0.9.6 puts the observation in place; v0.9.7 layers the prompting; v0.9.8 will auto-file with confirmation. Each release is independently shippable; together they make silent friction structurally impossible to lose.
+
 ## [0.9.5] — 2026-05-15
 
 **Enhancement slice — clears the remaining v0.9.3-dogfood requests.** The riseCraft session of 2026-05-14 filed three enhancements alongside the three bugs that v0.9.4 closed. v0.9.5 lands those three: bulk-close becomes useful for real migration scenarios, `invariants derive --print` stops lying, and `decide` accepts paragraph-level rationale instead of one-liners.
