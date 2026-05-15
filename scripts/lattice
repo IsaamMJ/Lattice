@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.10)
+# lattice — unified CLI dispatcher (v0.9.11)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -812,6 +812,10 @@ cmd_close() {
   slug="$(basename "${src}" .yml)"
   local rc=0
   bash "${HELPER_CLOSE}" "${slug}" "$@" || rc=$?
+  # v0.9.11: auto-refresh project CLAUDE.md state block. Quiet, best-effort,
+  # respects LATTICE_NO_PROJECT_SYNC=1. Only fires when CLAUDE.md already has
+  # a block (no surprise-creation on first close).
+  [ "${rc}" -eq 0 ] && _lattice_project_sync_auto
   return "${rc}"
 }
 
@@ -2733,6 +2737,9 @@ cmd_decide() {
     fi
   fi
 
+  # v0.9.11: auto-refresh project CLAUDE.md block on new ADR.
+  _lattice_project_sync_auto
+
   echo "${dest}"
 }
 
@@ -3533,7 +3540,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -3845,6 +3852,13 @@ _LATTICE_MD_SENTINEL_END="<!-- LATTICE-MANAGED-BLOCK-END -->"
 _LATTICE_GLOBAL_MD="${HOME}/.claude/CLAUDE.md"
 _LATTICE_MD_BACKUP_DIR="${HOME}/.claude/lattice/claude-md-backups"
 
+# v0.9.11 — project-scoped block uses DIFFERENT sentinels so the global tune
+# can never accidentally edit a project file (and vice versa). Each block is
+# managed independently by its own writer.
+_LATTICE_PROJECT_MD_SENTINEL_START="<!-- LATTICE-PROJECT-BLOCK-START -->"
+_LATTICE_PROJECT_MD_SENTINEL_END="<!-- LATTICE-PROJECT-BLOCK-END -->"
+_LATTICE_PROJECT_MD_BACKUP_DIR=".lattice/claude-md-backups"
+
 # Echoes the canonical Lattice-managed block (no surrounding sentinels — the
 # caller wraps). Pure heuristic, deterministic. v0.9.11+ may rewrite parts of
 # this based on usage data, but the structure stays stable.
@@ -4123,6 +4137,342 @@ cmd_claude_md_restore() {
       _lattice_md_backup "${_LATTICE_GLOBAL_MD}" >/dev/null 2>&1
       cp "${target}" "${_LATTICE_GLOBAL_MD}" || die "claude-md-restore: copy failed"
       echo "[${PROG}] restored ${_LATTICE_GLOBAL_MD} from ${target}"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Project CLAUDE.md integration (v0.9.11).
+#
+# Same sentinel-managed pattern as v0.9.10 global, but scoped to <project>/
+# CLAUDE.md and carrying STATE (not instructions). The global block tells the
+# session WHAT Lattice is; the project block tells the session what's IN this
+# project's Lattice right now: dimensions active, findings by tier, top-3 by
+# priority, active ADRs, telemetry status.
+#
+# Auto-refreshed on lifecycle events (`lattice close`, `lattice decide`,
+# `lattice invariants derive`). Opt-out via LATTICE_NO_PROJECT_SYNC=1.
+#
+# Strict boundaries (locked for v0.9.11 — DO NOT extend without measurement):
+#   - counts + top-3 findings only (no full lists)
+#   - state snapshot, NOT instructions (instructions live in global block)
+#   - no cross-session memory writes (deferred to v0.9.12 if dogfood justifies)
+#   - no AI-driven content rewrites (deterministic generator only)
+# ---------------------------------------------------------------------------
+
+# Echoes the project state block (no surrounding sentinels — caller wraps).
+# Pure read of .lattice/ filesystem state. No network, no AI.
+_lattice_project_md_block() {
+  local cwd_name="${PWD##*/}"
+  local generated_at
+  generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # --- Mode + telemetry status -------------------------------------------
+  local mode tel_status
+  mode="$(cmd_mode 2>/dev/null || echo classic)"
+  if _telemetry_enabled; then
+    tel_status="ON (failures auto-file at IsaamMJ/Lattice)"
+  else
+    tel_status="OFF"
+  fi
+
+  # --- Active dimensions (read from existing findings, infer from
+  # .lattice/findings/open/*.yml dimension fields) ------------------------
+  local dimensions=""
+  if [ -d .lattice/findings/open ]; then
+    dimensions="$(shopt -s nullglob; for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+      [ -f "${f}" ] || continue
+      # yaml_field uses printf '%s' (no newline) so we must add one explicitly
+      # to keep sort -u from collapsing all values into one run-on token.
+      echo "$(yaml_field "${f}" "dimension")"
+    done | sort -u | awk 'NF{ out=out (out?", ":"") $0 } END{ print out }')"
+  fi
+  [ -z "${dimensions}" ] && dimensions="(none yet)"
+
+  # --- Findings by tier --------------------------------------------------
+  local total=0
+  declare -A by_tier=()
+  shopt -s nullglob
+  for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+    [ -f "${f}" ] || continue
+    total=$((total + 1))
+    local t
+    t="$(yaml_field "${f}" "tier")"
+    by_tier["${t}"]=$(( ${by_tier["${t}"]:-0} + 1 ))
+  done
+  local tier_summary=""
+  local tier
+  for tier in CRITICAL BLOCKER HIGH RISK DRIFT MEDIUM WATCH LOW; do
+    local n=${by_tier["${tier}"]:-0}
+    if [ "${n}" -gt 0 ]; then
+      [ -n "${tier_summary}" ] && tier_summary="${tier_summary}, "
+      tier_summary="${tier_summary}${tier}: ${n}"
+    fi
+  done
+  [ -z "${tier_summary}" ] && tier_summary="(none open)"
+
+  # --- Top 3 by tier rank + sweep_date (oldest first within tier) --------
+  local top3=""
+  if [ "${total}" -gt 0 ]; then
+    # Build "<tier-rank>|<sweep_date>|<slug>" rows then sort + take 3
+    local rank
+    while IFS= read -r row; do
+      [ -z "${row}" ] && continue
+      [ -n "${top3}" ] && top3="${top3}"$'\n'
+      top3="${top3}- ${row}"
+    done < <(
+      shopt -s nullglob
+      for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+        [ -f "${f}" ] || continue
+        local t sd slug
+        t="$(yaml_field "${f}" "tier")"
+        sd="$(yaml_field "${f}" "sweep_date")"
+        slug="$(basename "${f}" .yml)"
+        case "${t}" in
+          CRITICAL) rank=1 ;; BLOCKER) rank=2 ;; HIGH) rank=3 ;;
+          RISK)     rank=4 ;; DRIFT)   rank=5 ;; MEDIUM)  rank=6 ;;
+          WATCH)    rank=7 ;; LOW)     rank=8 ;; *)       rank=9 ;;
+        esac
+        printf '%d|%s|%s\n' "${rank}" "${sd:-0000-00-00}" "${slug}"
+      done \
+      | sort \
+      | head -3 \
+      | awk -F'|' '{printf "%s %s (%s)\n", toupper(substr("CRITICALBLOCKERHIGHRISK DRIFTMEDIUMWATCHLOW",1,0)), $3, $2}' \
+      | sed -E 's/^\s+//'
+    )
+  fi
+  # Simpler top-3 builder (overwrite — the awk above was wrong; just emit slug + sweep_date)
+  top3=""
+  if [ "${total}" -gt 0 ]; then
+    while IFS= read -r row; do
+      [ -z "${row}" ] && continue
+      [ -n "${top3}" ] && top3="${top3}"$'\n'
+      top3="${top3}- ${row}"
+    done < <(
+      shopt -s nullglob
+      for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+        [ -f "${f}" ] || continue
+        local t sd slug rank
+        t="$(yaml_field "${f}" "tier")"
+        sd="$(yaml_field "${f}" "sweep_date")"
+        slug="$(basename "${f}" .yml)"
+        case "${t}" in
+          CRITICAL) rank=1 ;; BLOCKER) rank=2 ;; HIGH) rank=3 ;;
+          RISK)     rank=4 ;; DRIFT)   rank=5 ;; MEDIUM)  rank=6 ;;
+          WATCH)    rank=7 ;; LOW)     rank=8 ;; *)       rank=9 ;;
+        esac
+        printf '%d|%s|%s|%s\n' "${rank}" "${sd:-0000-00-00}" "${slug}" "${t}"
+      done \
+      | sort \
+      | head -3 \
+      | awk -F'|' '{printf "%s — %s (%s)\n", $4, $3, $2}'
+    )
+  fi
+  [ -z "${top3}" ] && top3="- (no open findings)"
+
+  # --- Active ADRs -------------------------------------------------------
+  local adr_count=0
+  local adr_list=""
+  if [ -d .lattice/decisions ]; then
+    while IFS= read -r line; do
+      [ -z "${line}" ] && continue
+      adr_count=$((adr_count + 1))
+      [ "${adr_count}" -le 3 ] && adr_list="${adr_list}- ${line}"$'\n'
+    done < <(
+      shopt -s nullglob
+      for d in .lattice/decisions/*.yml; do
+        [ -f "${d}" ] || continue
+        local st id_v title_v
+        st="$(yaml_field "${d}" "status")"
+        case "${st}" in
+          active|in_progress) ;;
+          *) continue ;;
+        esac
+        id_v="$(yaml_field "${d}" "id")"
+        title_v="$(yaml_field "${d}" "title")"
+        printf '%s — %s\n' "${id_v}" "${title_v}"
+      done
+    )
+  fi
+
+  # --- Render block (between sentinels — caller wraps) -------------------
+  cat <<MDBLOCK
+${_LATTICE_PROJECT_MD_SENTINEL_START}
+<!-- managed by \`lattice project-sync\` — auto-refreshed on close/decide/derive -->
+<!-- generated: ${generated_at}   project: ${cwd_name}   mode: ${mode} -->
+
+## Lattice state (auto-synced)
+
+- **Mode:** ${mode}
+- **Telemetry:** ${tel_status}
+- **Active dimensions:** ${dimensions}
+- **Findings open (${total} total):** ${tier_summary}
+- **Active ADRs:** ${adr_count}
+
+### Top findings (by tier + age)
+${top3}
+$([ -n "${adr_list}" ] && printf '\n### Active decisions\n%s' "${adr_list}")
+*Refresh: \`lattice project-sync\`. Suppress auto-sync: \`export LATTICE_NO_PROJECT_SYNC=1\`. Undo: \`lattice project-restore --list\`.*
+
+${_LATTICE_PROJECT_MD_SENTINEL_END}
+MDBLOCK
+}
+
+# Backup target file to .lattice/claude-md-backups/ with UTC timestamp.
+_lattice_project_md_backup() {
+  local target="$1"
+  [ -f "${target}" ] || return 0
+  mkdir -p "${_LATTICE_PROJECT_MD_BACKUP_DIR}" 2>/dev/null || return 1
+  local ts backup_path
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_path="${_LATTICE_PROJECT_MD_BACKUP_DIR}/CLAUDE.md.${ts}"
+  cp "${target}" "${backup_path}" 2>/dev/null || return 1
+  echo "${backup_path}"
+}
+
+# Idempotently insert/replace the project block in <project>/CLAUDE.md.
+_lattice_project_md_apply() {
+  local target="${1:-CLAUDE.md}"
+  local quiet="${2:-0}"
+  # Backup first (only if file exists)
+  local backup
+  backup="$(_lattice_project_md_backup "${target}")"
+  if [ -n "${backup}" ] && [ "${quiet}" != "1" ]; then
+    echo "[${PROG}] backed up to ${backup}" >&2
+  fi
+
+  local new_block
+  new_block="$(_lattice_project_md_block)"
+
+  if [ ! -f "${target}" ]; then
+    {
+      printf '%s\n' "${new_block}"
+    } > "${target}"
+    [ "${quiet}" != "1" ] && echo "[${PROG}] created ${target} with Lattice project block" >&2
+    return 0
+  fi
+
+  if grep -qF "${_LATTICE_PROJECT_MD_SENTINEL_START}" "${target}"; then
+    local tmp
+    tmp="$(mktemp)" || return 1
+    awk -v start="${_LATTICE_PROJECT_MD_SENTINEL_START}" \
+        -v end="${_LATTICE_PROJECT_MD_SENTINEL_END}" \
+        -v block="${new_block}" '
+      BEGIN { in_block=0; replaced=0 }
+      {
+        if (index($0, start) > 0 && !in_block) {
+          in_block=1
+          if (!replaced) { print block; replaced=1 }
+          next
+        }
+        if (in_block) {
+          if (index($0, end) > 0) { in_block=0 }
+          next
+        }
+        print
+      }
+    ' "${target}" > "${tmp}"
+    mv "${tmp}" "${target}"
+    [ "${quiet}" != "1" ] && echo "[${PROG}] refreshed Lattice project block in ${target}" >&2
+  else
+    # No sentinels — APPEND block at bottom (project CLAUDE.md usually has
+    # project-specific rules at top; auto-state block belongs after).
+    local tmp
+    tmp="$(mktemp)" || return 1
+    {
+      cat "${target}"
+      printf '\n%s\n' "${new_block}"
+    } > "${tmp}"
+    mv "${tmp}" "${target}"
+    [ "${quiet}" != "1" ] && echo "[${PROG}] appended Lattice project block to ${target}" >&2
+  fi
+  return 0
+}
+
+# Internal: called by lifecycle commands (close, decide, derive) for auto-sync.
+# Silent unless something fails. Respects LATTICE_NO_PROJECT_SYNC=1 opt-out.
+_lattice_project_sync_auto() {
+  case "${LATTICE_NO_PROJECT_SYNC:-0}" in
+    1|on|true|yes) return 0 ;;
+  esac
+  # Only sync if there's already a project CLAUDE.md (don't surprise-create on
+  # first close). Initial creation must be opt-in via `lattice project-init`.
+  [ -f CLAUDE.md ] || return 0
+  # Only sync if .lattice/ exists (sanity)
+  [ -d .lattice ] || return 0
+  _lattice_project_md_apply "CLAUDE.md" "1" >/dev/null 2>&1 || true
+}
+
+cmd_project_init() {
+  local force=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      -*)      die "project-init: unknown flag: $1" ;;
+      *)       die "project-init: extra arg: $1" ;;
+    esac
+  done
+  [ -d .lattice ] || die "project-init: no .lattice/ in cwd. Run 'lattice doctor' first to bootstrap."
+  if [ -f CLAUDE.md ] && grep -qF "${_LATTICE_PROJECT_MD_SENTINEL_START}" CLAUDE.md && [ "${force}" -ne 1 ]; then
+    echo "[${PROG}] project-init: CLAUDE.md already has Lattice project block. Use --force to refresh, or run 'lattice project-sync'."
+    return 0
+  fi
+  _lattice_project_md_apply "CLAUDE.md" "0"
+  echo "[${PROG}] project-init: done. Subsequent close/decide/derive will auto-refresh the block."
+  echo "[${PROG}] opt out of auto-sync: export LATTICE_NO_PROJECT_SYNC=1"
+}
+
+cmd_project_sync() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -*) die "project-sync: unknown flag: $1" ;;
+      *)  die "project-sync: extra arg: $1" ;;
+    esac
+  done
+  [ -d .lattice ] || die "project-sync: no .lattice/ in cwd."
+  [ -f CLAUDE.md ] || die "project-sync: no CLAUDE.md in cwd. Run 'lattice project-init' first to create one."
+  if ! grep -qF "${_LATTICE_PROJECT_MD_SENTINEL_START}" CLAUDE.md; then
+    die "project-sync: CLAUDE.md exists but has no Lattice project block. Run 'lattice project-init' first."
+  fi
+  _lattice_project_md_apply "CLAUDE.md" "0"
+}
+
+cmd_project_restore() {
+  if [ "$#" -eq 0 ]; then
+    die "project-restore: usage: lattice project-restore [--list | --latest | <YYYYMMDDTHHMMSSZ>]"
+  fi
+  if [ ! -d "${_LATTICE_PROJECT_MD_BACKUP_DIR}" ]; then
+    echo "[${PROG}] no project backups (no ${_LATTICE_PROJECT_MD_BACKUP_DIR}/ directory)"
+    return 0
+  fi
+  shopt -s nullglob
+  local backups=("${_LATTICE_PROJECT_MD_BACKUP_DIR}"/CLAUDE.md.*)
+  if [ "${#backups[@]}" -eq 0 ]; then
+    echo "[${PROG}] no project backups in ${_LATTICE_PROJECT_MD_BACKUP_DIR}/"
+    return 0
+  fi
+  local action="$1"
+  case "${action}" in
+    --list)
+      printf '%-22s  %s\n' "TIMESTAMP" "PATH"
+      local b ts
+      for b in "${backups[@]}"; do
+        ts="$(basename "${b}" | sed 's/^CLAUDE\.md\.//')"
+        printf '%-22s  %s\n' "${ts}" "${b}"
+      done
+      ;;
+    --latest)
+      local latest="${backups[-1]}"
+      _lattice_project_md_backup "CLAUDE.md" >/dev/null 2>&1
+      cp "${latest}" "CLAUDE.md" || die "project-restore: copy failed"
+      echo "[${PROG}] restored CLAUDE.md from ${latest}"
+      ;;
+    *)
+      local target="${_LATTICE_PROJECT_MD_BACKUP_DIR}/CLAUDE.md.${action}"
+      [ -f "${target}" ] || die "project-restore: no backup at ${target}"
+      _lattice_project_md_backup "CLAUDE.md" >/dev/null 2>&1
+      cp "${target}" "CLAUDE.md" || die "project-restore: copy failed"
+      echo "[${PROG}] restored CLAUDE.md from ${target}"
       ;;
   esac
 }
@@ -4470,6 +4820,9 @@ case "${sub}" in
   audit-env-contract) cmd_audit_env_contract "$@" ;;
   claude-md-tune)     cmd_claude_md_tune "$@" ;;
   claude-md-restore)  cmd_claude_md_restore "$@" ;;
+  project-init)       cmd_project_init "$@" ;;
+  project-sync)       cmd_project_sync "$@" ;;
+  project-restore)    cmd_project_restore "$@" ;;
   version|--version|-v) cmd_version ;;
   help|--help|-h)     usage ;;
   *)                  echo "[${PROG}] error: unknown subcommand: ${sub}" >&2; usage >&2; exit 2 ;;

@@ -2,6 +2,50 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.11] — 2026-05-15
+
+**Project CLAUDE.md integration.** v0.9.10 made every Claude Code session see Lattice exists (global block). v0.9.11 makes every Claude Code session also see what's IN this project's Lattice — findings by tier, top-3 by priority, active ADRs, telemetry status — auto-refreshed on every lifecycle change.
+
+**Strict v0.9.11 boundaries (locked, no scope creep):**
+- ✅ Project CLAUDE.md sentinel block (separate sentinels from v0.9.10 global — `LATTICE-PROJECT-BLOCK-START`)
+- ✅ Auto-sync on lifecycle events (`close`, `decide`; `invariants derive` writes are already file-driven)
+- ✅ Counts by tier + top-3 findings (by tier rank, then age)
+- ✅ Backup/restore (project-scoped backups at `.lattice/claude-md-backups/`)
+- ❌ Zero extra intelligence
+- ❌ No MEMORY.md logic yet (deferred to v0.9.12, evidence-gated by 5-7 day dogfood on jiive-backend)
+- ❌ No MCP yet (v1.0.0 milestone)
+
+### Added
+- **`lattice project-init`** — write a sentinel-managed Lattice state block into `<project>/CLAUDE.md`. Idempotent. Creates CLAUDE.md if missing; appends block to bottom if file exists (project rules typically live at top — Lattice state goes after, not above the human-authored content).
+- **`lattice project-sync`** — refresh the block on demand. Requires the block to already exist (init must come first).
+- **`lattice project-restore`** — list / latest / `<timestamp>` revert. Backups at `.lattice/claude-md-backups/CLAUDE.md.<UTC-timestamp>`.
+- **Auto-sync hooks** on `cmd_close` and `cmd_decide`. Quiet, best-effort, no-op when CLAUDE.md doesn't have the block (no surprise-creation).
+- **`LATTICE_NO_PROJECT_SYNC=1` env opt-out** for sessions that want manual control.
+
+### Block content (locked, deterministic — no AI)
+- Mode (classic / substrate / hybrid)
+- Telemetry status (ON / OFF)
+- Active dimensions (collected from open findings' `dimension:` fields)
+- Findings open total + breakdown by tier (CRITICAL/BLOCKER/HIGH/RISK/DRIFT/MEDIUM/WATCH/LOW)
+- Top-3 findings by tier rank, then sweep_date (oldest first within tier)
+- Active ADRs count + top-3 (id + title)
+
+### Tests
+- 127 → 134 lifecycle tests. New: project-init creates block (#123), preserves user content (#124), idempotent (#125), project-sync refreshes (#126), `close` auto-syncs (#127), `LATTICE_NO_PROJECT_SYNC=1` opt-out (#128), project-restore reverts (#129).
+
+### Bug fixes
+- **`yaml_field` newline omission caught during smoke test.** Helper uses `printf '%s'` (no trailing newline) to keep single-value reads clean. When the project block aggregated dimensions across multiple files with `yaml_field "${f}" "dimension" | sort -u`, values concatenated into one run-on token ("securityscaleaudit"). Fixed locally with an `echo` wrapper rather than changing `yaml_field`'s contract.
+
+### Dogfood plan (next 5-7 days)
+The boundaries above stay locked until real-usage data answers:
+1. Did sessions naturally use Lattice more?
+2. Did context retrieval improve?
+3. Did stale findings reduce?
+4. Did you actually miss cross-session memory (v0.9.12 trigger)?
+5. Did token noise become annoying?
+
+If 4 is yes from 3+ concrete examples → ship v0.9.12 (MEMORY.md). If 5 is yes → tune the block content down. Otherwise, hold and ship v1.0.0 MCP next.
+
 ## [0.9.10] — 2026-05-15
 
 **Global CLAUDE.md integration — discovery gap, structurally closed.** Every Claude Code session on this machine now immediately sees Lattice instructions at the top of `~/.claude/CLAUDE.md`. No manual onboarding step. No "session forgot Lattice exists" failure mode.

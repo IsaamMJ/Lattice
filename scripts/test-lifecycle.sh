@@ -1296,6 +1296,101 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 123: project-init creates CLAUDE.md with Lattice project block (v0.9.11)"
+new_fixture t123
+write_yaml .lattice/findings/open/HIGH-pi.yml pi HIGH security
+"${LATTICE}" project-init >/dev/null 2>&1
+if [ -f CLAUDE.md ] \
+   && grep -qF "LATTICE-PROJECT-BLOCK-START" CLAUDE.md \
+   && grep -qF "LATTICE-PROJECT-BLOCK-END" CLAUDE.md \
+   && grep -qE "Findings open \(1 total\)" CLAUDE.md \
+   && grep -qE "HIGH: 1" CLAUDE.md; then
+  ok "project-init created block with state snapshot"
+else
+  fail "project block missing or wrong: $(cat CLAUDE.md 2>/dev/null)"
+fi
+
+note "Test 124: project-init preserves existing user content (v0.9.11)"
+new_fixture t124
+write_yaml .lattice/findings/open/MEDIUM-pu.yml pu MEDIUM audit
+printf '# My project rules\n\nPersonal notes here.\n' > CLAUDE.md
+"${LATTICE}" project-init >/dev/null 2>&1
+if grep -qF "My project rules" CLAUDE.md \
+   && grep -qF "Personal notes here" CLAUDE.md \
+   && grep -qF "LATTICE-PROJECT-BLOCK-START" CLAUDE.md; then
+  ok "project-init appended block, preserved user content"
+else
+  fail "user content lost: $(cat CLAUDE.md)"
+fi
+
+note "Test 125: project-init is idempotent — re-run does not duplicate (v0.9.11)"
+new_fixture t125
+write_yaml .lattice/findings/open/LOW-pid.yml pid LOW audit
+"${LATTICE}" project-init >/dev/null 2>&1
+"${LATTICE}" project-init >/dev/null 2>&1
+"${LATTICE}" project-init >/dev/null 2>&1
+markers="$(grep -cF "LATTICE-PROJECT-BLOCK-START" CLAUDE.md)"
+if [ "${markers}" = "1" ]; then
+  ok "three init runs produced exactly one block (markers=${markers})"
+else
+  fail "block duplicated: marker count = ${markers}"
+fi
+
+note "Test 126: project-sync refreshes block on demand (v0.9.11)"
+new_fixture t126
+write_yaml .lattice/findings/open/HIGH-ps.yml ps HIGH security
+"${LATTICE}" project-init >/dev/null 2>&1
+# Add another finding, then sync — count should update
+write_yaml .lattice/findings/open/LOW-ps2.yml ps2 LOW audit
+"${LATTICE}" project-sync >/dev/null 2>&1
+if grep -qE "Findings open \(2 total\)" CLAUDE.md \
+   && grep -qE "HIGH: 1" CLAUDE.md \
+   && grep -qE "LOW: 1" CLAUDE.md; then
+  ok "project-sync refreshed counts after new finding"
+else
+  fail "sync did not refresh: $(grep 'Findings open' CLAUDE.md)"
+fi
+
+note "Test 127: close triggers project auto-sync when CLAUDE.md has the block (v0.9.11)"
+new_fixture t127
+write_yaml .lattice/findings/open/HIGH-as.yml as HIGH security
+"${LATTICE}" project-init >/dev/null 2>&1
+# Snapshot pre-close
+pre="$(grep 'Findings open' CLAUDE.md)"
+"${LATTICE}" close HIGH-as --reason fixed --commit abcd123 >/dev/null 2>&1
+post="$(grep 'Findings open' CLAUDE.md)"
+if echo "${pre}" | grep -q '1 total' && echo "${post}" | grep -q '0 total'; then
+  ok "lattice close auto-refreshed project block (1 -> 0)"
+else
+  fail "auto-sync did not fire — pre=${pre}; post=${post}"
+fi
+
+note "Test 128: LATTICE_NO_PROJECT_SYNC=1 disables auto-sync (v0.9.11)"
+new_fixture t128
+write_yaml .lattice/findings/open/HIGH-ns.yml ns HIGH security
+"${LATTICE}" project-init >/dev/null 2>&1
+pre="$(grep 'Findings open' CLAUDE.md)"
+LATTICE_NO_PROJECT_SYNC=1 "${LATTICE}" close HIGH-ns --reason fixed --commit abcd123 >/dev/null 2>&1
+post="$(grep 'Findings open' CLAUDE.md)"
+if [ "${pre}" = "${post}" ]; then
+  ok "LATTICE_NO_PROJECT_SYNC=1 suppressed auto-sync"
+else
+  fail "opt-out did not work — pre=${pre}; post=${post}"
+fi
+
+note "Test 129: project-restore --latest reverts to pre-init state (v0.9.11)"
+new_fixture t129
+write_yaml .lattice/findings/open/HIGH-pr.yml pr HIGH security
+printf 'ORIGINAL_PROJECT_CONTENT\n' > CLAUDE.md
+"${LATTICE}" project-init >/dev/null 2>&1
+"${LATTICE}" project-restore --latest >/dev/null 2>&1
+if grep -qF "ORIGINAL_PROJECT_CONTENT" CLAUDE.md \
+   && ! grep -qF "LATTICE-PROJECT-BLOCK-START" CLAUDE.md; then
+  ok "project-restore --latest reverted to pre-init state"
+else
+  fail "restore did not revert: $(head -3 CLAUDE.md)"
+fi
+
 note "Test 117: claude-md-tune --apply creates CLAUDE.md with Lattice block at top (v0.9.10)"
 new_fixture t117
 export HOME="${ROOT_TMP}/t117-home"
