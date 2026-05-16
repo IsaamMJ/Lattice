@@ -7,7 +7,7 @@ set -euo pipefail
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
 COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix")
-SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh" "post-commit-resolve-pending.sh")
+SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh" "post-commit-resolve-pending.sh" "lattice-statusline.mjs")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
 DEST="${HOME}/.claude/commands"
@@ -63,7 +63,7 @@ echo ""
 echo "[lattice] restart Claude Code to load commands, then try:"
 echo "[lattice]   /audit-sweep ."
 echo ""
-echo "[lattice] CLI dispatcher (v0.9.13) installed at:"
+echo "[lattice] CLI dispatcher (v0.9.14) installed at:"
 echo "[lattice]   ${SCRIPT_DEST}/lattice"
 echo ""
 
@@ -168,16 +168,26 @@ if [ -t 0 ] && [ -t 2 ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev
 fi
 
 echo ""
-echo "[lattice] OPTIONAL — statusline (v0.9.12)"
-echo "[lattice]   To show Lattice findings, friction, context %, 5h/weekly limits"
-echo "[lattice]   in your Claude Code status bar, add this to ~/.claude/settings.json:"
+echo "[lattice] OPTIONAL — statusline (v0.9.14 — Node.js, replaces deprecated bash version)"
+echo "[lattice]   Shows Lattice findings, friction, context %, 5h/weekly limits in the"
+echo "[lattice]   Claude Code status bar. Cold start ~85ms on Windows; no subprocesses."
+echo "[lattice]"
+echo "[lattice]   Add this to ~/.claude/settings.json (adjust Node path if needed):"
 echo "[lattice]"
 echo "[lattice]     \"statusLine\": {"
 echo "[lattice]       \"type\": \"command\","
-echo "[lattice]       \"command\": \"${SCRIPT_DEST}/lattice statusline\""
+echo "[lattice]       \"command\": \"node ${SCRIPT_DEST}/lattice-statusline.mjs\""
 echo "[lattice]     }"
 echo "[lattice]"
-echo "[lattice]   Disable color: export LATTICE_STATUSLINE_NOCOLOR=1"
+echo "[lattice]   Windows users: use full Node path if 'node' isn't on PATH, e.g."
+echo "[lattice]     \"\\\"C:/Program Files/nodejs/node\\\" \\\"${SCRIPT_DEST}/lattice-statusline.mjs\\\"\""
+echo "[lattice]"
+echo "[lattice]   Opt-outs:  LATTICE_STATUSLINE_NOCOLOR=1   (strip ANSI)"
+echo "[lattice]              LATTICE_STATUSLINE_DISABLE=1   (instant no-op kill switch)"
+echo "[lattice]"
+echo "[lattice]   The legacy 'lattice statusline' bash command is a no-op stub kept for"
+echo "[lattice]   safety — do NOT wire that one; it was the cause of the orphan-bash"
+echo "[lattice]   incident on Windows + Git Bash (2026-05-16)."
 echo ""
 echo "[lattice] docs: ${REPO}#readme"
 echo ""

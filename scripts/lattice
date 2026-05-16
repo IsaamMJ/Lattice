@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.13)
+# lattice — unified CLI dispatcher (v0.9.14)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -287,6 +287,15 @@ maybe_update_check() {
   local command="$1"
   case "${command}" in
     update|config|version|--version|-v|help|--help|-h) return 0 ;;
+    # v0.9.15 ROOT CAUSE FIX: tick-invoked commands MUST NOT hit the network.
+    # Claude Code calls `statusline` every ~2 seconds; each tick was firing
+    # `latest_remote_version` (curl to GitHub) on the hot path. On Windows
+    # + Git Bash where fork is slow, the curl blocked long enough that the
+    # next tick spawned before the previous finished → 12+ orphan bash.exe
+    # processes, 29% CPU, 77% RAM, "infinite cmd opening" pile-up.
+    # `sessions` and `review` are also internal-data subcommands that have
+    # no business doing a network check.
+    statusline|sessions|review) return 0 ;;
   esac
   [ -f ".lattice/config.yml" ] || return 0
   local mode interval now last cache current latest
@@ -493,9 +502,13 @@ _write_mat_entry() {
   case "${LATTICE_MAT:-1}" in
     0|off|false|no) return 0 ;;
   esac
-  # No-op for help/version/sessions itself to avoid infinite chatter
+  # No-op for help/version/sessions/statusline/review to avoid infinite chatter.
+  # v0.9.15: statusline + review added — these are tick/read-only commands
+  # that have no business writing MAT events. Without this skip, every
+  # statusline tick (~every 2s) was appending a JSONL row, and growing the
+  # session log made subsequent ticks read more data → exponential work.
   case "${subcmd}" in
-    help|--help|-h|version|--version|-v|sessions|unknown) return 0 ;;
+    help|--help|-h|version|--version|-v|sessions|statusline|review|unknown) return 0 ;;
   esac
   # Must be in a directory where we can write .lattice/ — silently bail otherwise
   [ -w . ] 2>/dev/null || return 0
@@ -4148,139 +4161,25 @@ cmd_claude_md_restore() {
 }
 
 # ---------------------------------------------------------------------------
-# statusline (v0.9.12) — Claude Code statusLine entry point.
+# statusline (v0.9.14) — DEPRECATED no-op stub.
 #
-# Claude Code's `statusLine` setting in ~/.claude/settings.json points at a
-# command; the runtime calls it on each tick, feeds it a JSON object on stdin
-# describing the current session (model, context window %, rate limits, cwd),
-# and renders whatever the command writes to stdout in the status bar.
-#
-# Lattice's statusline merges:
-#   - Native Claude Code fields from stdin (model, ctx %, 5h %, 7d %)
-#   - Git branch (from cwd)
-#   - Lattice findings counts (CRITICAL/HIGH from .lattice/findings/open/)
-#   - Lattice friction count (via cmd_review --quiet)
-#
-# Color: neon-ish yellow (xterm-256 color 226 — pure yellow that's bright
-# without being washed out on most terminals). Opt-out: LATTICE_STATUSLINE_NOCOLOR=1.
-#
-# Output is intentionally one line, ~80-100 chars max. Designed for terminals
-# that get cut off, not for full-width retina monitors.
+# Statusline is now served by scripts/lattice-statusline.mjs (Node.js).
+# This bash entry point exists ONLY to fail-closed if any old settings.json
+# config still points at `lattice statusline`. See CHANGELOG v0.9.14 for the
+# orphan-bash.exe incident that motivated the rewrite.
 # ---------------------------------------------------------------------------
 cmd_statusline() {
-  # v0.9.13 hardening: statusline is invoked on a tick by Claude Code. It
-  # must NEVER propagate errors — failure mode is "show what you have, exit
-  # 0." Disable errexit + pipefail for the duration; we don't restore because
-  # the dispatcher exits immediately after this returns anyway (no other
-  # commands run that would care). Always return 0 at the bottom.
-  set +e
-  set +o pipefail
-
-  local nocolor="${LATTICE_STATUSLINE_NOCOLOR:-0}"
-  local yellow="" reset=""
-  if [ "${nocolor}" != "1" ] && [ "${nocolor}" != "true" ]; then
-    yellow=$'\033[38;5;226m'
-    reset=$'\033[0m'
-  fi
-
-  # --- Read Claude Code stdin JSON (if present) -------------------------
-  # No jq dependency — we extract a handful of fixed-shape fields with sed.
-  # If stdin is a TTY (running interactively for testing), there's no JSON,
-  # which is fine — we'll just skip those segments.
-  local stdin_json=""
-  if [ ! -t 0 ]; then
-    stdin_json="$(cat 2>/dev/null || true)"
-  fi
-
-  local model_name="" ctx_pct="" fiveh_pct="" weekly_pct="" stdin_cwd=""
-  if [ -n "${stdin_json}" ]; then
-    model_name="$(printf '%s' "${stdin_json}"   | sed -nE 's/.*"display_name":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
-    ctx_pct="$(printf '%s' "${stdin_json}"      | sed -nE 's/.*"context_window"[^}]*"used_percentage":[[:space:]]*([0-9]+\.?[0-9]*).*/\1/p' | head -n1)"
-    fiveh_pct="$(printf '%s' "${stdin_json}"    | sed -nE 's/.*"five_hour"[^}]*"used_percentage":[[:space:]]*([0-9]+\.?[0-9]*).*/\1/p' | head -n1)"
-    weekly_pct="$(printf '%s' "${stdin_json}"   | sed -nE 's/.*"seven_day"[^}]*"used_percentage":[[:space:]]*([0-9]+\.?[0-9]*).*/\1/p' | head -n1)"
-    stdin_cwd="$(printf '%s' "${stdin_json}"    | sed -nE 's/.*"cwd":[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
-  fi
-
-  # If stdin gave us a cwd, use it (the script may be running from elsewhere).
-  if [ -n "${stdin_cwd}" ] && [ -d "${stdin_cwd}" ]; then
-    cd "${stdin_cwd}" 2>/dev/null || true
-  fi
-
-  # --- Git branch (best-effort, silent on failure) ----------------------
-  local branch=""
-  if git rev-parse --abbrev-ref HEAD >/dev/null 2>&1; then
-    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  fi
-
-  # --- Lattice findings counts ------------------------------------------
-  local crit_count=0 high_count=0
-  if [ -d .lattice/findings/open ]; then
-    shopt -s nullglob
-    local f tier
-    for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
-      [ -f "${f}" ] || continue
-      tier="$(yaml_field "${f}" "tier")"
-      case "${tier}" in
-        CRITICAL) crit_count=$((crit_count + 1)) ;;
-        HIGH)     high_count=$((high_count + 1)) ;;
-      esac
-    done
-  fi
-
-  # --- Friction count (calls cmd_review --quiet — already deterministic) -
-  local friction=""
-  if [ -d .lattice/sessions ]; then
-    friction="$(cmd_review --quiet 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  fi
-  # Don't display "0 friction" — keeps the line short when nothing's pending
-  [ "${friction}" = "0" ] && friction=""
-
-  # --- Lattice mode (only show if substrate/hybrid, classic is default) --
-  local mode mode_seg=""
-  mode="$(cmd_mode 2>/dev/null || echo classic)"
-  case "${mode}" in
-    substrate|hybrid) mode_seg="${mode}" ;;
-  esac
-
-  # --- Assemble segments ------------------------------------------------
-  local segs=()
-  [ -n "${model_name}" ]  && segs+=("${model_name}")
-  [ -n "${ctx_pct}" ]     && segs+=("ctx ${ctx_pct%.*}%")
-  [ -n "${fiveh_pct}" ]   && segs+=("5h ${fiveh_pct%.*}%")
-  [ -n "${weekly_pct}" ]  && segs+=("wk ${weekly_pct%.*}%")
-  [ -n "${branch}" ]      && segs+=("${branch}")
-  if [ "${crit_count}" -gt 0 ] || [ "${high_count}" -gt 0 ]; then
-    local find_seg=""
-    [ "${crit_count}" -gt 0 ] && find_seg="🔴${crit_count}"
-    if [ "${high_count}" -gt 0 ]; then
-      [ -n "${find_seg}" ] && find_seg="${find_seg} "
-      find_seg="${find_seg}⚠️${high_count}"
-    fi
-    segs+=("${find_seg}")
-  fi
-  [ -n "${friction}" ]    && segs+=("${friction} friction")
-  [ -n "${mode_seg}" ]    && segs+=("${mode_seg}")
-
-  # --- Emit ----------------------------------------------------------
-  local line=""
-  local i
-  for ((i=0; i<${#segs[@]}; i++)); do
-    if [ "${i}" -eq 0 ]; then
-      line="${segs[${i}]}"
-    else
-      line="${line} · ${segs[${i}]}"
-    fi
-  done
-  # Empty line if absolutely nothing to show — just a Lattice marker so the
-  # user knows the script is wired (and not silently broken).
-  [ -z "${line}" ] && line="lattice"
-
-  printf '%s%s%s\n' "${yellow}" "${line}" "${reset}"
-
-  # v0.9.13: always return 0 — statusline failure must never bubble up to
-  # Claude Code or the EXIT telemetry trap. Shell options were disabled at
-  # entry; the dispatcher exits immediately after this returns, so leaving
-  # them off is fine.
+  # v0.9.13 (Windows orphan-bash incident, 2026-05-16): the bash statusline
+  # caused 12+ orphan bash.exe processes, 29% CPU, 77% RAM, 3 forced restarts
+  # on the developer machine. Even with lock + cache + skip-list + non-blocking
+  # stdin, bash startup is 1-3s on Windows + Git Bash; with Claude Code ticking
+  # every ~2s, the math fundamentally does not work.
+  #
+  # Replaced by a Node.js statusline at scripts/lattice-statusline.mjs
+  # (~85ms cold start, pure fs reads, zero subprocesses in hot path).
+  #
+  # This bash entry point is kept as a fast-exit shim so any wired-up
+  # invocations from old settings.json blocks fail closed (no work, no orphans).
   return 0
 }
 
@@ -4919,7 +4818,11 @@ trap _on_telemetry_exit EXIT
 _maybe_show_telemetry_disclosure
 maybe_update_check "${sub}" || true
 case "${sub}" in
-  help|--help|-h|version|--version|-v|doctor) ;;
+  # v0.9.15: statusline + sessions + review excluded from usage logging.
+  # These are tick-invoked or read-only commands; logging them on every tick
+  # was a meaningful contributor to the orphan bash.exe pile-up (each log
+  # event appended to global.jsonl, which on Windows + Git Bash adds latency).
+  help|--help|-h|version|--version|-v|doctor|statusline|sessions|review) ;;
   *) log_usage_event "${sub}" "$@" || true ;;
 esac
 case "${sub}" in

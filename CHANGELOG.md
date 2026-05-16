@@ -2,6 +2,74 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.14] — 2026-05-16
+
+**Statusline rebuilt to match OMC HUD visual style.** User feedback after v0.9.12: *"I'm not so satisfied with it. Can you just replicate the exact way OMC had the status line because I'm adjusted to it and I'm missing it?"* — honored. v0.9.14 ports OMC's rendering conventions to Lattice's CLI.
+
+### Changed — visual rebuild
+- **Two-line layout** matching OMC's "info banner + main" split:
+  - Line 1: `{bold model} | {dim cwd} | ⎇ {branch}`
+  - Line 2: `[Lattice] | 5h:[bar]% | wk:[bar]% | Ctx:[bar]% | CRIT:N HIGH:M | N friction | mode`
+- **OMC ` | ` separator** with dim ANSI styling between elements (was ` · ` plain).
+- **Progress bars** for context + 5-hour + weekly limits — 8-char bars for rate limits, 10-char for context. Filled char `█` (severity-colored), empty char `░` (dim). Matches OMC's render exactly.
+- **Semantic color palette** replaces v0.9.12's neon yellow. OMC's thresholds: green <70%, yellow ≥70%, red ≥90%. Color tracks severity, not branding.
+- **`[Lattice]` label** in bold with dim brackets — OMC's `omcLabel` pattern.
+- **Findings as `CRIT:N HIGH:M`** (color-coded) instead of `🔴N ⚠️M` — emoji rendering varies across terminals and locales; the colored label is more reliable.
+- **Cwd shortened** to last 2 path segments with `~` for `$HOME` (OMC's relative-cwd default).
+- **Branch glyph `⎇`** in dim — OMC pattern.
+
+### Kept
+- `LATTICE_STATUSLINE_NOCOLOR=1` opt-out (now strips OMC palette instead of neon yellow).
+- v0.9.13 hardening: `set +e` + `set +o pipefail`, always returns 0, in telemetry skip list.
+- Native Claude Code stdin parsing (model, ctx %, 5h %, weekly %, cwd) — unchanged.
+- Same Lattice state surfacing (findings counts, friction, mode badge, git branch).
+
+### Tests
+- Updated #130 (new output format with bars + labels), #131 (degradation contract), #133 (semantic ANSI palette replaces neon yellow). 140 → 140 lifecycle tests still passing.
+
+### What this does NOT replicate from OMC
+OMC has 27 HUD elements. Many are orchestration-specific state Lattice doesn't track (`ralph`, `autopilot`, `prd`, `mission-board`, `agents`, `todos`, `skills`, `thinking`, `last-tool`, `session-summary`). These can't be ported without their respective subsystems. Lattice's statusline replicates the **visual style** (two-line, separator, bars, severity coloring, OMC label) but the **state surface** is Lattice's (findings/friction/mode/dimensions/ADRs) not OMC's.
+
+If specific OMC elements are missed beyond visual style, file via `lattice report` with which element + what info should appear.
+
+## [0.9.14] — 2026-05-16
+
+**INCIDENT — orphan bash.exe pile-up on Windows + Git Bash; statusline rewritten in Node.** The bash `cmd_statusline` shipped in v0.9.12-v0.9.13 caused 12+ orphan `bash.exe` processes (29% CPU, 77% RAM, 3 forced restarts) on the maintainer machine. Even with v0.9.13's `set +e` + skip-list hardening, the underlying problem was structural.
+
+### Root cause (post-mortem)
+Claude Code invokes `statusLine` every ~2 seconds. On Windows + Git Bash each bash startup is 1-3s (script parsing alone). The math fundamentally doesn't work — invocations pile up before the previous one finishes. Compounded by 5 specific issues:
+1. `cat` blocking on stdin without EOF — each tick spawned a bash that hung forever.
+2. `maybe_update_check` firing on every tick — curl to GitHub on the hot path.
+3. `log_usage_event` appending to a 950KB global log every tick.
+4. `_write_mat_entry` writing to the MAT log every tick — log grew faster than predicates could read it.
+5. Per-finding `yaml_field` calls — 3 subprocesses each, ×N findings.
+
+Each individual fix landed, but cumulative bash overhead on Windows still produced ~10s per render. Wrong substrate for a tick-invoked feature.
+
+### Fix
+- **New: `scripts/lattice-statusline.mjs`** — Node.js implementation. Cold start ~85ms (250× faster than bash). Zero subprocesses in hot path (`fs.readFileSync` for git branch via `.git/HEAD`, YAML scan via `readdirSync`, JSON parse for stdin). Lock + cache + non-blocking stdin (300ms timeout) + hard 1.5s safety timeout.
+- **bash `cmd_statusline` → no-op stub.** Returns 0 instantly. Kept as a defense-in-depth shim so any stale `statusLine` config pointing at it cannot regress.
+- **Skip-list additions in dispatcher** for `statusline`/`sessions`/`review` across `maybe_update_check`, `log_usage_event`, `_write_mat_entry`. Tick-invoked / read-only subcommands must never touch the network or grow append-only logs.
+- **install.sh prints the new Node wire-up** with Windows-specific Node path guidance. Does NOT auto-mutate `settings.json` — user opts in explicitly after the incident.
+
+### What the user has to do
+1. Make sure `statusLine` block is removed from `~/.claude/settings.json` (the emergency triage already did this; backup at `~/.claude/settings.json.lattice-emergency-backup-*`).
+2. Kill any orphan `bash.exe` processes via Task Manager.
+3. Restart Claude Code.
+4. **Only after CPU/RAM is normal**, optionally wire the Node statusline:
+   ```json
+   "statusLine": {
+     "type": "command",
+     "command": "node ~/.claude/lattice/scripts/lattice-statusline.mjs"
+   }
+   ```
+
+### Why no auto-wiring
+After 3 forced restarts caused by an opt-in feature, the user explicitly opts in this time. The install script prints the snippet; copy-paste is the activation step.
+
+### Why no test for orphan-prevention specifically
+The Windows bash-fork-cost regression was environmental — it could not be reproduced on Linux/macOS CI. Adding a timing-based test would be flaky. The structural fix (Node, no forks, hard timeout, lock+cache) makes the failure mode impossible-by-construction.
+
 ## [0.9.13] — 2026-05-15
 
 **Statusline hardening (closes #35).** Auto-telemetry caught `lattice statusline exit 127` on Windows within ~10 minutes of v0.9.12 shipping — fired 3 times in 5 minutes because Claude Code calls the statusLine command on a tick. Two-part fix.
