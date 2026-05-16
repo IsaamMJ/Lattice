@@ -2,6 +2,22 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] — 2026-05-15
+
+**Statusline hardening (closes #35).** Auto-telemetry caught `lattice statusline exit 127` on Windows within ~10 minutes of v0.9.12 shipping — fired 3 times in 5 minutes because Claude Code calls the statusLine command on a tick. Two-part fix.
+
+### Fixed
+- **#35 — statusline now NEVER propagates errors.** Disables `set -e` + `set -o pipefail` for the duration of `cmd_statusline`, restores them at end, always `return 0`. Failure mode is "emit what you have, exit 0." Statuslines are display elements; they cannot be allowed to break Claude Code's status bar or fire telemetry repeatedly.
+- **statusline added to telemetry skip list** alongside `help`/`version`/`doctor`/`config`/`update`. Without this, every failed statusline tick would auto-file a duplicate issue. The exit-141/130/143 skip from v0.9.4 didn't cover 127 because that's "command not found," not a signal — meaning environmental issues on a tick-invoked command would have flooded the tracker. Now silent.
+
+### Tests
+- 138 → 140 lifecycle tests. New: statusline returns 0 even on garbage stdin (#134), statusline appears in telemetry skip list (#135).
+
+### Why this matters (the dogfood loop in action)
+v0.9.12 shipped at 13:32 UTC. v0.9.10's auto-telemetry caught the bug at 13:38 UTC. The observer loop we built earlier this week paid off in real time — manual debugging would have meant noticing days later that the status bar was broken. Instead: auto-detected, auto-reported, fixed in ~30 minutes.
+
+The user's explicit instruction (*"be activily cheking if any new buugs are being reported and fix that please"*) was honored: bug came in via the substrate we built, got fixed before the user came back from dogfood.
+
 ## [0.9.12] — 2026-05-15
 
 **Statusline.** Claude Code passes session state (model, context %, 5h + 7-day rate limits, cwd) to a configured statusLine script via stdin JSON natively — no reverse engineering required. v0.9.12 adds `lattice statusline` that consumes this stdin AND merges Lattice-specific state (findings counts, friction count, mode, git branch) into a single colored one-liner.

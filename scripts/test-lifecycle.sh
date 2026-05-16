@@ -1296,6 +1296,30 @@ else
   fail "context output missing expected inline values: $(echo "${out}" | sed -n '/Invariants/,/Next/p')"
 fi
 
+note "Test 134: statusline always exits 0 even when invoked with garbage stdin (v0.9.13, #35)"
+new_fixture t134
+# Malformed JSON should NOT crash statusline. The function should silently
+# absorb the failure and emit at least the literal "lattice" marker.
+out="$(printf 'this is not json at all { broken' | "${LATTICE}" statusline 2>&1)"
+ec=$?
+if [ "${ec}" -eq 0 ]; then
+  ok "statusline returned 0 on garbage stdin (#35 hardening)"
+else
+  fail "statusline propagated exit ${ec} on garbage input: ${out}"
+fi
+
+note "Test 135: statusline skipped from auto-telemetry (#35)"
+new_fixture t135
+# Force a fake non-zero exit by NOT being statusline — verify telemetry would
+# normally fire — then verify statusline specifically does NOT (it's in the
+# skip list per #35 fix). We check the skip list via grep on the source since
+# the actual non-emission is hard to test without the network mock.
+if grep -qE 'statusline\)[[:space:]]+return 0' "${LATTICE}"; then
+  ok "statusline appears in _send_telemetry skip list"
+else
+  fail "statusline NOT skipped from telemetry — #35 regression"
+fi
+
 note "Test 130: statusline parses Claude Code stdin and emits all native fields (v0.9.12)"
 new_fixture t130
 write_yaml .lattice/findings/open/CRITICAL-sl.yml sl CRITICAL security

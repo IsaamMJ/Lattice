@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lattice — unified CLI dispatcher (v0.9.12)
+# lattice — unified CLI dispatcher (v0.9.13)
 #
 # Version banner above is informational only — runtime version is read from
 # .claude-plugin/plugin.json (or ~/.claude/lattice/VERSION when installed
@@ -401,6 +401,12 @@ _send_telemetry() {
   # network / deployment, not Lattice bugs.
   case "${command}" in
     help|--help|-h|version|--version|-v|doctor|config|update) return 0 ;;
+    # v0.9.13: statusline is invoked on a tick by Claude Code. Any failure
+    # there is environmental (missing git on subprocess PATH, locale issues,
+    # etc.) — NOT a Lattice bug worth telemetering. Without this skip, every
+    # failed statusline tick would auto-file an issue. Caught via #35 on
+    # Windows where exit 127 hit 3+ times in 5 minutes.
+    statusline) return 0 ;;
   esac
 
   local version os timestamp fingerprint user_hash payload
@@ -4162,6 +4168,14 @@ cmd_claude_md_restore() {
 # that get cut off, not for full-width retina monitors.
 # ---------------------------------------------------------------------------
 cmd_statusline() {
+  # v0.9.13 hardening: statusline is invoked on a tick by Claude Code. It
+  # must NEVER propagate errors — failure mode is "show what you have, exit
+  # 0." Disable errexit + pipefail for the duration; we don't restore because
+  # the dispatcher exits immediately after this returns anyway (no other
+  # commands run that would care). Always return 0 at the bottom.
+  set +e
+  set +o pipefail
+
   local nocolor="${LATTICE_STATUSLINE_NOCOLOR:-0}"
   local yellow="" reset=""
   if [ "${nocolor}" != "1" ] && [ "${nocolor}" != "true" ]; then
@@ -4262,6 +4276,12 @@ cmd_statusline() {
   [ -z "${line}" ] && line="lattice"
 
   printf '%s%s%s\n' "${yellow}" "${line}" "${reset}"
+
+  # v0.9.13: always return 0 — statusline failure must never bubble up to
+  # Claude Code or the EXIT telemetry trap. Shell options were disabled at
+  # entry; the dispatcher exits immediately after this returns, so leaving
+  # them off is fine.
+  return 0
 }
 
 # ---------------------------------------------------------------------------
