@@ -2,6 +2,42 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-05-18
+
+**MCP server.** Lattice findings now flow through Model Context Protocol — readable as native MCP context by Claude Code, Cursor, Codex, and every other MCP-aware client. Architecturally end-runs the "did the session remember Lattice exists?" failure mode by exposing findings as a typed tool surface the model can discover and call. Reference architecture: `upstash/context7`.
+
+### Added
+- **`mcp/` package** — `lattice-mcp` MCP server, single-file TypeScript (~250 LOC), built to `mcp/dist/index.js`. Stdio transport only (no HTTP — Lattice is per-project, no public hosting needed).
+- **4 tools** (mirror Context7's discipline — surface ≤ 4 carefully chosen tools, not a kitchen sink):
+  - `get_context` — same payload as the SessionStart hook; on-demand for mid-session use
+  - `list_findings` — filter by tier / module / dimension / status
+  - `show_finding` — full YAML for one finding (slug, filename, module/rule, or substring)
+  - `close_finding` — DESTRUCTIVE; explicit `id` + `reason` required; `fixed` requires `commit` SHA or `pending: true`
+- **`lattice mcp` CLI subcommand** with four operations:
+  - `setup [--apply] [--yes] [--scope user|project]` — wires `mcpServers.lattice` into `~/.claude.json` (user) or `.mcp.json` (project). Dry-run default, backup before write, idempotent (same shape as `wire-hooks`).
+  - `serve` — exec the built MCP server on stdio (for direct testing)
+  - `build` — rebuild `mcp/dist/` via tsc
+  - `status` — show whether built + wired
+
+### Design choices
+- **Shell-out to existing bash CLI** rather than reimplementing YAML parsing in TypeScript. The MCP server forks `lattice list` / `lattice show` / `lattice close` per tool call. Trade-off: ~100ms per call (acceptable for MCP, which isn't a hot path) vs. zero behavior drift between MCP and CLI by construction. If the bash CLI changes its filter semantics, MCP picks it up free.
+- **`LATTICE_BIN` env var** embedded in the MCP server entry so it can find the bash CLI even when `lattice` isn't on PATH for the spawned subprocess (Windows + GUI Claude Code clients).
+- **Project resolution order:** `LATTICE_PROJECT_DIR` env → `CLAUDE_PROJECT_DIR` env (set by Claude Code) → `process.cwd()`. Same precedence the SessionStart hook uses.
+- **Startup probe** — the server runs `lattice version` once at startup and exits with a clear error if the bash CLI isn't reachable. Fail loud, not per-tool-call.
+- **Annotations** — `readOnlyHint: true` on get/list/show; `destructiveHint: true` on close. Clients can use these to gate confirmation.
+- **No OAuth / HTTP transport / community catalog** — patterns from Context7 we explicitly did NOT borrow. Lattice is local-first single-host.
+
+### Migration notes
+- Existing `wire-hooks` (SessionStart + statusLine) is unchanged. MCP is additive — running `lattice mcp setup --apply` doesn't touch hook entries; running `lattice wire-hooks --apply` doesn't touch `mcpServers`.
+- After `lattice mcp setup --apply`, restart Claude Code to pick up the new server.
+- The MCP server runs as a per-session stdio subprocess spawned by Claude Code; no daemon, no port, no auth surface.
+
+### Verified
+- `npm install && npx tsc` clean in `mcp/`
+- `tools/list` returns all 4 tools with correct schemas + annotations
+- `lattice mcp status` reports `built: yes`, correct dist path
+- `lattice mcp setup` dry-run preserves the existing 200+ keys of the user's `~/.claude.json` and only adds `mcpServers.lattice`
+
 ## [0.9.18] — 2026-05-18
 
 **Install-UX coherent slice.** Two friction sources gone: (a) `lattice` CLI not reachable after Windows install, (b) settings.json hook merge done by hand. Plus dead-feature pruning: four 0-invocation subcommands deleted.

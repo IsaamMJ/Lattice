@@ -83,6 +83,8 @@ Usage:
   lattice verify <id> [--run | --rerun-grep [--close-clean]]
   lattice ci-check [--tier <TIERS>]
   lattice wire-hooks [--apply] [--yes] [--session-start] [--statusline]
+  lattice mcp setup [--apply] [--yes] [--scope user|project]
+  lattice mcp serve | mcp build | mcp status
   lattice usage [--since <days>] [--unused <days>] [--json]
   lattice update --check|--self|--enable-auto|--disable-auto
   lattice config init|show|telemetry on|off|show
@@ -111,6 +113,8 @@ Subcommands:
   ci-check    exit 1 if any non-deferred CRITICAL/BLOCKER finding is open
   wire-hooks  merge SessionStart + statusLine into ~/.claude/settings.json
               (dry-run by default; --apply writes with backup; idempotent)
+  mcp         manage the Lattice MCP server: setup | serve | build | status
+              (v1.0.0; wires mcpServers.lattice into ~/.claude.json)
   usage       summarize local command usage from .lattice/usage/events.jsonl
   update      check for or apply Lattice updates using .lattice/config.yml
   config      create a project-local .lattice/config.yml
@@ -3271,7 +3275,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check wire-hooks usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check wire-hooks mcp usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4712,6 +4716,232 @@ NODEJS_APPLY
 }
 
 # ---------------------------------------------------------------------------
+# mcp — manage the Lattice MCP server (v1.0.0).
+# Subcommands:
+#   lattice mcp setup [--apply] [--yes] [--scope user|project]
+#   lattice mcp serve   # convenience: exec the built MCP server on stdio
+#   lattice mcp build   # rebuild dist/ in mcp/ via tsc
+#   lattice mcp status  # show whether the server is wired and reachable
+#
+# Wires `mcpServers.lattice` into ~/.claude.json (user scope) or .mcp.json
+# (project scope). Same backup + dry-run + idempotent discipline as
+# wire-hooks. The entry uses node + the absolute path to dist/index.js;
+# LATTICE_BIN is passed through env so the server can find the bash CLI on
+# machines where lattice isn't on PATH yet.
+# ---------------------------------------------------------------------------
+cmd_mcp() {
+  local sub="${1:-}"; shift || true
+  case "${sub}" in
+    setup)  _mcp_setup "$@" ;;
+    serve)  _mcp_serve "$@" ;;
+    build)  _mcp_build "$@" ;;
+    status) _mcp_status "$@" ;;
+    ""|--help|-h)
+      cat <<'MCPHELP'
+lattice mcp — Lattice MCP server (v1.0.0)
+
+  setup [--apply] [--yes] [--scope user|project]
+                  Wire `mcpServers.lattice` into ~/.claude.json (user) or
+                  .mcp.json (project). Dry-run by default; --apply writes
+                  after y/N confirm. Always backs up before mutation.
+                  Idempotent.
+
+  serve           Exec the built MCP server on stdio (for direct testing).
+                  Reads LATTICE_BIN if set, otherwise resolves `lattice`
+                  via PATH.
+
+  build           Rebuild dist/index.js in mcp/ via tsc. Requires Node 18+.
+
+  status          Show whether the server is wired in ~/.claude.json and
+                  whether dist/index.js exists.
+MCPHELP
+      return 0 ;;
+    *) die "mcp: unknown subcommand: ${sub} (try: setup | serve | build | status)" ;;
+  esac
+}
+
+# Resolve the absolute path to the built MCP server. The path is relative to
+# this script's location (works in both the source repo and the installed
+# location ~/.claude/lattice/scripts/, provided the mcp/ tree is copied
+# alongside scripts/ at install time).
+_mcp_dist_path() {
+  local d
+  d="$(cd "${SELF_DIR}/../mcp" 2>/dev/null && pwd)" || return 1
+  printf '%s/dist/index.js' "${d}"
+}
+
+_mcp_build() {
+  local mcp_dir="${SELF_DIR}/../mcp"
+  [ -d "${mcp_dir}" ] || die "mcp build: mcp/ directory not found at ${mcp_dir}"
+  command -v node >/dev/null 2>&1 || die "mcp build: node required (>=18)"
+  command -v npm >/dev/null 2>&1 || die "mcp build: npm required"
+  ( cd "${mcp_dir}" && {
+      [ -d node_modules ] || npm install --silent
+      npx --yes tsc
+    } ) || die "mcp build: failed"
+  echo "[${PROG}] mcp build: ok ($(_mcp_dist_path))"
+}
+
+_mcp_serve() {
+  local dist
+  dist="$(_mcp_dist_path)" || die "mcp serve: cannot resolve mcp/dist path"
+  [ -f "${dist}" ] || die "mcp serve: ${dist} missing — run \`lattice mcp build\` first"
+  exec node "${dist}" "$@"
+}
+
+_mcp_status() {
+  local dist settings wired="no" cli="no"
+  dist="$(_mcp_dist_path 2>/dev/null || true)"
+  settings="${HOME}/.claude.json"
+  if [ -f "${dist:-/nonexistent}" ]; then cli="yes"; fi
+  if [ -f "${settings}" ] && command -v node >/dev/null 2>&1; then
+    wired="$(node -e '
+try {
+  const cfg = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+  process.stdout.write((cfg.mcpServers && cfg.mcpServers.lattice) ? "yes" : "no");
+} catch (e) { process.stdout.write("err"); }
+' "${settings}" 2>/dev/null)"
+  fi
+  printf "[%s] mcp status:\n  built:  %s%s\n  wired:  %s (~/.claude.json mcpServers.lattice)\n" \
+    "${PROG}" "${cli}" "${dist:+ (${dist})}" "${wired}"
+}
+
+_mcp_setup() {
+  local apply=0 auto_yes=0 scope="user"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1; shift ;;
+      --yes|-y) auto_yes=1; shift ;;
+      --scope) [ -z "${2:-}" ] && die "mcp setup: --scope requires user|project"
+               scope="$2"; shift 2 ;;
+      -*) die "mcp setup: unknown flag: $1" ;;
+      *)  die "mcp setup: extra arg: $1" ;;
+    esac
+  done
+  case "${scope}" in user|project) ;; *) die "mcp setup: --scope must be user or project" ;; esac
+
+  local dist
+  dist="$(_mcp_dist_path)" || die "mcp setup: cannot resolve mcp/dist path"
+  if [ ! -f "${dist}" ]; then
+    echo "[${PROG}] mcp setup: dist/index.js missing — building first..."
+    _mcp_build || die "mcp setup: build failed"
+  fi
+  command -v node >/dev/null 2>&1 || die "mcp setup: node required"
+
+  local target
+  if [ "${scope}" = "user" ]; then
+    target="${CLAUDE_CONFIG_DIR:-${HOME}}/.claude.json"
+  else
+    target="$(pwd)/.mcp.json"
+  fi
+  mkdir -p "$(dirname "${target}")" 2>/dev/null || true
+  [ -f "${target}" ] || echo "{}" > "${target}"
+
+  # Compute LATTICE_BIN to embed so the MCP server can find the bash CLI even
+  # when `lattice` isn't on PATH for the spawned MCP process.
+  local lattice_bin_value="${SELF_DIR}/lattice"
+
+  local out
+  out="$(node - "${target}" "${dist}" "${lattice_bin_value}" "${apply}" <<'NODEJS'
+const fs = require('fs');
+const [,, settingsPath, distPath, latticeBinValue, applyStr] = process.argv;
+const apply = applyStr === '1';
+
+let raw;
+try { raw = fs.readFileSync(settingsPath, 'utf8'); }
+catch (e) { console.log('STATUS=malformed'); console.log('cannot read: ' + e.message); process.exit(2); }
+let cfg;
+try { cfg = raw.trim() === '' ? {} : JSON.parse(raw); }
+catch (e) { console.log('STATUS=malformed'); console.log('JSON parse error: ' + e.message); process.exit(2); }
+
+cfg.mcpServers ??= {};
+const entry = {
+  command: 'node',
+  args: [distPath],
+  env: { LATTICE_BIN: latticeBinValue },
+};
+const before = JSON.stringify(cfg.mcpServers.lattice ?? null);
+cfg.mcpServers.lattice = entry;
+const after = JSON.stringify(cfg.mcpServers.lattice);
+
+if (before === after) {
+  console.log('STATUS=noop');
+  console.log('Lattice MCP already wired in ' + settingsPath);
+  process.exit(0);
+}
+
+const rendered = JSON.stringify(cfg, null, 2);
+console.log('STATUS=wired');
+console.log('--- diff (preview)');
+console.log('mcpServers.lattice would be:');
+console.log(JSON.stringify(entry, null, 2));
+console.log('--- full settings preview (truncated to first 60 lines)');
+console.log(rendered.split('\n').slice(0, 60).join('\n'));
+
+if (apply) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = settingsPath + '.lattice-backup-' + ts;
+  fs.copyFileSync(settingsPath, backup);
+  fs.writeFileSync(settingsPath, rendered + '\n', 'utf8');
+  console.log('--- applied');
+  console.log('backup: ' + backup);
+}
+NODEJS
+)" || {
+    rc=$?
+    echo "${out}"
+    [ "${rc}" -eq 2 ] && die "mcp setup: ${target} is malformed JSON — fix or delete it, then re-run"
+    die "mcp setup: node helper exited ${rc}"
+  }
+
+  local status
+  status="$(printf '%s\n' "${out}" | head -1 | sed -E 's/^STATUS=//')"
+  local body
+  body="$(printf '%s\n' "${out}" | tail -n +2)"
+
+  case "${status}" in
+    noop)
+      echo "[${PROG}] mcp setup: already wired — no changes needed"
+      return 0
+      ;;
+    wired)
+      echo "${body}"
+      if [ "${apply}" -ne 1 ]; then
+        echo ""
+        echo "[${PROG}] mcp setup: DRY RUN — re-run with --apply to write"
+        return 0
+      fi
+      if [ "${auto_yes}" -ne 1 ]; then
+        printf "[${PROG}] write changes to %s? [y/N] " "${target}"
+        read -r ans
+        case "${ans}" in y|Y|yes|YES) ;; *) echo "[${PROG}] aborted"; return 0 ;; esac
+      fi
+      node - "${target}" "${dist}" "${lattice_bin_value}" <<'NODEJS_APPLY' >/dev/null
+const fs = require('fs');
+const [,, settingsPath, distPath, latticeBinValue] = process.argv;
+const cfg = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+cfg.mcpServers ??= {};
+cfg.mcpServers.lattice = {
+  command: 'node',
+  args: [distPath],
+  env: { LATTICE_BIN: latticeBinValue },
+};
+const ts = new Date().toISOString().replace(/[:.]/g, '-');
+fs.copyFileSync(settingsPath, settingsPath + '.lattice-backup-' + ts);
+fs.writeFileSync(settingsPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+NODEJS_APPLY
+      echo "[${PROG}] mcp setup: applied — backup at ${target}.lattice-backup-<ts>"
+      echo "[${PROG}] restart Claude Code to load the MCP server"
+      return 0
+      ;;
+    *)
+      echo "${out}"
+      die "mcp setup: unexpected helper status: ${status}"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -4767,6 +4997,7 @@ case "${sub}" in
   verify)             cmd_verify "$@" ;;
   ci-check)           cmd_ci_check "$@" ;;
   wire-hooks)         cmd_wire_hooks "$@" ;;
+  mcp)                cmd_mcp "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;
