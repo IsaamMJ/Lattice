@@ -2,6 +2,32 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.17] — 2026-05-18
+
+**Statusline reset-time tails.** OMC's HUD shows time-remaining until each rate-limit window resets. Ported the same pattern to Lattice's statusline.
+
+### Added
+- **`formatResetTime()`** helper in `scripts/lattice-statusline.mjs`. Turns a unix-epoch number OR ISO-8601 string into a compact label like `1h32m`, `2d4h`, `45m`, `20s`. Returns empty string for invalid/past/null input so callers skip cleanly.
+- **`rate_limits.five_hour.resets_at` + `seven_day.resets_at` extraction** from Claude Code's stdin JSON. Same source OMC uses — Claude Code passes these natively.
+- **Bar tail rendering:** `5h:[bar]28%(1h32m) | wk:[bar]62%(2d3h)`. Dim styling on the parens segment matches OMC's `${DIM}(${reset})${RESET}` pattern.
+
+### Format ladder
+| Remaining | Renders as | Example |
+|---|---|---|
+| < 60s | `Ns` | `45s` |
+| < 60min | `Nm` | `32m` |
+| < 24h | `NhMm` (Mm dropped if 0) | `1h32m`, `2h` |
+| ≥ 24h | `NdHh` (Hh dropped if 0) | `2d4h`, `5d` |
+
+### Graceful degradation
+If Claude Code's stdin doesn't provide `resets_at` (or provides null / a past time), the bar renders WITHOUT the tail — no broken output, no error. Same statusline performance: ~130ms cold start, ~50ms cached.
+
+### Verified
+- ISO-8601 future timestamps → correct H:M format
+- Unix epoch seconds → correct H:M and d:h format
+- Missing `resets_at` → tail omitted, bar still renders
+- Cache hits unchanged (~50ms)
+
 ## [0.9.16] — 2026-05-18
 
 **SessionStart hook — closes Gap 1 from the v0.9.15 architecture audit.** Lattice state now arrives architecturally on EVERY new Claude Code session, not just when an audit skill fires. The "session forgot Lattice exists" failure mode becomes structurally impossible without explicit removal of the hook.

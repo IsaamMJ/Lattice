@@ -207,6 +207,44 @@ function renderBar(pct, width) {
   return `[${color}${'█'.repeat(filled)}${C.DIM}${'░'.repeat(empty)}${C.RESET}]${color}${p}%${C.RESET}`;
 }
 
+// formatResetTime — v0.9.17: turn a unix-epoch number OR ISO-8601 string into
+// a compact "time remaining" label like "1h32m", "2d4h", "45m", "20s".
+// Returns '' for invalid / past / null input so callers can skip-or-render.
+//
+// Format ladder:
+//   < 60s    → "Ns"     (e.g. "45s")
+//   < 60min  → "Nm"     (e.g. "32m")
+//   < 24h    → "NhMm"   (e.g. "1h32m") — Mm dropped if 0
+//   ≥ 24h    → "NdHh"   (e.g. "2d4h")  — Hh dropped if 0
+function formatResetTime(resetsAt) {
+  if (resetsAt == null) return '';
+  let resetMs;
+  if (typeof resetsAt === 'number') {
+    // Heuristic: unix-seconds if < year 3000 in seconds, else ms.
+    resetMs = resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
+  } else if (typeof resetsAt === 'string') {
+    const parsed = Date.parse(resetsAt);
+    if (isNaN(parsed)) return '';
+    resetMs = parsed;
+  } else {
+    return '';
+  }
+  const deltaMs = resetMs - Date.now();
+  if (deltaMs <= 0) return ''; // already reset — no useful label
+  const sec = Math.floor(deltaMs / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) {
+    const mm = min - hr * 60;
+    return mm > 0 ? `${hr}h${mm}m` : `${hr}h`;
+  }
+  const day = Math.floor(hr / 24);
+  const hh = hr - day * 24;
+  return hh > 0 ? `${day}d${hh}h` : `${day}d`;
+}
+
 function extractField(json, path) {
   // Cheap dotted-path JSON lookup. Doesn't parse — uses regex on the original
   // string to avoid JSON.parse failures on partial input.
@@ -223,6 +261,8 @@ function extractField(json, path) {
     let ctxPct = null;
     let fhPct = null;
     let wkPct = null;
+    let fhReset = null;  // v0.9.17: reset-time-remaining for 5h limit
+    let wkReset = null;  // v0.9.17: reset-time-remaining for weekly limit
     if (raw) {
       try {
         const j = JSON.parse(raw);
@@ -231,6 +271,8 @@ function extractField(json, path) {
         ctxPct = j?.context_window?.used_percentage ?? null;
         fhPct = j?.rate_limits?.five_hour?.used_percentage ?? null;
         wkPct = j?.rate_limits?.seven_day?.used_percentage ?? null;
+        fhReset = j?.rate_limits?.five_hour?.resets_at ?? null;
+        wkReset = j?.rate_limits?.seven_day?.resets_at ?? null;
       } catch {
         // Partial/garbage JSON — silently ignore, render what we can
       }
@@ -250,9 +292,19 @@ function extractField(json, path) {
     if (branch) l1.push(`${C.DIM}⎇${C.RESET} ${branch}`);
 
     // ---- LINE 2: [Lattice] · 5h · wk · ctx · findings · friction · mode ----
+    // v0.9.17: append reset-time-remaining "(1h32m)" after each rate-limit bar
+    //          when Claude Code's stdin provides resets_at.
     const l2 = [`${C.DIM}[${C.RESET}${C.BOLD}Lattice${C.RESET}${C.DIM}]${C.RESET}`];
-    if (fhPct != null) l2.push(`5h:${renderBar(fhPct, 8)}`);
-    if (wkPct != null) l2.push(`${C.DIM}wk:${C.RESET}${renderBar(wkPct, 8)}`);
+    if (fhPct != null) {
+      const r = formatResetTime(fhReset);
+      const tail = r ? `${C.DIM}(${r})${C.RESET}` : '';
+      l2.push(`5h:${renderBar(fhPct, 8)}${tail}`);
+    }
+    if (wkPct != null) {
+      const r = formatResetTime(wkReset);
+      const tail = r ? `${C.DIM}(${r})${C.RESET}` : '';
+      l2.push(`${C.DIM}wk:${C.RESET}${renderBar(wkPct, 8)}${tail}`);
+    }
     if (ctxPct != null) l2.push(`Ctx:${renderBar(ctxPct, 10)}`);
     if (findings.crit > 0 || findings.high > 0) {
       const parts = [];
