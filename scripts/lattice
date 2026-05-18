@@ -52,10 +52,10 @@ Lattice has two interfaces:
   Slash command markdown lives in ~/.claude/commands/ (or this repo's commands/).
 
   CLI (this script) MANAGES the lifecycle of findings produced above:
-    triage, list, show, sync (CLAUDE.md), close, verify, defer, reopen.
+    list, show, next, sync (CLAUDE.md), close, verify, defer, reopen.
 
   Canonical loop:
-    slash command -> .lattice/findings/open/*.yml -> lattice list/triage/sync/close.
+    slash command -> .lattice/findings/open/*.yml -> lattice list/next/sync/close.
 
 Usage:
   lattice close <id> --reason <fixed|false-positive|wont-fix|out-of-scope|duplicate> [--commit <sha>|--pending] [--pr <num>]
@@ -77,18 +77,15 @@ Usage:
   lattice defer <id> --until <YYYY-MM-DD> [--reason "<text>"]
   lattice list [--module M] [--tier T] [--status S] [--dimension D] [--milestone N] [--exposure K] [--effective-tier] [--due-for-review] [--blocked|--unblocked]
   lattice show <id>
-  lattice triage [--module M] [--tier T] [--status S] [--dimension D] [--cluster]
   lattice bulk-close --pattern <glob> [--commit <sha>] [--yes]
   lattice handoff <id>
   lattice next [--module M]
-  lattice timeline [--since <YYYY-MM-DD>]
   lattice verify <id> [--run | --rerun-grep [--close-clean]]
   lattice ci-check [--tier <TIERS>]
-  lattice pr-body [--since <YYYY-MM-DD>]
+  lattice wire-hooks [--apply] [--yes] [--session-start] [--statusline]
   lattice usage [--since <days>] [--unused <days>] [--json]
   lattice update --check|--self|--enable-auto|--disable-auto
   lattice config init|show|telemetry on|off|show
-  lattice cluster <id>
   lattice validate
   lattice sweeps
   lattice sweep-id
@@ -107,19 +104,16 @@ Subcommands:
   defer       mark a finding status: deferred until a date, with reason
   list        list open findings, optionally filtered
   show        pretty-print one or more matching finding YAMLs
-  triage      interactive walk through open findings — [c/d/s/e/v/q]
-              --cluster sorts cluster-root findings to the top
   bulk-close  close every finding whose slug matches a glob pattern
   handoff     emit a Markdown executor brief for a finding (stdout)
   next        print the highest-priority actionable open finding
-  timeline    list closed findings grouped by date (newest first)
   verify      print (or --run) the simulate: steps for a finding
   ci-check    exit 1 if any non-deferred CRITICAL/BLOCKER finding is open
-  pr-body     emit a Markdown PR section of findings closed since <date>
+  wire-hooks  merge SessionStart + statusLine into ~/.claude/settings.json
+              (dry-run by default; --apply writes with backup; idempotent)
   usage       summarize local command usage from .lattice/usage/events.jsonl
   update      check for or apply Lattice updates using .lattice/config.yml
   config      create a project-local .lattice/config.yml
-  cluster     walk the relates_to graph BFS from a root finding
   validate    scan every YAML, report per-file parse/schema errors
               (does not touch CLAUDE.md; exits 2 if any error found)
   sweeps      list sweep manifests under .lattice/findings/sweeps/
@@ -1111,132 +1105,6 @@ cmd_sweeps() {
 }
 
 # ---------------------------------------------------------------------------
-# triage — interactive walk through open findings.
-# Per finding: show summary, prompt [c]lose / [d]efer / [s]kip / [e]dit / [v]iew / [q]uit.
-# Filters mirror `lattice list`. Requires a TTY for stdin.
-# ---------------------------------------------------------------------------
-cmd_triage() {
-  local filter_module="" filter_tier="" filter_status="" filter_dim="" cluster_mode=0
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --module)    filter_module="$2"; shift 2 ;;
-      --tier)      filter_tier="$2"; shift 2 ;;
-      --status)    filter_status="$2"; shift 2 ;;
-      --dimension) filter_dim="$2"; shift 2 ;;
-      --cluster)   cluster_mode=1; shift ;;
-      *) die "triage: unknown arg: $1" ;;
-    esac
-  done
-
-  [ -d ".lattice/findings/open" ] || die "triage: no .lattice/findings/open/ in cwd"
-  [ -t 0 ] || die "triage: requires an interactive terminal (stdin is not a TTY)"
-
-  shopt -s nullglob
-  local files=()
-  for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
-    [ -f "${f}" ] || continue
-
-    local module tier status dimension
-    module="$(yaml_field "${f}" "module")"
-    tier="$(yaml_field "${f}" "tier")"
-    status="$(yaml_field "${f}" "status")"
-    dimension="$(yaml_field "${f}" "dimension")"
-    [ -z "${status}" ] && status="open"
-
-    if [ -n "${filter_module}" ]; then
-      local mod_lower="${module,,}" fil_lower="${filter_module,,}"
-      [[ "${mod_lower}" == *"${fil_lower}"* ]] || continue
-    fi
-    [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
-    [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
-    [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
-
-    files+=("${f}")
-  done
-
-  # --cluster: sort so findings with cluster_root:true come first, others follow
-  if [ "${cluster_mode}" -eq 1 ] && [ "${#files[@]}" -gt 0 ]; then
-    local clustered=()
-    for f in "${files[@]}"; do
-      local cr; cr="$(yaml_field "${f}" "cluster_root")"
-      [ "${cr}" = "true" ] && clustered+=("${f}")
-    done
-    for f in "${files[@]}"; do
-      local cr; cr="$(yaml_field "${f}" "cluster_root")"
-      [ "${cr}" != "true" ] && clustered+=("${f}")
-    done
-    files=("${clustered[@]}")
-  fi
-
-  local total="${#files[@]}"
-  if [ "${total}" -eq 0 ]; then
-    echo "[${PROG}] triage: 0 findings match filters"
-    return 0
-  fi
-
-  echo "[${PROG}] triage: ${total} finding(s) — [c]lose [d]efer [s]kip [e]dit [v]iew [q]uit"
-  local i=0
-  for f in "${files[@]}"; do
-    i=$((i + 1))
-    local slug="$(basename "${f}" .yml)"
-    local rule="$(yaml_field "${f}" "rule")"
-    local module="$(yaml_field "${f}" "module")"
-    local tier="$(yaml_field "${f}" "tier")"
-    local title="$(yaml_field "${f}" "title")"
-    local file_field="$(yaml_field "${f}" "file")"
-    local line_field="$(yaml_field "${f}" "line")"
-    local fix="$(yaml_field "${f}" "fix")"
-
-    while true; do
-      echo ""
-      echo "──── [${i}/${total}] ${slug} ────"
-      echo "  ${tier}  ${module}/${rule}"
-      echo "  ${file_field}:${line_field}"
-      [ -n "${title}" ] && echo "  title: ${title}"
-      [ -n "${fix}"   ] && echo "  fix:   ${fix}"
-      printf "  action [c/d/s/e/v/q]? "
-      local action
-      read -r action </dev/tty || { echo ""; echo "[${PROG}] triage: aborted"; return 0; }
-      case "${action}" in
-        c|close)
-          printf "    --commit (blank = HEAD): "
-          local commit
-          read -r commit </dev/tty || commit=""
-          if [ -n "${commit}" ]; then
-            bash "${HELPER_CLOSE}" "${slug}" --commit "${commit}" || echo "[${PROG}] (close failed; finding still open)"
-          else
-            bash "${HELPER_CLOSE}" "${slug}" || echo "[${PROG}] (close failed; finding still open)"
-          fi
-          break ;;
-        d|defer)
-          printf "    --until (YYYY-MM-DD): "
-          local until; read -r until </dev/tty || until=""
-          [ -z "${until}" ] && { echo "    (cancelled — empty date)"; continue; }
-          printf "    --reason: "
-          local reason; read -r reason </dev/tty || reason=""
-          local args=( "defer" "${slug}" "--until" "${until}" )
-          [ -n "${reason}" ] && args+=( "--reason" "${reason}" )
-          cmd_defer "${args[@]:1}" || echo "[${PROG}] (defer failed)"
-          break ;;
-        s|skip|"") break ;;
-        e|edit)
-          local editor="${EDITOR:-${VISUAL:-vi}}"
-          "${editor}" "${f}" </dev/tty
-          continue ;;  # re-display after edit
-        v|view)
-          echo "    ----------------------------------------------------------------------"
-          sed 's/^/    /' "${f}"
-          continue ;;  # re-prompt
-        q|quit) echo "[${PROG}] triage: stopped at ${i}/${total}"; return 0 ;;
-        *) echo "    (unknown action: '${action}'; one of c/d/s/e/v/q)" ;;
-      esac
-    done
-  done
-  echo ""
-  echo "[${PROG}] triage: complete (${total}/${total})"
-}
-
-# ---------------------------------------------------------------------------
 # bulk-close — close every open finding whose slug matches a glob pattern.
 # Always confirms unless --yes is passed.
 # ---------------------------------------------------------------------------
@@ -1317,64 +1185,6 @@ cmd_bulk_close() {
   echo ""
   echo "[${PROG}] bulk-close: ${closed} closed, ${failed} failed"
   [ "${failed}" -eq 0 ]
-}
-
-# ---------------------------------------------------------------------------
-# cluster — walk the relates_to graph BFS from a root finding.
-# Usage: lattice cluster <id>
-# ---------------------------------------------------------------------------
-cmd_cluster() {
-  [ "$#" -ge 1 ] || die "cluster: usage: lattice cluster <id>"
-  local find_id="$1"
-  local root_path
-  root_path="$(locate_finding "${find_id}")" || die "cluster: not found: ${find_id}"
-
-  local visited=()
-  local queue=("${root_path}")
-
-  echo "[${PROG}] cluster rooted at: $(basename "${root_path}" .yml)"
-  echo "======================================================================"
-
-  while [ "${#queue[@]}" -gt 0 ]; do
-    local current="${queue[0]}"
-    queue=("${queue[@]:1}")
-
-    local slug; slug="$(basename "${current}" .yml)"
-    # Skip if already visited
-    local already=0
-    for v in "${visited[@]:-}"; do [ "${v}" = "${slug}" ] && already=1 && break; done
-    [ "${already}" -eq 1 ] && continue
-    visited+=("${slug}")
-
-    local where="open"
-    [[ "${current}" == .lattice/findings/closed/* ]] && where="closed"
-    local tier; tier="$(yaml_field "${current}" "tier")"
-    local module; module="$(yaml_field "${current}" "module")"
-    local rule; rule="$(yaml_field "${current}" "rule")"
-    local title; title="$(yaml_field "${current}" "title")"
-    local cluster_root_val; cluster_root_val="$(yaml_field "${current}" "cluster_root")"
-    local root_marker=""
-    [ "${cluster_root_val}" = "true" ] && root_marker=" [ROOT]"
-
-    echo ""
-    echo "  ${tier}${root_marker}  ${module}/${rule}  (${where})"
-    [ -n "${title}" ] && echo "  title: ${title}"
-    echo "  file:  ${current}"
-
-    # Enqueue related findings
-    local relates_raw
-    relates_raw="$(awk '/^relates_to:/{found=1; next} found && /^  - /{print; next} found && !/^  /{exit}' "${current}" 2>/dev/null | sed 's/^[[:space:]]*-[[:space:]]*//' | tr -d '"' || true)"
-    while IFS= read -r related_slug; do
-      [ -z "${related_slug}" ] && continue
-      related_slug="${related_slug// /}"
-      local rel_path
-      rel_path="$(locate_finding "${related_slug}" 2>/dev/null)" || continue
-      queue+=("${rel_path}")
-    done <<< "${relates_raw}"
-  done
-
-  echo ""
-  echo "[${PROG}] cluster: ${#visited[@]} finding(s)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1543,56 +1353,6 @@ cmd_next() {
   echo "  file:  ${file_field}:${line_field}"
   echo "  slug:  ${slug}"
   echo "  path:  ${best_path}"
-}
-
-# ---------------------------------------------------------------------------
-# timeline — list closed findings by date (newest first).
-# ---------------------------------------------------------------------------
-cmd_timeline() {
-  local since=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --since) [ -z "${2:-}" ] && die "timeline: --since requires a date"
-               since="$2"; shift 2 ;;
-      *) die "timeline: unknown arg: $1" ;;
-    esac
-  done
-
-  [ -d ".lattice/findings/closed" ] || { echo "[${PROG}] timeline: no closed findings"; return 0; }
-
-  shopt -s nullglob
-  local tmpfile; tmpfile="$(mktemp)"
-  for f in .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
-    [ -f "${f}" ] || continue
-    local closed_at date_part tier module rule reason
-    closed_at="$(yaml_field "${f}" "closed_at")"
-    date_part="${closed_at%%T*}"
-    [ -z "${date_part}" ] && date_part="unknown"
-    if [ -n "${since}" ] && [ "${date_part}" != "unknown" ] && [[ "${date_part}" < "${since}" ]]; then
-      continue
-    fi
-    tier="$(yaml_field "${f}" "tier")"
-    module="$(yaml_field "${f}" "module")"
-    rule="$(yaml_field "${f}" "rule")"
-    reason="$(yaml_field "${f}" "close_reason")"
-    printf '%s\t%s\t%s/%s\t[%s]\n' \
-      "${date_part}" "${tier}" "${module}" "${rule}" "${reason:-closed}" >> "${tmpfile}"
-  done
-
-  local count=0 prev_date=""
-  while IFS=$'\t' read -r date_part tier modrule reason; do
-    if [ "${date_part}" != "${prev_date}" ]; then
-      [ -n "${prev_date}" ] && echo ""
-      echo "${date_part}"
-      prev_date="${date_part}"
-    fi
-    printf '  %-9s %s  %s\n' "${tier}" "${modrule}" "${reason}"
-    count=$((count + 1))
-  done < <(sort -r "${tmpfile}")
-  rm -f "${tmpfile}"
-
-  [ "${count}" -gt 0 ] && echo ""
-  echo "[${PROG}] ${count} closed finding(s)${since:+ since ${since}}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1799,65 +1559,6 @@ cmd_ci_check() {
   for entry in "${closed_bad[@]:-}"; do [ -n "${entry}" ] && echo "  FAIL  closed-ref  ${entry}"; done
   for entry in "${dupes[@]:-}"; do [ -n "${entry}" ] && echo "  FAIL  duplicate-rule-module  ${entry}"; done
   [ "${#blockers[@]}" -eq 0 ] && [ "${#missing_files[@]}" -eq 0 ] && [ "${#closed_bad[@]}" -eq 0 ] && [ "${#dupes[@]}" -eq 0 ]
-}
-
-# ---------------------------------------------------------------------------
-# pr-body — emit a Markdown PR section listing findings closed since <date>.
-# ---------------------------------------------------------------------------
-cmd_pr_body() {
-  local since=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --since) [ -z "${2:-}" ] && die "pr-body: --since requires a date"
-               since="$2"; shift 2 ;;
-      *) die "pr-body: unknown arg: $1" ;;
-    esac
-  done
-
-  [ -d ".lattice/findings/closed" ] || { echo "[${PROG}] pr-body: no closed findings"; return 0; }
-
-  shopt -s nullglob
-  local fixed=() fp=() wontfix=() other_closures=()
-  for f in .lattice/findings/closed/*/*.yml .lattice/findings/closed/*.yml; do
-    [ -f "${f}" ] || continue
-    local closed_at date_part tier module rule reason
-    closed_at="$(yaml_field "${f}" "closed_at")"
-    date_part="${closed_at%%T*}"
-    if [ -n "${since}" ] && [ -n "${date_part}" ] && [[ "${date_part}" < "${since}" ]]; then
-      continue
-    fi
-    tier="$(yaml_field "${f}" "tier")"
-    module="$(yaml_field "${f}" "module")"
-    rule="$(yaml_field "${f}" "rule")"
-    reason="$(yaml_field "${f}" "close_reason")"
-    local entry="- \`${tier}\` ${module}/${rule}"
-    case "${reason}" in
-      fixed)          fixed+=("${entry}") ;;
-      false-positive) fp+=("${entry}") ;;
-      wont-fix)       wontfix+=("${entry}") ;;
-      *)              other_closures+=("${entry}") ;;
-    esac
-  done
-
-  local total=$(( ${#fixed[@]} + ${#fp[@]} + ${#wontfix[@]} + ${#other_closures[@]} ))
-  printf '## Lattice Audit Changes%s\n\n' "${since:+ (since ${since})}"
-  if [ "${#fixed[@]}" -gt 0 ]; then
-    printf '### Fixed\n'; printf '%s\n' "${fixed[@]}"; printf '\n'
-  fi
-  if [ "${#fp[@]}" -gt 0 ]; then
-    printf '### False-Positive\n'; printf '%s\n' "${fp[@]}"; printf '\n'
-  fi
-  if [ "${#wontfix[@]}" -gt 0 ]; then
-    printf "### Won't Fix\n"; printf '%s\n' "${wontfix[@]}"; printf '\n'
-  fi
-  if [ "${#other_closures[@]}" -gt 0 ]; then
-    printf '### Other Closures\n'; printf '%s\n' "${other_closures[@]}"; printf '\n'
-  fi
-  if [ "${total}" -eq 0 ]; then
-    printf '*(no findings closed%s)*\n' "${since:+ since ${since}}"
-  else
-    printf '_%d finding(s) closed%s_\n' "${total}" "${since:+ since ${since}}"
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -2173,8 +1874,8 @@ cmd_doctor() {
   else
     _check_warn "not in a git repo" "lattice close --commit will require explicit SHA arg outside git"
   fi
-  # PATH discoverability (#14) — false-green guard. The whole "autonomous Claude
-  # loop" pitch breaks if `lattice` isn't reachable from a fresh shell.
+  # PATH discoverability (#14, #37) — false-green guard. The whole "autonomous
+  # Claude loop" pitch breaks if `lattice` isn't reachable from a fresh shell.
   local found_path=""
   if command -v lattice >/dev/null 2>&1; then
     found_path="$(command -v lattice 2>/dev/null || true)"
@@ -2182,8 +1883,19 @@ cmd_doctor() {
   if [ -n "${found_path}" ]; then
     _check_pass "lattice in PATH (${found_path})"
   else
-    # Don't FAIL — many users run via full path or alias; just WARN with the fix.
-    _check_warn "lattice not in PATH from this shell" "fix: ln -sf $(realpath "$0" 2>/dev/null || echo "$0") ~/.local/bin/lattice  (and ensure ~/.local/bin is on PATH)"
+    # Walk personal-bin candidates and report which are on PATH so the user
+    # can see exactly where to install the shim.
+    local on_path_dirs="" candidate
+    for candidate in "${HOME}/bin" "${HOME}/.local/bin" "${HOME}/.local/lattice/bin"; do
+      case ":${PATH}:" in
+        *":${candidate}:"*) on_path_dirs="${on_path_dirs}${candidate} " ;;
+      esac
+    done
+    if [ -n "${on_path_dirs}" ]; then
+      _check_warn "lattice not in PATH" "shim candidates on PATH: ${on_path_dirs}— re-run install.sh, or manually: ln -sf $(realpath "$0" 2>/dev/null || echo "$0") ${on_path_dirs%% *}/lattice"
+    else
+      _check_warn "lattice not in PATH; no personal-bin dir on PATH" "add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"  (then re-run install.sh)"
+    fi
   fi
   echo ""
 
@@ -3559,7 +3271,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat triage cluster bulk-close handoff next timeline verify ci-check pr-body usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check wire-hooks usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4783,6 +4495,223 @@ YML
 }
 
 # ---------------------------------------------------------------------------
+# wire-hooks — idempotently merge Lattice hooks + statusLine into
+# ~/.claude/settings.json. v0.9.18 (#39). Replaces the
+# "install.sh prints snippet, user pastes" friction. Dry-run by default;
+# --apply writes after y/N confirm (--yes auto-confirms); always backs up;
+# refuses to apply if settings.json is malformed.
+#
+# Usage:
+#   lattice wire-hooks [--apply] [--yes] [--session-start] [--statusline]
+#   lattice wire-hooks --restore <timestamp>
+#
+# Defaults: dry-run, wires SessionStart + statusLine.
+# ---------------------------------------------------------------------------
+cmd_wire_hooks() {
+  local apply=0 auto_yes=0 want_session=1 want_status=1 restore=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply)         apply=1; shift ;;
+      --yes|-y)        auto_yes=1; shift ;;
+      --session-start) want_status=0; shift ;;
+      --statusline)    want_session=0; shift ;;
+      --restore)       [ -z "${2:-}" ] && die "wire-hooks: --restore requires a timestamp"
+                       restore="$2"; shift 2 ;;
+      --help|-h)
+        cat <<'WHHELP'
+lattice wire-hooks — wire Lattice into ~/.claude/settings.json
+
+  --apply             write after confirmation (default: dry-run preview)
+  --yes               auto-confirm (use with --apply)
+  --session-start     wire only the SessionStart hook
+  --statusline        wire only the statusLine
+  --restore <ts>      restore from backup (timestamp from a previous run)
+
+Always backs up to ~/.claude/settings.json.lattice-backup-<UTC-timestamp>
+before any mutation. Refuses to apply if existing JSON is malformed.
+Idempotent: detects existing Lattice wiring and exits clean.
+WHHELP
+        return 0 ;;
+      -*) die "wire-hooks: unknown flag: $1" ;;
+      *)  die "wire-hooks: extra arg: $1" ;;
+    esac
+  done
+
+  local settings="${HOME}/.claude/settings.json"
+  command -v node >/dev/null 2>&1 || die "wire-hooks: node required (settings.json is JSON; bash JSON munging unsafe)"
+
+  # Resolve the absolute path to this script's directory — used for the hook
+  # command paths so settings.json points at the installed location.
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+  local session_path="${script_dir}/lattice-session-start.mjs"
+  local statusline_path="${script_dir}/lattice-statusline.mjs"
+
+  # Restore path: short-circuit before any other work.
+  if [ -n "${restore}" ]; then
+    local backup="${settings}.lattice-backup-${restore}"
+    [ -f "${backup}" ] || die "wire-hooks: backup not found: ${backup}"
+    if [ "${auto_yes}" -ne 1 ]; then
+      printf "[${PROG}] restore %s -> %s? [y/N] " "${backup}" "${settings}"
+      read -r ans
+      case "${ans}" in y|Y|yes|YES) ;; *) echo "[${PROG}] aborted"; return 0 ;; esac
+    fi
+    cp -f "${backup}" "${settings}" || die "wire-hooks: restore copy failed"
+    echo "[${PROG}] restored ${settings} from ${backup}"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "${settings}")" 2>/dev/null || true
+  [ -f "${settings}" ] || echo "{}" > "${settings}"
+
+  # Hand off to Node for JSON parse/merge/serialize. The script outputs:
+  #   first line: STATUS=<noop|wired|malformed>
+  #   subsequent lines: the diff or rendered settings.json
+  local out
+  out="$(node - "$settings" "$session_path" "$statusline_path" "$want_session" "$want_status" "$apply" <<'NODEJS'
+const fs = require('fs');
+const [,, settingsPath, sessionPath, statuslinePath, wantSessionStr, wantStatusStr, applyStr] = process.argv;
+const wantSession = wantSessionStr === '1';
+const wantStatus = wantStatusStr === '1';
+const apply = applyStr === '1';
+
+let raw;
+try { raw = fs.readFileSync(settingsPath, 'utf8'); }
+catch (e) { console.log('STATUS=malformed'); console.log('cannot read: ' + e.message); process.exit(2); }
+let cfg;
+try { cfg = raw.trim() === '' ? {} : JSON.parse(raw); }
+catch (e) { console.log('STATUS=malformed'); console.log('JSON parse error: ' + e.message); process.exit(2); }
+
+const sentinel = (p) => p.endsWith('lattice-session-start.mjs') || p.endsWith('lattice-statusline.mjs');
+const sessionCmd = `node ${sessionPath}`;
+const statuslineCmd = `node ${statuslinePath}`;
+
+let changed = false;
+const before = JSON.stringify(cfg, null, 2);
+
+if (wantSession) {
+  cfg.hooks ??= {};
+  cfg.hooks.SessionStart ??= [];
+  // Strip any existing Lattice SessionStart entries first (idempotent re-wire).
+  cfg.hooks.SessionStart = cfg.hooks.SessionStart.filter(group => {
+    if (!group || !Array.isArray(group.hooks)) return true;
+    return !group.hooks.some(h => h && typeof h.command === 'string' && sentinel(h.command));
+  });
+  cfg.hooks.SessionStart.push({
+    hooks: [{ type: 'command', command: sessionCmd }],
+  });
+}
+
+if (wantStatus) {
+  const existing = cfg.statusLine;
+  // Replace only if missing OR if it points at a lattice-statusline.mjs already
+  // (idempotent). Don't clobber a user's unrelated statusline.
+  if (!existing || (existing.command && sentinel(existing.command))) {
+    cfg.statusLine = { type: 'command', command: statuslineCmd };
+  } else {
+    console.log('STATUS=conflict');
+    console.log('existing statusLine is not Lattice; refusing to overwrite. Current command:');
+    console.log('  ' + (existing.command || JSON.stringify(existing)));
+    console.log('Remove it manually, or re-run with --session-start to skip statusLine.');
+    process.exit(3);
+  }
+}
+
+const after = JSON.stringify(cfg, null, 2);
+changed = before !== after;
+
+if (!changed) {
+  console.log('STATUS=noop');
+  console.log('Lattice already wired in ' + settingsPath);
+  process.exit(0);
+}
+
+console.log('STATUS=wired');
+console.log('--- diff (preview)');
+console.log('would write:');
+console.log(after);
+
+if (apply) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = settingsPath + '.lattice-backup-' + ts;
+  fs.copyFileSync(settingsPath, backup);
+  fs.writeFileSync(settingsPath, after + '\n', 'utf8');
+  console.log('--- applied');
+  console.log('backup: ' + backup);
+  console.log('written: ' + settingsPath);
+}
+NODEJS
+)" || {
+    rc=$?
+    echo "${out}"
+    case "${rc}" in
+      2) die "wire-hooks: settings.json is malformed — fix or delete it, then re-run" ;;
+      3) die "wire-hooks: existing statusLine conflict (see message above)" ;;
+      *) die "wire-hooks: node helper exited ${rc}" ;;
+    esac
+  }
+
+  local status
+  status="$(printf '%s\n' "${out}" | head -1 | sed -E 's/^STATUS=//')"
+  local body
+  body="$(printf '%s\n' "${out}" | tail -n +2)"
+
+  case "${status}" in
+    noop)
+      echo "[${PROG}] wire-hooks: already wired — no changes needed"
+      return 0
+      ;;
+    wired)
+      echo "${body}"
+      if [ "${apply}" -ne 1 ]; then
+        echo ""
+        echo "[${PROG}] wire-hooks: DRY RUN — re-run with --apply to write"
+        return 0
+      fi
+      if [ "${auto_yes}" -ne 1 ]; then
+        printf "[${PROG}] write changes to %s? [y/N] " "${settings}"
+        read -r ans
+        case "${ans}" in y|Y|yes|YES) ;; *) echo "[${PROG}] aborted"; return 0 ;; esac
+      fi
+      # Re-run with apply=1 (the dry-run above didn't actually write because
+      # node sees apply=0 if confirmation was needed). Force apply now:
+      node - "$settings" "$session_path" "$statusline_path" "$want_session" "$want_status" "1" <<'NODEJS_APPLY' >/dev/null
+const fs = require('fs');
+const [,, settingsPath, sessionPath, statuslinePath, wantSessionStr, wantStatusStr] = process.argv;
+const wantSession = wantSessionStr === '1';
+const wantStatus = wantStatusStr === '1';
+const raw = fs.readFileSync(settingsPath, 'utf8');
+const cfg = raw.trim() === '' ? {} : JSON.parse(raw);
+const sentinel = (p) => p.endsWith('lattice-session-start.mjs') || p.endsWith('lattice-statusline.mjs');
+if (wantSession) {
+  cfg.hooks ??= {};
+  cfg.hooks.SessionStart ??= [];
+  cfg.hooks.SessionStart = cfg.hooks.SessionStart.filter(g => !(g && Array.isArray(g.hooks) && g.hooks.some(h => h && typeof h.command === 'string' && sentinel(h.command))));
+  cfg.hooks.SessionStart.push({ hooks: [{ type: 'command', command: `node ${sessionPath}` }] });
+}
+if (wantStatus) {
+  const ex = cfg.statusLine;
+  if (!ex || (ex.command && sentinel(ex.command))) {
+    cfg.statusLine = { type: 'command', command: `node ${statuslinePath}` };
+  }
+}
+const ts = new Date().toISOString().replace(/[:.]/g, '-');
+fs.copyFileSync(settingsPath, settingsPath + '.lattice-backup-' + ts);
+fs.writeFileSync(settingsPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+process.stdout.write(ts);
+NODEJS_APPLY
+      echo "[${PROG}] wire-hooks: applied — backup at ${settings}.lattice-backup-<ts>"
+      echo "[${PROG}] restart Claude Code to pick up the hooks"
+      return 0
+      ;;
+    *)
+      echo "${out}"
+      die "wire-hooks: unexpected helper status: ${status}"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -4832,15 +4761,12 @@ case "${sub}" in
   defer)              cmd_defer "$@" ;;
   list|ls)            cmd_list "$@" ;;
   show|cat)           cmd_show "$@" ;;
-  triage)             cmd_triage "$@" ;;
-  cluster)            cmd_cluster "$@" ;;
   bulk-close)         cmd_bulk_close "$@" ;;
   handoff)            cmd_handoff "$@" ;;
   next)               cmd_next "$@" ;;
-  timeline)           cmd_timeline "$@" ;;
   verify)             cmd_verify "$@" ;;
   ci-check)           cmd_ci_check "$@" ;;
-  pr-body)            cmd_pr_body "$@" ;;
+  wire-hooks)         cmd_wire_hooks "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;

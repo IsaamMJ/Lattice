@@ -67,11 +67,25 @@ echo "[lattice] CLI dispatcher (v0.9.17) installed at:"
 echo "[lattice]   ${SCRIPT_DEST}/lattice"
 echo ""
 
-# v0.8.3 (#13): auto-install a shim in ~/.local/bin so `lattice` resolves from
-# any shell without an alias step. Falls back to a wrapper script on systems
-# where symlinks fail (Windows without developer-mode). Skips silently when
-# ~/.local/bin already has a Lattice shim pointing at SCRIPT_DEST.
-SHIM_DIR="${HOME}/.local/bin"
+# v0.9.18 (#37): pick a shim dir already on PATH so the current shell sees
+# `lattice` immediately (no "open a new shell" step). Falls back to
+# ~/.local/bin if nothing on PATH is a writable personal-bin dir, and updates
+# rc files for the next shell. Wrapper-or-symlink choice unchanged from v0.8.3.
+SHIM_DIR=""
+for candidate in "${HOME}/bin" "${HOME}/.local/bin" "${HOME}/.local/lattice/bin"; do
+  case ":${PATH}:" in
+    *":${candidate}:"*)
+      if [ -d "${candidate}" ] && [ -w "${candidate}" ]; then
+        SHIM_DIR="${candidate}"; break
+      fi
+      ;;
+  esac
+done
+# No on-PATH writable personal-bin? Fall back to ~/.local/bin and we'll wire
+# rc files below (next-shell behavior).
+if [ -z "${SHIM_DIR}" ]; then
+  SHIM_DIR="${HOME}/.local/bin"
+fi
 SHIM_PATH="${SHIM_DIR}/lattice"
 mkdir -p "${SHIM_DIR}" 2>/dev/null || true
 
@@ -102,11 +116,11 @@ else
   echo "[lattice]   alias lattice=\"${SCRIPT_DEST}/lattice\""
 fi
 
-# PATH check: is ~/.local/bin actually on PATH right now? If not, write a
-# one-line guard into the user's shell rc so the next shell picks it up.
+# PATH check: is the chosen SHIM_DIR actually on PATH right now? If not, write
+# a one-line guard into the user's shell rc so the next shell picks it up.
 case ":${PATH}:" in
   *":${SHIM_DIR}:"*)
-    echo "[lattice] ${SHIM_DIR} already on PATH — \`lattice\` will resolve in new shells"
+    echo "[lattice] ${SHIM_DIR} on PATH — \`lattice\` resolves in this shell already"
     ;;
   *)
     echo "[lattice] note: ${SHIM_DIR} is NOT on your current PATH"

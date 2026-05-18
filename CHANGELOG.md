@@ -2,6 +2,37 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.18] — 2026-05-18
+
+**Install-UX coherent slice.** Two friction sources gone: (a) `lattice` CLI not reachable after Windows install, (b) settings.json hook merge done by hand. Plus dead-feature pruning: four 0-invocation subcommands deleted.
+
+### Added (#39)
+- **`lattice wire-hooks`** — idempotent merge of Lattice's SessionStart hook + statusLine into `~/.claude/settings.json`. Dry-run by default; `--apply` writes after y/N confirm (`--yes` auto-confirms); always backs up to `<settings>.lattice-backup-<UTC-timestamp>`; refuses to apply if existing JSON is malformed.
+  - Flags: `--apply`, `--yes`, `--session-start` (wire SessionStart only), `--statusline` (wire statusLine only), `--restore <ts>`
+  - Idempotent: detects existing Lattice wiring by basename sentinel (`lattice-session-start.mjs` / `lattice-statusline.mjs`); replaces stale entries cleanly without clobbering a user's unrelated SessionStart hooks
+  - Refuses to overwrite a non-Lattice `statusLine` — emits a clear message naming the existing command so the user can decide
+
+### Fixed (#37)
+- **`lattice` CLI not on PATH after Windows install (Git Bash).** `install.sh` now picks a shim dir already on the user's PATH (`~/bin`, `~/.local/bin`, `~/.local/lattice/bin`) so `lattice` resolves in the *current* shell, not just new ones. Falls back to `~/.local/bin` + rc-file PATH guard only when no personal-bin is already on PATH.
+- **`lattice doctor` PATH diagnostic.** When `lattice` isn't reachable, the WARN now lists every personal-bin dir already on PATH and shows the exact `ln -sf` command to fix it. Previous output told the user "fix: ~/.local/bin" even when their PATH only had `~/bin`.
+
+### Removed (dead-feature pruning)
+- **`lattice triage`** — 0 invocations across 14+ days of real use; `lattice list` + `lattice next` cover the workflow
+- **`lattice cluster`** — 0 invocations; `relates_to` graph walking never landed as a habit
+- **`lattice timeline`** — 0 invocations; `lattice changelog` and `lattice list --status closed` cover the use case
+- **`lattice pr-body`** — 0 invocations; `lattice changelog --since` covers the use case
+- **Why prune now:** each dead command consumed `_KNOWN_SUBS` real estate, validate-time checks, and README quickstart slots. Cumulative tax on every session for zero return. Git history preserves the implementations if they ever come back.
+
+### Migration notes
+- If you were using any of the four removed commands: there are no users (single-user project at time of removal), but the implementations live at commit `0aef6f7^` (last commit before this release) if you need to fork-restore.
+- `install.sh` shim placement changes mean *first install* on a new machine now puts `lattice` somewhere different — but the shim is always under one of `~/bin`, `~/.local/bin`, or `~/.local/lattice/bin`, never outside `$HOME`.
+
+### Verified
+- `bash -n scripts/lattice` clean
+- `bash scripts/lattice help` lists wire-hooks, no triage/cluster/timeline/pr-body
+- `bash scripts/lattice wire-hooks --help` prints usage
+- `bash scripts/lattice wire-hooks` dry-run on a real `~/.claude/settings.json` with pre-existing Lattice wiring → STATUS=wired with idempotent replacement of stale entries
+
 ## [0.9.17] — 2026-05-18
 
 **Statusline reset-time tails.** OMC's HUD shows time-remaining until each rate-limit window resets. Ported the same pattern to Lattice's statusline.
