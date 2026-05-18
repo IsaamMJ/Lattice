@@ -2,35 +2,46 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.14] — 2026-05-16
+## [0.9.15] — 2026-05-18
 
-**Statusline rebuilt to match OMC HUD visual style.** User feedback after v0.9.12: *"I'm not so satisfied with it. Can you just replicate the exact way OMC had the status line because I'm adjusted to it and I'm missing it?"* — honored. v0.9.14 ports OMC's rendering conventions to Lattice's CLI.
+**Audit-skill architecture upgrade — 4 of 5 patterns adopted from Anthropic's `claude-code-setup` plugin.** Researched the official `claude-automation-recommender` plugin via the Claude Code skills docs. Extracted current skill patterns, applied to Lattice's audit skills. Skipped `context: fork` for this batch (changes orchestration semantics — separate slice).
 
-### Changed — visual rebuild
-- **Two-line layout** matching OMC's "info banner + main" split:
-  - Line 1: `{bold model} | {dim cwd} | ⎇ {branch}`
-  - Line 2: `[Lattice] | 5h:[bar]% | wk:[bar]% | Ctx:[bar]% | CRIT:N HIGH:M | N friction | mode`
-- **OMC ` | ` separator** with dim ANSI styling between elements (was ` · ` plain).
-- **Progress bars** for context + 5-hour + weekly limits — 8-char bars for rate limits, 10-char for context. Filled char `█` (severity-colored), empty char `░` (dim). Matches OMC's render exactly.
-- **Semantic color palette** replaces v0.9.12's neon yellow. OMC's thresholds: green <70%, yellow ≥70%, red ≥90%. Color tracks severity, not branding.
-- **`[Lattice]` label** in bold with dim brackets — OMC's `omcLabel` pattern.
-- **Findings as `CRIT:N HIGH:M`** (color-coded) instead of `🔴N ⚠️M` — emoji rendering varies across terminals and locales; the colored label is more reliable.
-- **Cwd shortened** to last 2 path segments with `~` for `$HOME` (OMC's relative-cwd default).
-- **Branch glyph `⎇`** in dim — OMC pattern.
+### Added — patterns adopted
 
-### Kept
-- `LATTICE_STATUSLINE_NOCOLOR=1` opt-out (now strips OMC palette instead of neon yellow).
-- v0.9.13 hardening: `set +e` + `set +o pipefail`, always returns 0, in telemetry skip list.
-- Native Claude Code stdin parsing (model, ctx %, 5h %, weekly %, cwd) — unchanged.
-- Same Lattice state surfacing (findings counts, friction, mode badge, git branch).
+1. **`!`command`` dynamic context injection** in skill body. `!`lattice context`` now runs at every audit invocation, so the session sees current Lattice state (mode, dimensions, findings by tier, telemetry status, friction candidates) BEFORE Claude reads the skill instructions. Closes the "session forgot to read state" failure mode structurally — no longer voluntary.
 
-### Tests
-- Updated #130 (new output format with bars + labels), #131 (degradation contract), #133 (semantic ANSI palette replaces neon yellow). 140 → 140 lifecycle tests still passing.
+2. **Progressive disclosure via `commands/references/`**. Heavy methodology bits (subagent dispatch prompts, finding YAML schemas, sweep manifest details) moved out of the always-loaded orchestrator. Claude reads them only when needed via markdown links. Token cost per audit invocation drops ~36% (always-loaded total: 1478 → 941 lines across the 5 audit skills).
 
-### What this does NOT replicate from OMC
-OMC has 27 HUD elements. Many are orchestration-specific state Lattice doesn't track (`ralph`, `autopilot`, `prd`, `mission-board`, `agents`, `todos`, `skills`, `thinking`, `last-tool`, `session-summary`). These can't be ported without their respective subsystems. Lattice's statusline replicates the **visual style** (two-line, separator, bars, severity coloring, OMC label) but the **state surface** is Lattice's (findings/friction/mode/dimensions/ADRs) not OMC's.
+3. **Decision tables replace prose**. Risk patterns, verdict criteria, anti-patterns now in tables. Same fidelity, ~40-50% fewer tokens per skill.
 
-If specific OMC elements are missed beyond visual style, file via `lattice report` with which element + what info should appear.
+4. **`disable-model-invocation: true` on lifecycle skills**. New `commands/close.md` skill wraps `lattice close` — Claude can recommend closure but cannot auto-invoke. Finding closure is a deliberate user action (like commit/deploy/send). The bash CLI (`lattice close`) remains fully Claude-callable for scripted flows.
+
+5. **Skipped: `context: fork`** — changes audit-sweep orchestration semantics in ways that need their own verification slice. Leaving OMC executor fallback intact for now.
+
+### Files changed
+
+| File | Before | After |
+|---|---|---|
+| `commands/audit.md` | 297 lines | 176 lines |
+| `commands/audit-sweep.md` | 327 lines | 211 lines |
+| `commands/scale-audit.md` | 224 lines | 146 lines |
+| `commands/security-audit.md` | 284 lines | 181 lines |
+| `commands/flow-audit.md` | 346 lines | 178 lines |
+| **New** `commands/close.md` | — | 64 lines |
+| **New** `commands/references/*.md` | — | 754 lines (10 files, on-demand) |
+
+### Tests / verification
+- `validate.sh --quick` passes (incl. close.md tool-usage + path references)
+- 140 lifecycle tests still passing (bash dispatcher unchanged)
+- Spot-check on Lattice's own skills loading correctly
+
+### Why no `context: fork` yet
+The audit-sweep orchestrator manually dispatches Sonnet sub-agents per module via OMC executor pattern (with native fallback). Switching to native `context: fork` is a wager that produces equivalent audit quality. Until verified on a real audit, the wager stays unsupported. Add as v0.9.16 after dogfooding 0.9.15.
+
+### Source
+- Plugin researched: `anthropics/claude-plugins-official/plugins/claude-code-setup`
+- Docs: https://code.claude.com/docs/en/skills
+- Pattern catalogue: `!`command``, `disable-model-invocation`, `user-invocable`, `context: fork`, `agent`, `allowed-tools`, progressive disclosure via reference files
 
 ## [0.9.14] — 2026-05-16
 

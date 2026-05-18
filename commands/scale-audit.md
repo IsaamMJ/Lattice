@@ -1,224 +1,146 @@
 ---
-description: Audit a module for horizontal-scaling killers — in-memory state, setInterval crons, in-process rate limiters, singleton assumptions.
+description: Audit a module for horizontal-scaling killers — in-memory state, setInterval crons, in-process rate limiters, singleton assumptions. Use when the user wants to check scale safety, asks "will this scale?", invokes `/scale-audit <module>`, or mentions horizontal-scaling risks.
 argument-hint: <module-path>
+allowed-tools: Read Grep Glob Bash
 ---
 
 Target module to audit: $ARGUMENTS
 
+## Live Lattice state (auto-injected at invocation)
+
+!`lattice context 2>/dev/null || echo "(lattice context unavailable)"`
+
 # scale-audit
 
-You are auditing one module for **horizontal-scaling risks** — patterns that work fine on one instance but break, degrade, or duplicate work when run on 2+ instances behind a load balancer.
+Auditing for **horizontal-scaling risks** — patterns that work on one instance but break/degrade/duplicate work when run on 2+ instances behind a load balancer.
 
 ## Why this skill exists
 
-Code that "works in dev" often has hidden single-instance assumptions: in-memory rate limiters, `setInterval` jobs, singleton caches, file-system writes. These don't surface as bugs on one box. They surface as duplicate WhatsApp messages, double-charged users, and lost state the moment ops scales to 2 instances.
+Code that "works in dev" often has hidden single-instance assumptions: in-memory rate limiters, `setInterval` jobs, singleton caches, file-system writes. They surface as duplicate WhatsApp messages, double-charged users, lost state — the moment ops scales to 2 instances. This skill finds those patterns *before* the scale-up, with `file:line` evidence.
 
-This skill finds those patterns *before* the scale-up, with file:line evidence per finding.
-
-## Trigger
-
-User invokes: `/scale-audit <module-path>` (e.g. `/scale-audit src/modules/lumi`)
-
-## OMC fallback (works without oh-my-claudecode installed)
-
-Lattice prefers to dispatch its heaviest step (pattern hunting + context reads) to a Sonnet sub-agent for cost. If `oh-my-claudecode:executor` is installed, it's used. If not, the same step runs inline in the main session — **same methodology, same verdict quality, just slightly more tokens**. No degraded mode, no missing features.
-
-Detection: at Step 3, attempt the dispatch. On dispatch failure, continue inline with the same prompt body.
-
-## Risk patterns to hunt
-
-For each, the evidence is concrete: a `file:line` showing the pattern.
+## Risk patterns
 
 | Pattern | Why it breaks at scale |
 |---|---|
 | `setInterval` / `setTimeout` for periodic work | Every instance fires the job → duplicate sends, double-charge, race conditions |
-| In-process `Map` / `Set` / `WeakMap` holding user/session/rate state | State diverges per instance; rate limits become per-instance not per-user |
+| In-process `Map` / `Set` / `WeakMap` for user/session/rate state | State diverges per instance; rate limits become per-instance not per-user |
 | Local file writes (logs, cache, uploads) | Lost on instance death; not visible to other instances |
-| `process.env`-keyed singletons holding mutable state | Same as above; survives only one process |
+| `process.env`-keyed singletons holding mutable state | Survives only one process |
 | WebSocket / SSE without sticky-session config | Reconnects land on wrong instance; subscriptions lost |
 | In-memory cache without Redis/Valkey fallback | Cold-start on every new instance; cache stampede risk |
 | Cron jobs not gated by leader-election or distributed lock | Same as `setInterval` |
-| `setImmediate` / unbounded `Promise.all` over user data | Memory growth proportional to load, not bounded |
+| `setImmediate` / unbounded `Promise.all` over user data | Memory growth proportional to load |
 | Synchronous file or CPU work in request path | Blocks event loop; one instance falls over before LB notices |
-| Race-prone read-modify-write on shared DB rows without `SELECT … FOR UPDATE` or optimistic lock | Concurrent instances corrupt state |
-| Hardcoded `localhost` / single-host assumptions in service-to-service calls | Breaks on first deploy across hosts |
+| Race-prone read-modify-write without `SELECT … FOR UPDATE` / optimistic lock | Concurrent instances corrupt state |
+| Hardcoded `localhost` in service-to-service calls | Breaks on first deploy across hosts |
 | Dedup keyed by in-memory set instead of DB unique constraint or Redis SET NX | Duplicates leak through on second instance |
-| Background work started in module constructor / `OnModuleInit` without leader gating | Every instance runs the same background loop |
+| Background work started in `OnModuleInit` without leader gating | Every instance runs the same background loop |
 
 ## Methodology
 
 ### Step 1 — Read living truth
-1. Read `CLAUDE.md` — note any explicit "Already Built" or "do NOT migrate to BullMQ" type entries. Some single-instance choices are intentional and documented.
-2. Read the module's TTD doc (if one exists) — note any Decisions citing scale tradeoffs.
+
+| Source | Why |
+|---|---|
+| `CLAUDE.md` | Note "Already Built" or "do NOT migrate to BullMQ" entries — some single-instance choices are intentional and documented |
+| Module's TTD doc (if exists) | Decisions citing scale tradeoffs |
 
 ### Step 2 — Map the module
-List every `.ts` / `.js` file in `<module-path>`. For each, note its role (controller / service / job / guard / repository / etc.).
 
-### Step 3 — Hunt each pattern (dispatched to subagent for cost)
-This is the heaviest step (many greps + context reads). Dispatch to Sonnet subagent.
+List every `.ts`/`.js`/`.py` (whatever language) in `$ARGUMENTS`. For each, note its role (controller / service / job / guard / repository / etc.).
 
-Dispatch `oh-my-claudecode:executor` (sonnet) with:
-```
-Hunt scale-killer patterns in module <module-path>. For each pattern below, run targeted Grep, then Read 20 lines of surrounding context for every hit (to filter false positives like test files, one-shot inits, CLI scripts).
+### Step 3 — Hunt patterns
 
-Return a JSON array per hit:
-  { pattern: "<name>", file: "<path>", line: <n>, context: "<surrounding 5 lines>", false_positive: true|false }
+Run targeted Grep for each pattern in the table above. For each hit, **Read 20 lines of surrounding context** to filter false positives:
+- Test files (`*.spec.ts`, `*.test.ts`)
+- CLI scripts
+- One-shot inits
+- Anything inside try/catch that gracefully degrades
+- Anything gated by leader election or distributed lock
 
-Patterns:
-- setInterval|setTimeout (periodic work)
-- new Map\(|new Set\(|new WeakMap\( (in-memory state)
-- fs\.|writeFile|appendFile|createWriteStream (local file writes)
-- WebSocket|EventSource|SSE (sticky-session needs)
-- OnModuleInit|onApplicationBootstrap (boot-time background work)
-- Promise\.all\(.*map\( (potential unbounded fan-out)
-- localhost|127\.0\.0\.1 (host assumptions)
-
-Mark false_positive=true for: test files (*.spec.ts, *.test.ts), CLI scripts, one-shot inits, anything inside try/catch where it's gracefully degraded.
-```
-
-Wait for the JSON response. Use it as input to Step 4+. Saves ~60% of scale-audit tokens.
-
-Fallback: if executor unavailable, run the greps in the main session with the same methodology.
-
-For each pattern in the table above, run a targeted `Grep` across the module:
-- `setInterval|setTimeout` (periodic work)
-- `new Map\(|new Set\(|new WeakMap\(` (in-memory state)
-- `fs\.|writeFile|appendFile|createWriteStream` (local file writes)
-- `WebSocket|EventSource|SSE` (sticky-session needs)
-- `OnModuleInit|onApplicationBootstrap` (boot-time background work)
-- `Promise\.all\(.*map\(` (potential unbounded fan-out)
-- `localhost|127\.0\.0\.1` (host assumptions)
-
-For each hit, **Read** the surrounding 20 lines to understand context — is it actually a scale risk, or is it test code / one-shot init / explicitly gated?
+**When N>=5 patterns to hunt** (the standard scale-audit grid): load [references/scale-audit-subagent-prompt.md](references/scale-audit-subagent-prompt.md) for the Sonnet subagent dispatch. ~60% token savings on this step.
 
 ### Step 4 — Cross-check claims against TTD
-If the module's TTD has a Decision saying "uses setInterval — do NOT migrate" (like Lumi), that's INTENTIONAL_SINGLE_INSTANCE. Don't flag it as a BLOCKER. Flag it as `WATCH` with a note: "intentional single-instance design — will need leader election or BullMQ migration before horizontal scaling."
+
+If TTD has a Decision saying "uses setInterval — do NOT migrate" (like Lumi), that's INTENTIONAL_SINGLE_INSTANCE. Don't flag as BLOCKER. Flag as `WATCH` with note: "intentional single-instance design — will need leader election or BullMQ migration before horizontal scaling."
 
 ### Step 5 — Assign verdicts
 
 | Verdict | Means | Required evidence |
 |---|---|---|
-| **BLOCKER** | Definitely breaks or duplicates work on instance #2 | `file:line` showing the pattern + 1-sentence failure mode |
-| **RISK** | Works now but degrades under load or grows unboundedly | `file:line` + load condition that would expose it |
-| **WATCH** | Intentional single-instance choice, but documented somewhere | `file:line` + the CLAUDE.md / TTD line that justifies it |
-| **OK** | Pattern checked, verified scale-safe (e.g. uses Redis, has DB unique constraint, gated by leader election) | `file:line` showing the safe implementation |
+| **BLOCKER** | Definitely breaks or duplicates work on instance #2 | `file:line` + 1-sentence failure mode |
+| **RISK** | Works now but degrades under load or grows unboundedly | `file:line` + load condition that exposes it |
+| **WATCH** | Intentional single-instance choice, documented somewhere | `file:line` + CLAUDE.md/TTD line that justifies it |
+| **OK** | Pattern checked, verified scale-safe (uses Redis, DB unique constraint, leader-gated) | `file:line` showing the safe implementation |
 
-**Hard rule**: every BLOCKER and RISK gets a one-sentence **fix recommendation** (e.g. "move to BullMQ with `@nestjs/bull`", "back rate limiter with Valkey using `INCR` + `EXPIRE`", "wrap with `redlock` for distributed lock").
+**Hard rules:**
+- Every BLOCKER and RISK gets a one-sentence fix recommendation
+- Every WATCH cites the CLAUDE.md/TTD line that justifies the single-instance choice
+- Every OK is first-class output (`tier: OK` with `intentional_citation: <file:line>`) — prevents future audits from re-raising the same patterns
 
-**OK-finding discipline (v0.6.7+):** Emit `tier: OK` findings for patterns checked-and-found-safe (e.g. `OK-payments-rate-limiter-uses-valkey`, `OK-payments-cron-leader-elected`). These are first-class output — they prevent future audits from re-raising the same patterns and signal which scale risks have been deliberately addressed. Each OK requires `intentional_citation` per the schema.
+### Step 6 — Write findings + manifest
 
-### Step 6 — Write findings (v0.7 YAML schema)
+Load [references/scale-audit-finding-schema.md](references/scale-audit-finding-schema.md) for the exact YAML schema + common fix recommendations.
 
-Emit **one YAML file per finding** to `.lattice/findings/open/<TIER>-<module-slug>-<rule-slug>.yml` per `docs/finding-schema.md`.
+**sweep_id sourcing:**
+- Invoked from `/audit-sweep` → use the sweep_id passed through
+- Standalone → generate via `lattice sweep-id` and write a manifest
 
-For scale dimension, `<rule-slug>` is a kebab-case pattern name: `setinterval-cron`, `in-memory-rate-limiter`, `local-file-write`, `unbounded-promise-all`, etc.
+### Step 7 — Draft checklist for deferred items
 
-YAML body per finding (scale dimension):
-
-```yaml
-id: <12-char hex>   # Generate per-finding via: lattice id-gen scale <rule> <file> "<exact source line, whitespace-collapsed>". Do NOT call id-gen without all four positional args — it will fail with exit 2 and auto-report a telemetry bug.
-rule: <kebab-case pattern slug>
-dimension: scale
-tier: BLOCKER | RISK | WATCH | OK
-module: <module path>
-file: <path>
-line: <integer>
-title: <one-line risk summary>
-fix: <one-sentence recommended migration>
-sweep_date: <YYYY-MM-DD>
-sweep_id: <14-char: YYYYMMDD + 6-hex, generate via `lattice sweep-id`>
-auditor: claude-code/scale-audit
-# Required if tier in [BLOCKER, RISK]:
-failure_mode: <one sentence — what breaks at instance #2>
-# Required if tier=WATCH:
-intentional_citation: <CLAUDE.md:line or TTD:line that justifies the single-instance choice>
-notes: <only if needed>
-```
-
-Skip the legacy multi-finding markdown file. The CLAUDE.md pre-scale checklist is regenerated from these YAML files by `lattice sync` at end of sweep.
-
-**sweep_id sourcing:** if invoked from `/audit-sweep`, use the sweep_id passed through. Standalone (`/scale-audit src/modules/payments`) generates its own via `lattice sweep-id` and writes a manifest in Step 6b.
-
-### Step 6b — Write sweep manifest (v0.6.7+, standalone runs only)
-
-If standalone, emit `.lattice/findings/sweeps/<sweep_id>.yml` per `docs/finding-schema.md`:
-
-```yaml
-sweep_id: <id>
-sweep_date: <YYYY-MM-DD>
-project_root: <root>
-modules_audited: [<module-path>]
-dimensions: [scale]
-mode: SEQUENTIAL
-auditor: claude-code/scale-audit
-auditor_model: <opus|sonnet|haiku>
-duration_ms: <int>
-totals: { BLOCKER: n, RISK: n, WATCH: n, OK: n }
-opened: [<slug>, ...]
-unchanged: [<slug>, ...]
-closed_since_last: [<slug>, ...]
-regressed: [<slug>, ...]
-skipped: <int>
-runtime_warnings:
-  - "<patterns inside try/catch with graceful-degrade, etc.>"
-```
-
-If invoked from `/audit-sweep`, do NOT write a separate manifest.
-
-### Step 7 — Draft checklist entries for deferred items
-For every **WATCH** and every **RISK that won't be fixed today**, draft a checklist line ready to paste into `CLAUDE.md` "Pre-scale checklist" section. Format:
+For every **WATCH** and every **RISK that won't be fixed today**, draft a checklist line ready to paste into `CLAUDE.md`:
 
 ```
 - [ ] <verdict> (<module>): <one-line risk summary>. Fix: <recommended fix>. <Trigger condition or "Only actionable once …">. Source: scale-audit <date>.
 ```
 
-Output these **as a fenced block** the user can copy. Do NOT write to CLAUDE.md or commit anything yourself — the user reviews the wording first, then pastes into their session to apply.
+Output as a fenced block the user can copy. **Do NOT write to CLAUDE.md or commit yourself** — user reviews wording first.
 
-### Step 8 — Stop and wait
-Output the findings file path + the verdict counts + the drafted checklist block. Tell the user:
+### Step 8 — Stop, await direction
+
+Output findings path + verdict counts + drafted checklist. Tell the user:
 
 ```
 Scale audit complete.
 Findings:  .lattice/findings/open/
-Manifest:  .lattice/findings/sweeps/<sweep_id>.yml
 Verdicts:  <n> BLOCKER, <n> RISK, <n> WATCH, <n> OK
-Skipped:   <n>
 
 Inspect: lattice list --module <module> --dimension scale | lattice show <id>
-Sync the CLAUDE.md checklist: lattice sync
+Sync CLAUDE.md checklist: lattice sync
 
-Drafted checklist entries (review wording, then paste into your session to apply):
+Drafted checklist entries (review wording, then paste to apply):
 
-[fenced block of checklist lines]
+[fenced block]
 
-Reply 'fix <id>' to address one finding, 'fix all blockers' to triage them in order, 'apply checklist' to add the drafted lines to CLAUDE.md and commit, or 'discuss' to review tradeoffs first.
+Reply 'fix <id>' / 'fix all blockers' / 'apply checklist' / 'discuss'.
 ```
 
-## Anti-patterns (refuse to do these)
+## Anti-patterns (refuse)
 
-- ❌ Verdict without `file:line`
-- ❌ Flagging a pattern without reading surrounding context (test files, one-shot inits, CLI scripts get false-positive otherwise)
-- ❌ Calling something a BLOCKER without a 1-sentence failure mode
-- ❌ Auto-applying fixes — scale fixes are architectural, must be discussed
-- ❌ Treating intentional single-instance designs (CLAUDE.md "do NOT migrate") as BLOCKERs
+| ❌ | Why |
+|---|---|
+| Verdict without `file:line` | Mandatory evidence |
+| Flagging a pattern without reading surrounding context | False positives (test files, one-shot inits, CLI scripts) erode trust |
+| BLOCKER without a 1-sentence failure mode | Required field per schema |
+| Auto-applying fixes | Scale fixes are architectural — must be discussed |
+| Treating intentional single-instance designs as BLOCKERs | CLAUDE.md "do NOT migrate" wins over default-BLOCKER |
 
 ## Tool usage
 
-- **Grep**: pattern hunting across the module (never Bash grep — Windows path issues)
-- **Read**: context for every grep hit before assigning a verdict
-- **Glob**: enumerate files in the module
-- **Bash**: only for `git log` if checking when a risky pattern was introduced
-- **Write**: only for the findings file in `.lattice/findings/`
+| Tool | Used for |
+|---|---|
+| Grep | Pattern hunting (never Bash grep — Windows path issues) |
+| Read | Surrounding context for every hit before verdict |
+| Glob | Enumerate files in the module |
+| Bash | Only `git log` when checking when a risky pattern was introduced |
+| Write | Only findings YAML in `.lattice/findings/` |
 
 ## Output discipline
 
 - No preamble. Start with "Scale-auditing <module-path>..."
 - One status line per pattern hunt ("setInterval: 1 hit, reading context...")
-- Final output = findings file path + verdict counts + next-action prompt
-
+- Final output = findings path + verdict counts + next-action prompt
 
 ---
 
-After running: use `lattice list` / `lattice triage` / `lattice sync` (the CLI, runs in any shell) to triage findings emitted into `.lattice/findings/open/`. Slash commands produce findings; the `lattice` CLI manages their lifecycle. See `lattice help` and the README "Workflow" section.
-
-When emitting findings, also set `exposure:` (one of `production-critical | user-facing | admin-only | internal | test-only | dead-code`) so `lattice list --effective-tier` can demote severity for low-blast-radius code paths. Default to `production-critical` only when you have evidence the code is on the live user flow; reach for `admin-only` / `internal` / `test-only` / `dead-code` aggressively to prevent CRITICAL/HIGH inflation.
+After running: `lattice list` / `lattice triage` / `lattice sync` to manage findings.
