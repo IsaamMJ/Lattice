@@ -2,6 +2,37 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.16] — 2026-05-18
+
+**SessionStart hook — closes Gap 1 from the v0.9.15 architecture audit.** Lattice state now arrives architecturally on EVERY new Claude Code session, not just when an audit skill fires. The "session forgot Lattice exists" failure mode becomes structurally impossible without explicit removal of the hook.
+
+### Added
+- **`scripts/lattice-session-start.mjs`** — Node.js SessionStart hook. Reads `.lattice/` state (mode, telemetry status, findings by tier, top-3 by tier+age, active ADRs, today's session event count) and emits a compact summary as `additionalContext` for Claude Code to inject into the session.
+- Hook output target: ~500-1000 chars (kept tight since it persists in every LLM call after session start).
+- Outputs both the new `hookSpecificOutput.additionalContext` shape AND the legacy top-level `additionalContext` for maximum Claude Code version compatibility.
+
+### Safety (post-v0.9.14 orphan-bash lessons applied)
+- Pure Node — zero `child_process` / `bash` spawns
+- Hard 1.5s timeout, always exits 0
+- Silent skip when `.lattice/` doesn't exist (non-Lattice repos get nothing)
+- `LATTICE_SESSION_START_DISABLE=1` env kill switch
+- ~170ms cold start measured on Windows + Git Bash
+
+### Install integration
+- `install.sh` now prints the exact `~/.claude/settings.json` snippet to wire it in. Does NOT auto-mutate settings.json — user opts in explicitly (post-statusline-incident discipline).
+- Added to `SCRIPTS` list in both `install.sh` and `update.sh`.
+
+### Verification
+- ~167ms cold start with full Lattice state
+- Silent + fast (~155ms) when kill switch set
+- Silent + ~200ms when run in non-Lattice repo
+- 5 rapid-fire invocations: 766ms total (~150ms each, no pile-up)
+
+### Why this matters
+Gap 1 was the biggest unrealized lever per the v0.9.15 architecture audit: Lattice's influence between LLM calls was still voluntary in non-audit sessions (e.g., plain code editing). Now every session — audit or not — starts with current state in context. Lattice goes from "tool I can invoke" to "layer the session lives inside" for the first time.
+
+Remaining gaps (per v0.9.15 audit): #2 PreToolUse Edit hook, #4 pre-approved permissions, #5 PostToolUse auto-resync. Slated for v0.9.17+.
+
 ## [0.9.15] — 2026-05-18
 
 **Audit-skill architecture upgrade — 4 of 5 patterns adopted from Anthropic's `claude-code-setup` plugin.** Researched the official `claude-automation-recommender` plugin via the Claude Code skills docs. Extracted current skill patterns, applied to Lattice's audit skills. Skipped `context: fork` for this batch (changes orchestration semantics — separate slice).
