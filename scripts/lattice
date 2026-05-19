@@ -1901,6 +1901,35 @@ cmd_doctor() {
       _check_warn "lattice not in PATH; no personal-bin dir on PATH" "add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"  (then re-run install.sh)"
     fi
   fi
+  # v1.0.1 (#46): on Windows, also verify the .cmd wrapper + Windows PATH so
+  # PowerShell users get a clear signal. Skip silently on non-Windows.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local cmd_found="" cmd_dir cmd_path
+      for candidate in "${HOME}/bin" "${HOME}/.local/bin" "${HOME}/.local/lattice/bin"; do
+        if [ -f "${candidate}/lattice.cmd" ]; then
+          cmd_found="${candidate}/lattice.cmd"; cmd_dir="${candidate}"; break
+        fi
+      done
+      if [ -z "${cmd_found}" ]; then
+        _check_warn "no lattice.cmd wrapper found (PowerShell will fail)" "re-run install.sh to drop the Windows .cmd shim (#46)"
+      else
+        _check_pass "lattice.cmd wrapper present (${cmd_found})"
+        # Check Windows User PATH
+        local win_dir win_path
+        win_dir="$(cygpath -w "${cmd_dir}" 2>/dev/null || echo "${cmd_dir}")"
+        win_path="$(powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'User')" 2>/dev/null | tr -d '\r' || true)"
+        case ";${win_path};" in
+          *";${win_dir};"*|*";${win_dir}\\;"*)
+            _check_pass "${win_dir} on Windows User PATH — lattice resolves in PowerShell"
+            ;;
+          *)
+            _check_warn "${win_dir} NOT on Windows User PATH (PowerShell can't find lattice)" "run in PowerShell: [Environment]::SetEnvironmentVariable('Path', \$env:Path + ';${win_dir}', 'User') — then open a NEW PowerShell window"
+            ;;
+        esac
+      fi
+      ;;
+  esac
   echo ""
 
   echo "## .lattice/ tree"

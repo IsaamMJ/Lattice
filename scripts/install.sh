@@ -116,6 +116,60 @@ else
   echo "[lattice]   alias lattice=\"${SCRIPT_DEST}/lattice\""
 fi
 
+# v1.0.1 (#46): on Windows, also drop a .cmd wrapper so `lattice` works in
+# PowerShell + cmd.exe (not just Git Bash). Detect Windows via uname output;
+# msys/mingw/cygwin all match. The .cmd resolves bash.exe at runtime via
+# `where bash` so it works whether the user installed Git for Windows in the
+# default location or a custom one.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    CMD_SHIM="${SHIM_DIR}/lattice.cmd"
+    cat > "${CMD_SHIM}" <<'CMDWRAPPER'
+@echo off
+setlocal
+set "BASH_EXE="
+for /f "delims=" %%i in ('where bash 2^>nul') do (
+  if not defined BASH_EXE set "BASH_EXE=%%i"
+)
+if not defined BASH_EXE if exist "C:\Program Files\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "C:\Program Files (x86)\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files (x86)\Git\bin\bash.exe"
+if not defined BASH_EXE (
+  echo [lattice] ERROR: bash.exe not found. Install Git for Windows.>&2
+  exit /b 1
+)
+"%BASH_EXE%" "__SCRIPT_DEST__/lattice" %*
+endlocal
+CMDWRAPPER
+    # Patch the SCRIPT_DEST path into the .cmd (sed -i for portability).
+    sed -i.bak "s#__SCRIPT_DEST__#${SCRIPT_DEST}#g" "${CMD_SHIM}" 2>/dev/null || true
+    rm -f "${CMD_SHIM}.bak" 2>/dev/null || true
+    echo "[lattice] Windows .cmd wrapper installed at ${CMD_SHIM} (#46)"
+
+    # Check if SHIM_DIR is on the Windows-side User PATH. PowerShell + cmd.exe
+    # read $env:PATH from the Windows registry, NOT from Git Bash's $PATH.
+    # Translate /c/Users/Jahir/bin -> C:\Users\Jahir\bin for comparison.
+    win_shim_dir="$(cygpath -w "${SHIM_DIR}" 2>/dev/null || echo "${SHIM_DIR}")"
+    win_user_path="$(powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'User')" 2>/dev/null | tr -d '\r')"
+    case ";${win_user_path};" in
+      *";${win_shim_dir};"*|*";${win_shim_dir}\\;"*)
+        echo "[lattice] ${win_shim_dir} already on Windows User PATH — \`lattice\` resolves in PowerShell"
+        ;;
+      *)
+        echo "[lattice] note: ${win_shim_dir} is NOT on your Windows User PATH"
+        echo "[lattice] adding it via setx (one-time; takes effect in NEW PowerShell windows)..."
+        new_path="${win_shim_dir}"
+        [ -n "${win_user_path}" ] && new_path="${win_user_path};${win_shim_dir}"
+        if powershell.exe -NoProfile -Command "[Environment]::SetEnvironmentVariable('Path', \"${new_path}\", 'User')" >/dev/null 2>&1; then
+          echo "[lattice]   ok: open a NEW PowerShell window, then \`lattice doctor\` will work"
+        else
+          echo "[lattice]   WARN: could not update Windows PATH automatically. Run this in PowerShell:"
+          echo "[lattice]   [Environment]::SetEnvironmentVariable('Path', \$env:Path + ';${win_shim_dir}', 'User')"
+        fi
+        ;;
+    esac
+    ;;
+esac
+
 # PATH check: is the chosen SHIM_DIR actually on PATH right now? If not, write
 # a one-line guard into the user's shell rc so the next shell picks it up.
 case ":${PATH}:" in
