@@ -2,6 +2,21 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-05-19
+
+**update.sh now keeps MCP + `.cmd` shim in sync.** Live-tested on a v0.9.16 → v1.0.3 upgrade on Windows + Git Bash — succeeded cleanly (so update isn't broken on Windows as feared in the v1.0.2 friction inventory), but three gaps surfaced.
+
+### Added
+- **MCP server refresh.** `update.sh` now fetches `mcp/package.json`, `mcp/tsconfig.json`, `mcp/src/index.ts` to `~/.claude/lattice/mcp/`, runs `npm install` (first-time only), and rebuilds `dist/` via tsc. Keeps `lattice mcp serve` from running stale code after CLI upgrades. Skipped silently if node/npm absent or fetch fails.
+- **Windows `.cmd` shim refresh.** On `MINGW*` / `MSYS*` / `CYGWIN*`, update.sh regenerates the `.cmd` wrapper next to the bash shim, repointing it at the current `SCRIPT_DEST`. Pre-v1.0.1 users had no `.cmd`; this lays one down on next update so PowerShell starts working post-update.
+
+### Note
+- v1.0.4's update.sh only takes effect once you're ON v1.0.4. To get there: re-run `lattice update --self` from any version ≥ v0.9.16. After landing on v1.0.4, subsequent updates carry MCP + `.cmd` refresh forward.
+
+### Verified
+- Live `bash <pre-v1.0.4-install>/scripts/lattice update --self` on this machine: succeeded, jumped from 0.9.17 to 1.0.3, all 14 scripts + 7 commands + 3 docs fetched cleanly. update.sh proved reliable on Windows + Git Bash.
+- `bash -n scripts/update.sh` clean
+
 ## [1.0.3] — 2026-05-19
 
 **`lattice setup` + `lattice ci-check-dead`.** Per-project bootstrap collapses to one command. Release-time dead-feature pruning becomes automated.

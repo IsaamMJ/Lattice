@@ -59,6 +59,72 @@ for d in "${DOCS[@]}"; do
   fi
 done
 
+# v1.0.4: refresh the MCP server source (mcp/) so users with `lattice mcp
+# setup` wired don't end up running a stale dist/index.js after update.
+MCP_DEST="${HOME}/.claude/lattice/mcp"
+MCP_FILES=("package.json" "tsconfig.json" "src/index.ts")
+echo "[lattice] updating MCP server source (mcp/)"
+mkdir -p "${MCP_DEST}/src" 2>/dev/null || true
+mcp_ok=1
+for f in "${MCP_FILES[@]}"; do
+  if fetch "${RAW}/mcp/${f}" "${MCP_DEST}/${f}" 2>/dev/null; then
+    echo "[lattice]   mcp/${f}"
+  else
+    echo "[lattice]   mcp/${f} (skipped — pre-MCP version or fetch failed)"
+    mcp_ok=0
+  fi
+done
+
+# Rebuild MCP dist/ if all source files landed AND node is available.
+# If anything's missing we leave the existing dist/index.js alone.
+if [ "${mcp_ok}" = "1" ] && command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  if [ ! -d "${MCP_DEST}/node_modules" ]; then
+    echo "[lattice] mcp: installing deps (first-time)"
+    ( cd "${MCP_DEST}" && npm install --silent 2>&1 ) | sed 's/^/[lattice]   /'
+  fi
+  echo "[lattice] mcp: rebuilding dist/"
+  ( cd "${MCP_DEST}" && npx --yes tsc 2>&1 ) | sed 's/^/[lattice]   /' || \
+    echo "[lattice]   WARN: mcp build failed — \`lattice mcp\` may use stale dist/"
+elif [ "${mcp_ok}" = "1" ]; then
+  echo "[lattice] mcp: node/npm missing — skipped build (run \`lattice mcp build\` later)"
+fi
+
+# Refresh the Windows .cmd shim (#46 from v1.0.1). Only when on MSYS/Cygwin.
+# install.sh creates this on first install; update.sh keeps it pointing at the
+# current SCRIPT_DEST after upgrades to/from versions that didn't drop it.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    SHIM_DIR=""
+    for candidate in "${HOME}/bin" "${HOME}/.local/bin" "${HOME}/.local/lattice/bin"; do
+      if [ -d "${candidate}" ] && [ -f "${candidate}/lattice" ]; then
+        SHIM_DIR="${candidate}"; break
+      fi
+    done
+    if [ -n "${SHIM_DIR}" ]; then
+      CMD_SHIM="${SHIM_DIR}/lattice.cmd"
+      cat > "${CMD_SHIM}" <<'CMDWRAPPER'
+@echo off
+setlocal
+set "BASH_EXE="
+for /f "delims=" %%i in ('where bash 2^>nul') do (
+  if not defined BASH_EXE set "BASH_EXE=%%i"
+)
+if not defined BASH_EXE if exist "C:\Program Files\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "C:\Program Files (x86)\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files (x86)\Git\bin\bash.exe"
+if not defined BASH_EXE (
+  echo [lattice] ERROR: bash.exe not found. Install Git for Windows.>&2
+  exit /b 1
+)
+"%BASH_EXE%" "__SCRIPT_DEST__/lattice" %*
+endlocal
+CMDWRAPPER
+      sed -i.bak "s#__SCRIPT_DEST__#${SCRIPT_DEST}#g" "${CMD_SHIM}" 2>/dev/null || true
+      rm -f "${CMD_SHIM}.bak" 2>/dev/null || true
+      echo "[lattice] Windows .cmd wrapper refreshed at ${CMD_SHIM} (#46)"
+    fi
+    ;;
+esac
+
 VERSION="$(curl -fsSL "${RAW}/.claude-plugin/plugin.json" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/' || echo "unknown")"
 printf "%s\n" "${VERSION}" > "${HOME}/.claude/lattice/VERSION"
 
