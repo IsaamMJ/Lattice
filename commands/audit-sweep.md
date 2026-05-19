@@ -10,6 +10,10 @@ Sweep arguments: $ARGUMENTS
 
 !`lattice context 2>/dev/null || echo "(lattice context unavailable)"`
 
+## Bootstrap (auto-injected — ensures .lattice/ tree exists for emissions)
+
+!`lattice setup 2>/dev/null | grep -E "ok|warn" || mkdir -p .lattice/findings/open .lattice/findings/closed .lattice/findings/sweeps 2>/dev/null`
+
 ## Argument parsing (do this FIRST)
 
 Split `$ARGUMENTS` on whitespace. Classify each token:
@@ -102,6 +106,8 @@ If any echo line is missing or out of order → drift. Stop, report, ask user ho
 ### Step 3 — Aggregate into the sweep manifest
 
 The YAML findings on disk are the source of truth; the CLAUDE.md checklist (regenerated in Step 5) is the human-readable view.
+
+**v1.1.2: Normalize ids + filenames first.** Run `lattice normalize --apply` before manifest aggregation. This re-derives `id:` from each YAML's `(dimension, rule, file, code_context)` tuple (per the v0.7 sha1 algorithm) and renames files to canonical `TIER-MODULE-RULE.yml` form with leading-dot module segments stripped. Without this, subagents that fabricate 16-hex ids (#52) cause every subsequent sweep to report all findings as "new" because hashes won't match.
 
 After all module dispatches complete, write the sweep manifest via `bash scripts/lattice-write-manifest.sh` with computed inputs. Load [references/audit-sweep-manifest.md](references/audit-sweep-manifest.md) for the exact command + input computation + manifest YAML shape + commit instructions.
 

@@ -139,6 +139,15 @@ function parseYaml(text) {
     if (line.trim() === '---' || line.trim() === '...') continue;
     const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/);
     if (!m) {
+      // v1.1.2 (#47): nested sub-keys under list items (e.g. `    line: 4`
+      // under `  - file: foo.ts`) start with whitespace and aren't top-level
+      // fields. This parser only extracts top-level fields for CLAUDE.md
+      // regen, so nested structure is structural noise — skip silently.
+      // `lattice list` uses a grep-based reader that already tolerates this;
+      // this fix aligns `lattice sync` with `lattice list`'s acceptance set.
+      if (/^\s/.test(line)) {
+        continue;
+      }
       // v0.6.6.3: better error hint for line-1 failures, the most common cause.
       let hint = '';
       if (i === 0) {

@@ -1043,7 +1043,14 @@ cmd_list() {
       fi
     fi
 
-    printf "%-9s %-12s %s/%s — %s:%s%s\n" "${display_tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}"
+    # v1.1.2 (#50): hide the "—  :" tail when both file and line are empty,
+    # which happens for finding YAMLs that lack file:/line: fields (e.g. some
+    # audit-sweep emissions). Renders cleanly as just `module/rule` then extra.
+    if [ -z "${file_field}" ] && [ -z "${line_field}" ]; then
+      printf "%-9s %-12s %s/%s%s\n" "${display_tier}" "${dimension}" "${module}" "${rule}" "${extra}"
+    else
+      printf "%-9s %-12s %s/%s — %s:%s%s\n" "${display_tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}"
+    fi
     count=$((count + 1))
   done
 
@@ -3325,7 +3332,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -5058,6 +5065,179 @@ EOF_COMMITS
 }
 
 # ---------------------------------------------------------------------------
+# normalize — walk .lattice/findings/open/*.yml and canonicalize each file's
+# id + filename. Fixes two friction surfaces:
+#   #44: leading-dot module paths (.claude/agents) producing slugs like
+#        LOW-.claude-agents-...; sanitize leading dots in module segments.
+#   #52: fabricated ids — subagents synthesize 16-hex ids instead of running
+#        `lattice id-gen`. Normalize re-derives ids from the (dimension, rule,
+#        file, line) tuple per the v0.7 algorithm.
+#
+# Usage:
+#   lattice normalize                # dry-run: list files that would change
+#   lattice normalize --apply        # rewrite ids in place + rename files
+#
+# v1.1.2 (#44 #52).
+# ---------------------------------------------------------------------------
+cmd_normalize() {
+  local apply=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1; shift ;;
+      --help|-h)
+        cat <<'NORM_HELP'
+lattice normalize — canonicalize finding ids + filenames in .lattice/findings/open/
+
+  (default)     dry-run: print what would be renamed/rewritten
+  --apply       perform the renames + id rewrites
+
+Fixes:
+  - leading-dot module segments (".claude/agents" -> "claude-agents")
+  - fabricated finding ids (re-derives via sha1 of dimension:rule:file:context)
+NORM_HELP
+        return 0 ;;
+      -*) die "normalize: unknown flag: $1" ;;
+      *)  die "normalize: extra arg: $1" ;;
+    esac
+  done
+
+  command -v node >/dev/null 2>&1 || die "normalize: node required"
+  [ -d .lattice/findings/open ] || die "normalize: no .lattice/findings/open/ in $(pwd) — run \`lattice setup\` first"
+
+  # Delegate the heavy lifting to a Node helper that knows the v0.7 id algo
+  # and the slug rules. Emits one line per change of the form:
+  #   STATUS|old-path|new-path|old-id|new-id
+  # STATUS = "rename" | "rewrite-id" | "both" | "ok"
+  local plan
+  plan="$(node - "${apply}" <<'NODEJS'
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const apply = process.argv[1] === "1";
+const root = ".lattice/findings/open";
+
+function readTop(text) {
+  const out = {};
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/\r$/, "");
+    if (!line || line.startsWith("#")) continue;
+    if (/^\s/.test(line)) continue; // nested = skip for top-level extraction
+    const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/);
+    if (!m) continue;
+    out[m[1]] = m[2].replace(/^["']|["']$/g, "");
+  }
+  return out;
+}
+
+function deriveId(dimension, rule, file, codeContext) {
+  const normalized = (codeContext || "").replace(/\s+/g, " ").trim();
+  const input = `${dimension}:${rule}:${file}:${normalized}`;
+  return crypto.createHash("sha1").update(input).digest("hex").slice(0, 12);
+}
+
+function sanitizeModule(mod) {
+  // Strip leading "./" or "."; replace internal slashes with "-"; strip any
+  // remaining leading dots from path segments. (.claude/agents -> claude-agents)
+  if (!mod) return "unknown";
+  return mod
+    .replace(/^\.+\/?/, "")
+    .split("/")
+    .map(seg => seg.replace(/^\.+/, ""))
+    .filter(Boolean)
+    .join("-") || "unknown";
+}
+
+function walk(dir) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walk(p));
+    else if (e.isFile() && e.name.endsWith(".yml")) out.push(p);
+  }
+  return out;
+}
+
+let changes = 0;
+for (const file of walk(root)) {
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch { continue; }
+  const fields = readTop(text);
+  const tier = (fields.tier || "UNKNOWN").toUpperCase();
+  const rule = fields.rule || "";
+  const dimension = fields.dimension || "";
+  const module = fields.module || "";
+  const filePath = fields.file || "";
+  const line = fields.line || "";
+  const currentId = fields.id || "";
+
+  // Code-context: prefer the explicit `code_context` field; else fall back
+  // to file:line as a stable stand-in. Audit-sweep emissions often skip
+  // code_context entirely — using file:line keeps re-derivation stable.
+  const codeContext = fields.code_context || `${filePath}:${line}`;
+  const correctId = deriveId(dimension, rule, filePath, codeContext);
+
+  const cleanModule = sanitizeModule(module);
+  const expectedFilenameStem = `${tier}-${cleanModule}-${rule}`;
+  const currentStem = path.basename(file, ".yml");
+  const expectedPath = path.join(root, `${expectedFilenameStem}.yml`);
+
+  const idMismatch = currentId && currentId !== correctId;
+  const nameMismatch = currentStem !== expectedFilenameStem;
+
+  if (!idMismatch && !nameMismatch && currentId) continue;
+
+  let status = "ok";
+  if (idMismatch && nameMismatch) status = "both";
+  else if (idMismatch) status = "rewrite-id";
+  else if (nameMismatch) status = "rename";
+  else if (!currentId) status = "rewrite-id";
+
+  changes++;
+  console.log([status, file, expectedPath, currentId || "(missing)", correctId].join("|"));
+
+  if (apply) {
+    // Rewrite id in YAML (replace or insert)
+    let next;
+    if (/^id:\s*/m.test(text)) {
+      next = text.replace(/^id:\s*.*$/m, `id: ${correctId}`);
+    } else {
+      // Insert id: as first key if missing
+      next = `id: ${correctId}\n${text.replace(/^﻿/, "")}`;
+    }
+    // Atomic write to current path, then rename
+    fs.writeFileSync(file, next, "utf8");
+    if (nameMismatch) {
+      // Don't clobber a different existing file at expectedPath
+      if (!fs.existsSync(expectedPath)) {
+        fs.renameSync(file, expectedPath);
+      } else {
+        console.log(["skip-rename-collision", file, expectedPath, "", ""].join("|"));
+      }
+    }
+  }
+}
+
+console.log(`# total changes: ${changes}`);
+NODEJS
+)"
+
+  echo "${plan}"
+  local n
+  n="$(printf '%s\n' "${plan}" | grep -c '^[a-z]' || true)"
+  if [ "${apply}" -eq 0 ]; then
+    if [ "${n:-0}" = "0" ]; then
+      echo "[${PROG}] normalize: no changes needed"
+    else
+      echo ""
+      echo "[${PROG}] normalize: ${n} change(s) proposed — re-run with --apply to write"
+    fi
+    return 0
+  fi
+  echo "[${PROG}] normalize: applied"
+}
+
+# ---------------------------------------------------------------------------
 # setup — one-command per-project bootstrap. v1.0.3 (#2).
 # Runs the canonical first-time sequence:
 #   1. Ensure .lattice/findings/{open,closed,sweeps} exist
@@ -5101,6 +5281,24 @@ SETUP_HELP
   # 1. Findings tree
   mkdir -p .lattice/findings/open .lattice/findings/closed .lattice/findings/sweeps .lattice/cache 2>/dev/null
   echo "  [ok] .lattice/findings/{open,closed,sweeps}"
+
+  # v1.1.2 (#53): drop .gitattributes to pin .lattice/ to LF newlines, so
+  # Windows + git's default core.autocrlf=true doesn't emit a CRLF warning for
+  # every YAML on every commit. Idempotent — preserve user content if present.
+  if [ ! -f .lattice/.gitattributes ]; then
+    cat > .lattice/.gitattributes <<'GITATTR'
+# Lattice findings + manifests — keep LF on disk to avoid CRLF churn on Windows.
+# Without this, every YAML emitted by audit skills triggers
+# "LF will be replaced by CRLF" on git add, and content-hash ids drift.
+* text=auto eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.jsonl text eol=lf
+GITATTR
+    echo "  [ok] .lattice/.gitattributes (LF pin for Windows CRLF safety)"
+  else
+    echo "  [ok] .lattice/.gitattributes already present (preserved)"
+  fi
 
   # 2. Config (only if missing — never overwrite existing)
   if [ ! -f .lattice/config.yml ]; then
@@ -5650,6 +5848,7 @@ case "${sub}" in
   setup)              cmd_setup "$@" ;;
   ci-check-dead)      cmd_ci_check_dead "$@" ;;
   release-notes)      cmd_release_notes "$@" ;;
+  normalize)          cmd_normalize "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;

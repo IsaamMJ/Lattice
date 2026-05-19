@@ -2,6 +2,30 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-05-19
+
+**Six issues surfaced by the first real-world `/audit-sweep` dogfood — fixed.** A user-filed audit-sweep run on a Next.js portfolio produced 8 friction reports (#47–#54); v1.1.2 closes the actionable bugs and ships `lattice normalize` as the canonical post-sweep healer.
+
+### Fixed
+- **`lattice sync` rejects YAML that `lattice list` accepts** (#47, HIGH). The Node parser in `lattice-regenerate.sh` only matched top-level keys; nested fields under list items (e.g. `    line: 4` under `  - file: foo.ts`) threw `malformed YAML at line N`. Fix: when a non-key-value line starts with whitespace, skip it silently — top-level field extraction never needed nested structure. Aligns `sync`'s acceptance set with `list`'s grep-based reader.
+- **`lattice list` renders `· :` tail for findings with empty file/line** (#50). New emit-conditional: when both `file` and `line` are blank, the printf format drops the `— %s:%s` suffix entirely.
+- **YAML findings cause CRLF warnings on every Windows commit** (#53). `lattice setup` now drops `.lattice/.gitattributes` pinning `*.yml` / `*.yaml` / `*.jsonl` to `eol=lf`. Idempotent: preserves the file if it already exists.
+- **`.lattice/{open,closed,sweeps}/` not auto-created on first sweep** (#49). `commands/audit-sweep.md` now runs `lattice setup` (with `mkdir -p` fallback) before subagent dispatch, ensuring emission directories always exist.
+
+### Added
+- **`lattice normalize [--apply]`** (#44 #52) — canonicalize ids + filenames in `.lattice/findings/open/`. Two healings in one pass:
+  - **Re-derive fabricated ids** (#52): subagents synthesize 16-hex ids inline instead of running `lattice id-gen`. Normalize re-derives each id via sha1 of `dimension:rule:file:code_context` per the v0.7 algorithm. Without this, sweep N+1 sees all findings as "new" because hashes don't match.
+  - **Strip leading-dot module segments** (#44): `.claude/agents` → `claude-agents` (no more `LOW-.claude-agents-...` filenames).
+- **audit-sweep skill** now runs `lattice normalize --apply` between subagent dispatch and manifest aggregation (Step 3). Closes the loop on subagent-fabricated ids.
+
+### Closed without code change
+- **#41** (Feature: lattice-mcp) — already shipped in v1.0.0.
+
+### Verified
+- Real test: `/tmp/sync-test/.lattice/findings/open/BLOCKER-test.yml` with nested `evidence:` block — pre-fix throws "malformed YAML at line 10"; post-fix `lattice sync` parses cleanly and progresses to schema validation.
+- `lattice normalize` against the same fixture correctly identifies fabricated id + wrong filename and renames to `BLOCKER-test-mod-test-rule.yml`.
+- `bash -n scripts/lattice` and `bash -n scripts/lattice-regenerate.sh` clean.
+
 ## [1.1.1] — 2026-05-19
 
 **`lattice release-notes` — auto-generate CHANGELOG.md entries (#11).** Hand-writing release notes for every ship was the last hand-cranked release step. v1.1.1 turns it into a one-liner.
