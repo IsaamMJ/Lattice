@@ -2,6 +2,30 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-05-19
+
+**Hot fix from v1.4.0 dogfood**: #58 `body: unbound variable` crash + #59 structured measurement fields.
+
+### Fixed (#58)
+- `_mcp_setup` and `_wire_hooks` now defensively initialize `local status="" body=""` and use `${out:-}` + `|| true` on the substitution pipelines. Under `set -euo pipefail`, an empty `${out}` or pipefail in the substitution previously left `body` unset; the next `echo "${body}"` then tripped "unbound variable" and aborted the command. Defensive init removes the failure mode regardless of node helper edge cases.
+
+### Added (#59)
+- **Structured measurement block** in `lattice grow propose`:
+  - `--metric-name <name>` — the metric being measured (e.g., `ctr`, `signups_per_day`)
+  - `--measurement-source <path>` — where it's measured (e.g., `/api/track`, `posthog:event=signup`)
+  - `--baseline-value <number>` — snapshot of metric pre-change
+  - `--baseline-source "..."` — how the baseline was sampled
+  - `--expected-delta <number>` — predicted change (e.g., `+0.005`)
+  - `--success-threshold <number>` — the cutoff for `won`
+  - `--window-days <N>` — measurement window
+  - All fields land under a `measurement:` block in the YAML — v2.0 auto-rollback reads these directly without re-parsing the `metric:` free-text.
+- **`--observed-value <number>` on `lattice grow close`** — captures the actual outcome at close time. Pairs with `baseline_value` + `success_threshold` to enable v2.0's auto-rollback signal.
+- `grow propose` emits a stderr note when structured fields are omitted, pointing at #59 so users know v2.0 will need them.
+
+### Verified
+- Live test: `grow propose cta-test ... --metric-name ctr --baseline-value 0.012 --success-threshold 0.015` emits structured `measurement:` block; `grow close --observed-value 0.018` stamps it under `observed_value: 0.018`.
+- `bash -n scripts/lattice` clean.
+
 ## [1.4.1] — 2026-05-19
 
 **Shim-drift detection + update self-verification.** Closes the silent-failure mode that bit us during the v1.4.0 dogfood: a session reports "you have v0.9.16, no `lattice grow`" while a parallel session insists "v1.4.0 is shipped." Both true — the GitHub release is live AND the user's `lattice` shim resolves to a different on-disk script that update.sh never touched.

@@ -4978,10 +4978,10 @@ NODEJS
     esac
   }
 
-  local status
-  status="$(printf '%s\n' "${out}" | head -1 | sed -E 's/^STATUS=//')"
-  local body
-  body="$(printf '%s\n' "${out}" | tail -n +2)"
+  # v1.4.2 (#58): same defensive init as _mcp_setup — set -u + pipefail
+  local status="" body=""
+  status="$(printf '%s\n' "${out:-}" | head -1 | sed -E 's/^STATUS=//' || true)"
+  body="$(printf '%s\n' "${out:-}" | tail -n +2 || true)"
 
   case "${status}" in
     noop)
@@ -5429,20 +5429,30 @@ _grow_propose() {
   [ "$#" -ge 1 ] || die "grow propose: usage: lattice grow propose <slug> --title ... --change ... --metric ..."
   local slug="$1"; shift
   local title="" change="" metric="" cadence="weekly" effort="MEDIUM" risk="LOW"
+  # v1.4.2 (#59): structured measurement fields for v2.0 auto-rollback
+  local metric_name="" measurement_source="" baseline_value="" baseline_source=""
+  local expected_delta="" success_threshold="" window_days=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --title)   title="$2"; shift 2 ;;
-      --change)  change="$2"; shift 2 ;;
-      --metric)  metric="$2"; shift 2 ;;
-      --cadence) cadence="$2"; shift 2 ;;
-      --effort)  effort="$2"; shift 2 ;;
-      --risk)    risk="$2"; shift 2 ;;
+      --title)              title="$2"; shift 2 ;;
+      --change)             change="$2"; shift 2 ;;
+      --metric)             metric="$2"; shift 2 ;;
+      --metric-name)        metric_name="$2"; shift 2 ;;
+      --measurement-source) measurement_source="$2"; shift 2 ;;
+      --baseline-value)     baseline_value="$2"; shift 2 ;;
+      --baseline-source)    baseline_source="$2"; shift 2 ;;
+      --expected-delta)     expected_delta="$2"; shift 2 ;;
+      --success-threshold)  success_threshold="$2"; shift 2 ;;
+      --window-days)        window_days="$2"; shift 2 ;;
+      --cadence)            cadence="$2"; shift 2 ;;
+      --effort)             effort="$2"; shift 2 ;;
+      --risk)               risk="$2"; shift 2 ;;
       *) die "grow propose: unknown flag: $1" ;;
     esac
   done
   [ -n "${title}" ] || die "grow propose: --title required"
   [ -n "${change}" ] || die "grow propose: --change required (one-line description of the change)"
-  [ -n "${metric}" ] || die "grow propose: --metric required (what metric this changes and how)"
+  [ -n "${metric}" ] || die "grow propose: --metric required (free-text description; pair with --metric-name + --measurement-source for v2.0 auto-rollback)"
 
   mkdir -p .lattice/hypotheses/open 2>/dev/null
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -5453,27 +5463,42 @@ _grow_propose() {
   id="$(printf '%s' "growth:${slug}:${change}:${metric}" | sha1sum 2>/dev/null | cut -c1-12 || \
         printf '%s' "growth:${slug}:${change}:${metric}" | shasum -a 1 | cut -c1-12)"
 
-  cat > "${dest}" <<HYPO
-id: ${id}
-slug: ${slug}
-state: open
-title: "${title//\"/\\\"}"
-change: "${change//\"/\\\"}"
-metric: "${metric//\"/\\\"}"
-cadence: ${cadence}
-effort: ${effort}
-risk: ${risk}
-proposed_at: ${now}
-proposed_by: lattice-cli
-# Lifecycle stamps (filled by run/rollback/close):
-# run_at: <ISO>
-# run_commit: <sha>
-# closed_at: <ISO>
-# result: <won|lost|inconclusive>
-# rationale: "..."
-HYPO
+  {
+    printf 'id: %s\n' "${id}"
+    printf 'slug: %s\n' "${slug}"
+    printf 'state: open\n'
+    printf 'title: "%s"\n' "${title//\"/\\\"}"
+    printf 'change: "%s"\n' "${change//\"/\\\"}"
+    printf 'metric: "%s"\n' "${metric//\"/\\\"}"
+    # v1.4.2 (#59): structured measurement block — v2.0 auto-rollback reads these
+    if [ -n "${metric_name}${measurement_source}${baseline_value}${expected_delta}${success_threshold}${window_days}" ]; then
+      printf 'measurement:\n'
+      [ -n "${metric_name}" ]         && printf '  name: "%s"\n'              "${metric_name//\"/\\\"}"
+      [ -n "${measurement_source}" ]  && printf '  source: "%s"\n'            "${measurement_source//\"/\\\"}"
+      [ -n "${baseline_value}" ]      && printf '  baseline_value: %s\n'      "${baseline_value}"
+      [ -n "${baseline_source}" ]     && printf '  baseline_source: "%s"\n'   "${baseline_source//\"/\\\"}"
+      [ -n "${expected_delta}" ]      && printf '  expected_delta: %s\n'      "${expected_delta}"
+      [ -n "${success_threshold}" ]   && printf '  success_threshold: %s\n'   "${success_threshold}"
+      [ -n "${window_days}" ]         && printf '  window_days: %s\n'         "${window_days}"
+    fi
+    printf 'cadence: %s\n' "${cadence}"
+    printf 'effort: %s\n' "${effort}"
+    printf 'risk: %s\n' "${risk}"
+    printf 'proposed_at: %s\n' "${now}"
+    printf 'proposed_by: lattice-cli\n'
+    printf '# Lifecycle stamps (filled by run/rollback/close):\n'
+    printf '# run_at: <ISO>\n'
+    printf '# run_commit: <sha>\n'
+    printf '# closed_at: <ISO>\n'
+    printf '# observed_value: <number>      # v1.4.2 — actual outcome at close\n'
+    printf '# result: <won|lost|inconclusive>\n'
+    printf '# rationale: "..."\n'
+  } > "${dest}"
   echo "[${PROG}] grow: proposed ${dest}"
   echo "[${PROG}] start running with: lattice grow run ${slug} --commit <sha>"
+  if [ -z "${metric_name}${measurement_source}${baseline_value}" ]; then
+    echo "[${PROG}] note: structured measurement fields (--metric-name, --measurement-source, --baseline-value, --expected-delta, --success-threshold, --window-days) omitted. v2.0 auto-rollback requires these — see #59." >&2
+  fi
 }
 
 # Resolve a hypothesis path by slug. Walks open/running/closed/rolled-back.
@@ -5600,10 +5625,13 @@ _grow_close() {
   [ "$#" -ge 1 ] || die "grow close: usage: lattice grow close <slug> --result <won|lost|inconclusive>"
   local slug="$1"; shift
   local result="" rationale=""
+  # v1.4.2 (#59): capture observed value at close time
+  local observed_value=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --result)    result="$2"; shift 2 ;;
-      --rationale) rationale="$2"; shift 2 ;;
+      --result)         result="$2"; shift 2 ;;
+      --rationale)      rationale="$2"; shift 2 ;;
+      --observed-value) observed_value="$2"; shift 2 ;;
       *) die "grow close: unknown flag: $1" ;;
     esac
   done
@@ -5619,12 +5647,13 @@ _grow_close() {
   mkdir -p .lattice/hypotheses/closed 2>/dev/null
   local dst=".lattice/hypotheses/closed/${slug}.yml"
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  awk -v now="${now}" -v r="${result}" -v rat="${rationale}" '
+  awk -v now="${now}" -v r="${result}" -v rat="${rationale}" -v ov="${observed_value}" '
     /^state:/ { print "state: closed"; next }
     { print }
     END {
       print "closed_at: " now
       print "result: " r
+      if (ov != "") print "observed_value: " ov
       if (rat != "") print "rationale: \"" rat "\""
     }
   ' "${src}" > "${dst}.tmp" && mv "${dst}.tmp" "${dst}"
@@ -6676,10 +6705,13 @@ NODEJS
     die "mcp setup: node helper exited ${rc}"
   }
 
-  local status
-  status="$(printf '%s\n' "${out}" | head -1 | sed -E 's/^STATUS=//')"
-  local body
-  body="$(printf '%s\n' "${out}" | tail -n +2)"
+  # v1.4.2 (#58): initialize defensively — under `set -euo pipefail`, an empty
+  # ${out} or a pipefail in the substitution leaves body/status unset and the
+  # next `echo "${body}"` trips "unbound variable". Initialize-then-assign
+  # makes both defined no matter what the substitution does.
+  local status="" body=""
+  status="$(printf '%s\n' "${out:-}" | head -1 | sed -E 's/^STATUS=//' || true)"
+  body="$(printf '%s\n' "${out:-}" | tail -n +2 || true)"
 
   case "${status}" in
     noop)
