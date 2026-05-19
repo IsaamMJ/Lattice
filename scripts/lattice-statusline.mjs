@@ -132,10 +132,13 @@ function readGitBranch(cwd) {
 }
 
 function countFindings(cwd) {
-  // Single pass over .lattice/findings/open/ — read each YAML and look for
-  // `tier: CRITICAL` / `tier: HIGH`. No subprocess, no glob; just readdir.
-  const out = { crit: 0, high: 0 };
-  const root = join(cwd, '.lattice', 'findings', 'open');
+  // v1.0.2: track all actionable tiers + lattice presence (.lattice/ exists).
+  // Skip OK tier — those are check-passed markers, not findings to address.
+  const out = { crit: 0, high: 0, med: 0, low: 0, drift: 0, total: 0, hasLattice: false };
+  const latticeDir = join(cwd, '.lattice');
+  if (!existsSync(latticeDir)) return out;
+  out.hasLattice = true;
+  const root = join(latticeDir, 'findings', 'open');
   if (!existsSync(root)) return out;
   try {
     const walk = (dir) => {
@@ -146,8 +149,16 @@ function countFindings(cwd) {
         else if (e.isFile() && e.name.endsWith('.yml')) {
           try {
             const content = readFileSync(p, 'utf8');
-            if (/^tier:\s*CRITICAL(\s|$)/m.test(content)) out.crit++;
-            else if (/^tier:\s*HIGH(\s|$)/m.test(content)) out.high++;
+            const m = content.match(/^tier:\s*(\w+)/m);
+            if (!m) continue;
+            const t = m[1];
+            if (t === 'OK') continue;
+            out.total++;
+            if (t === 'CRITICAL' || t === 'BLOCKER') out.crit++;
+            else if (t === 'HIGH' || t === 'RISK') out.high++;
+            else if (t === 'MEDIUM') out.med++;
+            else if (t === 'LOW' || t === 'WATCH') out.low++;
+            else if (t === 'DRIFT') out.drift++;
           } catch {}
         }
       }
@@ -291,10 +302,25 @@ function extractField(json, path) {
     if (cwdShort) l1.push(`${C.DIM}${cwdShort}${C.RESET}`);
     if (branch) l1.push(`${C.DIM}⎇${C.RESET} ${branch}`);
 
-    // ---- LINE 2: [Lattice] · 5h · wk · ctx · findings · friction · mode ----
-    // v0.9.17: append reset-time-remaining "(1h32m)" after each rate-limit bar
-    //          when Claude Code's stdin provides resets_at.
-    const l2 = [`${C.DIM}[${C.RESET}${C.BOLD}Lattice${C.RESET}${C.DIM}]${C.RESET}`];
+    // ---- LINE 2: [Lattice ...] · 5h · wk · ctx · findings · friction · mode ----
+    // v0.9.17: append reset-time-remaining "(1h32m)" after each rate-limit bar.
+    // v1.0.2 (#8): brand block now carries signal — show finding total inline
+    // (`[Lattice 12]`, `[Lattice ✓]`, or `[Lattice ⨯]` when not configured)
+    // instead of always-static `[Lattice]`.
+    let brandInner;
+    if (!findings.hasLattice) {
+      // Not a Lattice-enabled project — dim everything to signal absence.
+      brandInner = `${C.DIM}Lattice ⨯${C.RESET}`;
+    } else if (findings.total === 0) {
+      brandInner = `${C.BOLD}Lattice${C.RESET} ${C.GREEN}✓${C.RESET}`;
+    } else if (findings.crit > 0) {
+      brandInner = `${C.BOLD}Lattice${C.RESET} ${C.RED}${findings.total}${C.RESET}`;
+    } else if (findings.high > 0) {
+      brandInner = `${C.BOLD}Lattice${C.RESET} ${C.YELLOW}${findings.total}${C.RESET}`;
+    } else {
+      brandInner = `${C.BOLD}Lattice${C.RESET} ${findings.total}`;
+    }
+    const l2 = [`${C.DIM}[${C.RESET}${brandInner}${C.DIM}]${C.RESET}`];
     if (fhPct != null) {
       const r = formatResetTime(fhReset);
       const tail = r ? `${C.DIM}(${r})${C.RESET}` : '';

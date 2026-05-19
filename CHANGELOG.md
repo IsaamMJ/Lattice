@@ -2,6 +2,30 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-05-19
+
+**Install-UX hardening + `lattice uninstall` + signal in the statusline brand block.** Five frictions surfaced during the v1.0.1 dogfood window, all addressed in one ship.
+
+### Added
+- **`lattice uninstall`** (#9) — remove Lattice from cwd (`.lattice/` + CLAUDE.md block) or globally (`--global` for commands + scripts; `--global --purge` for shims + settings.json hooks + mcpServers.lattice). Dry-run by default; `--yes` applies. Always backs up CLAUDE.md before mutation. Strips lattice-only CLAUDE.md entirely; strips the block via awk in mixed CLAUDE.md.
+- **Auto-wire prompt in `install.sh`** (#5) — at the end of install, offer to run `lattice wire-hooks --apply --yes` + `lattice mcp setup --apply --yes` interactively. Only prompts when on a TTY; `LATTICE_INSTALL_NO_PROMPT=1` disables. Replaces the "install.sh prints snippet, user pastes into settings.json" friction. The MCP setup is skipped silently when `dist/index.js` is missing.
+
+### Changed
+- **`lattice doctor` first-run noise** (#4) — fresh installs no longer look like a wall of failures. Detects first-run state (no `.lattice/config.yml` AND no `.lattice/cache/update-check.env`) and downgrades known-normal warnings to `[INFO]`: `config.yml not initialized`, `CLAUDE.md not yet created`, `no update-check cache`. Adds a one-line banner ("first-run state detected") and a clear final summary ("setup is clean — first-run notices are expected").
+- **Statusline brand block carries signal** (#8) — `[Lattice]` block now reflects state:
+  - `[Lattice ⨯]` (dim) — cwd has no `.lattice/`, signal that lattice is NOT in this project
+  - `[Lattice ✓]` (green) — Lattice enabled, zero open findings
+  - `[Lattice N]` (yellow if HIGH/RISK; red if CRITICAL/BLOCKER; plain otherwise) — N open actionable findings
+- **SessionStart hook suppresses OK-tier spam** (#10) — `OK-finding-schema-required-fields-verified` and other check-passed markers no longer appear in "Top findings to address". Counted separately as "N OK checks verified" alongside the zero-finding state. Avoids surfacing non-actionable markers as work-to-do in every session context.
+
+### Fixed
+- Statusline color when only `MEDIUM` / `LOW` / `DRIFT` findings exist now correctly uses the plain `[Lattice N]` form instead of falling through to the implicit "no signal" branch.
+
+### Verified
+- `bash -n scripts/lattice` and `bash -n scripts/install.sh` clean
+- `node --check scripts/lattice-statusline.mjs` and `node --check scripts/lattice-session-start.mjs` clean
+- `lattice uninstall` dry-run in a project with `.lattice/` lists what it will remove and exits 0 without touching anything
+
 ## [1.0.1] — 2026-05-19
 
 **PowerShell PATH fix (#46).** v1.0.0 + v0.9.18's PATH fix only worked in Git Bash. PowerShell users — the majority of Windows Claude Code users — still hit `lattice: command not recognized`. v1.0.1 closes that gap.

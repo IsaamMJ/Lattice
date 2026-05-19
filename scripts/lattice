@@ -1853,13 +1853,22 @@ YML
 # Exit code: 0 if no FAIL, 1 if any FAIL.
 # ---------------------------------------------------------------------------
 cmd_doctor() {
-  local fails=0 warns=0 passes=0
+  local fails=0 warns=0 passes=0 infos=0
   local check_name fix_hint
   _check_pass() { printf "  [PASS] %s\n" "$1"; passes=$((passes+1)); }
   _check_warn() { printf "  [WARN] %s — %s\n" "$1" "$2"; warns=$((warns+1)); }
   _check_fail() { printf "  [FAIL] %s — %s\n" "$1" "$2"; fails=$((fails+1)); }
+  # v1.0.2: distinguish "first-run, will heal itself" notices from real WARNs
+  # so a fresh install doesn't look like a wall of failures.
+  _check_info() { printf "  [INFO] %s — %s\n" "$1" "$2"; infos=$((infos+1)); }
 
   echo "[${PROG}] doctor: diagnosing Lattice setup in $(pwd)"
+  # First-run detection — used to downgrade specific WARNs to INFOs.
+  local _is_first_run=0
+  if [ ! -f .lattice/cache/update-check.env ] && [ ! -f .lattice/config.yml ]; then
+    _is_first_run=1
+    echo "  (first-run state detected — [INFO] lines below are expected and will heal on first use)"
+  fi
   echo ""
 
   echo "## Environment"
@@ -1960,6 +1969,8 @@ cmd_doctor() {
   done
   if [ -f ".lattice/config.yml" ]; then
     _check_pass ".lattice/config.yml present"
+  elif [ "${_is_first_run}" -eq 1 ]; then
+    _check_info ".lattice/config.yml not initialized" "will be created on first \`lattice config init\` or \`lattice sync\`"
   else
     _check_warn ".lattice/config.yml not initialized" "run: lattice config init  (enables usage tracking + update check tuning)"
   fi
@@ -1972,6 +1983,8 @@ cmd_doctor() {
     else
       _check_warn "CLAUDE.md exists but no lattice markers" "run: lattice sync  (will append markers at end)"
     fi
+  elif [ "${_is_first_run}" -eq 1 ]; then
+    _check_info "CLAUDE.md not yet created" "auto-created on first \`lattice sync\`"
   else
     _check_warn "CLAUDE.md missing" "lattice sync will create one on first run"
   fi
@@ -2005,21 +2018,29 @@ cmd_doctor() {
     if [ ${cache_age} -lt 86400 ]; then
       _check_pass "update-check cache fresh (< 24h)"
     else
-      _check_warn "update-check cache stale" "next lattice invocation will refresh"
+      _check_info "update-check cache stale" "next lattice invocation refreshes it (no action needed)"
     fi
+  elif [ "${_is_first_run}" -eq 1 ]; then
+    _check_info "no update-check cache" "created on next \`lattice ...\` invocation"
   else
     _check_warn "no update-check cache" "first run — will be created next invocation"
   fi
   echo ""
 
   echo "## Summary"
-  echo "  ${passes} passed, ${warns} warnings, ${fails} failures"
+  if [ ${infos} -gt 0 ]; then
+    echo "  ${passes} passed, ${warns} warnings, ${fails} failures, ${infos} first-run notices"
+  else
+    echo "  ${passes} passed, ${warns} warnings, ${fails} failures"
+  fi
   if [ ${fails} -gt 0 ]; then
     echo "  doctor: setup has issues — see [FAIL] lines above"
     return 1
   fi
   if [ ${warns} -gt 0 ]; then
     echo "  doctor: setup is functional — see [WARN] lines for optional improvements"
+  elif [ ${infos} -gt 0 ]; then
+    echo "  doctor: setup is clean (first-run notices are expected, ignore them)"
   else
     echo "  doctor: setup is clean"
   fi
@@ -3304,7 +3325,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check wire-hooks mcp usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check wire-hooks mcp uninstall usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4745,6 +4766,162 @@ NODEJS_APPLY
 }
 
 # ---------------------------------------------------------------------------
+# uninstall — remove Lattice from the current project (default) or globally
+# (--global). Always lists what will be deleted; requires --yes to actually
+# remove. Backs up CLAUDE.md before deletion. v1.0.2 (#9).
+#
+# Usage:
+#   lattice uninstall                      # remove .lattice/ + CLAUDE.md block from cwd, dry-run
+#   lattice uninstall --yes                # actually remove
+#   lattice uninstall --global             # remove global install (~/.claude/lattice + commands)
+#   lattice uninstall --global --yes       # actually remove globally
+#   lattice uninstall --global --purge     # also remove shims, hooks, mcp wiring
+# ---------------------------------------------------------------------------
+cmd_uninstall() {
+  local scope="project" yes=0 purge=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --global) scope="global"; shift ;;
+      --yes|-y) yes=1; shift ;;
+      --purge)  purge=1; shift ;;
+      --help|-h)
+        cat <<'UNINSTALL_HELP'
+lattice uninstall — remove Lattice from this project or globally
+
+  (default)             remove .lattice/ + CLAUDE.md Lattice block from cwd
+  --global              remove the global install (commands, scripts, docs)
+  --global --purge      also remove shims, settings.json hooks, mcp wiring
+  --yes                 actually remove (default is dry-run)
+
+Always dry-runs first; backs up CLAUDE.md before deletion. Use --global
+to wipe the install for a fully from-scratch test.
+UNINSTALL_HELP
+        return 0 ;;
+      -*) die "uninstall: unknown flag: $1" ;;
+      *)  die "uninstall: extra arg: $1" ;;
+    esac
+  done
+
+  local items=()
+  if [ "${scope}" = "project" ]; then
+    [ -d .lattice ] && items+=(".lattice/")
+    if [ -f CLAUDE.md ] && grep -q "lattice:checklist:start" CLAUDE.md 2>/dev/null; then
+      # Detect lattice-only CLAUDE.md (we'll just delete) vs mixed (we'll strip block)
+      local non_lattice
+      non_lattice="$(grep -cvE '^(<!--|##? |\s*$|- )' CLAUDE.md 2>/dev/null || echo 0)"
+      if [ "${non_lattice}" -le 1 ]; then
+        items+=("CLAUDE.md  (lattice-only, full delete)")
+      else
+        items+=("CLAUDE.md  (strip block between lattice:checklist:start/end markers)")
+      fi
+    fi
+  else
+    [ -d "${HOME}/.claude/lattice" ] && items+=("${HOME}/.claude/lattice/")
+    for cmd in audit audit-sweep close flow-audit lattice-fix scale-audit security-audit; do
+      [ -f "${HOME}/.claude/commands/${cmd}.md" ] && items+=("${HOME}/.claude/commands/${cmd}.md")
+    done
+    if [ "${purge}" -eq 1 ]; then
+      for shim in "${HOME}/bin/lattice" "${HOME}/.local/bin/lattice" "${HOME}/.local/lattice/bin/lattice"; do
+        [ -e "${shim}" ] && items+=("${shim}")
+      done
+      for cmdshim in "${HOME}/bin/lattice.cmd" "${HOME}/.local/bin/lattice.cmd" "${HOME}/.local/lattice/bin/lattice.cmd"; do
+        [ -e "${cmdshim}" ] && items+=("${cmdshim}")
+      done
+      [ -f "${HOME}/.claude/settings.json" ] && items+=("${HOME}/.claude/settings.json  (Lattice hooks + statusLine will be stripped)")
+      [ -f "${HOME}/.claude.json" ] && grep -q '"lattice"' "${HOME}/.claude.json" 2>/dev/null && items+=("${HOME}/.claude.json  (mcpServers.lattice will be stripped)")
+    fi
+  fi
+
+  if [ "${#items[@]}" -eq 0 ]; then
+    echo "[${PROG}] uninstall: nothing to remove (Lattice is not installed at ${scope} scope)"
+    return 0
+  fi
+
+  echo "[${PROG}] uninstall (${scope} scope) — the following will be removed:"
+  for item in "${items[@]}"; do
+    echo "  - ${item}"
+  done
+  echo ""
+
+  if [ "${yes}" -ne 1 ]; then
+    echo "[${PROG}] DRY RUN — re-run with --yes to actually remove"
+    return 0
+  fi
+
+  # Apply
+  if [ "${scope}" = "project" ]; then
+    if [ -d .lattice ]; then
+      rm -rf .lattice
+      echo "[${PROG}] removed .lattice/"
+    fi
+    if [ -f CLAUDE.md ] && grep -q "lattice:checklist:start" CLAUDE.md 2>/dev/null; then
+      cp CLAUDE.md "CLAUDE.md.lattice-backup-$(date -u +%Y%m%dT%H%M%SZ)"
+      local non_lattice
+      non_lattice="$(grep -cvE '^(<!--|##? |\s*$|- )' CLAUDE.md 2>/dev/null || echo 0)"
+      if [ "${non_lattice}" -le 1 ]; then
+        rm -f CLAUDE.md
+        echo "[${PROG}] removed CLAUDE.md (lattice-only)"
+      else
+        # Strip just the block — keep the user's other content
+        awk '/lattice:checklist:start/{f=1;next} /lattice:checklist:end/{f=0;next} !f{print}' CLAUDE.md > CLAUDE.md.tmp && mv CLAUDE.md.tmp CLAUDE.md
+        echo "[${PROG}] stripped lattice block from CLAUDE.md (backup written)"
+      fi
+    fi
+  else
+    rm -rf "${HOME}/.claude/lattice"
+    for cmd in audit audit-sweep close flow-audit lattice-fix scale-audit security-audit; do
+      rm -f "${HOME}/.claude/commands/${cmd}.md"
+    done
+    echo "[${PROG}] removed global commands + scripts"
+    if [ "${purge}" -eq 1 ]; then
+      for shim in "${HOME}/bin/lattice" "${HOME}/.local/bin/lattice" "${HOME}/.local/lattice/bin/lattice" \
+                  "${HOME}/bin/lattice.cmd" "${HOME}/.local/bin/lattice.cmd" "${HOME}/.local/lattice/bin/lattice.cmd"; do
+        rm -f "${shim}"
+      done
+      echo "[${PROG}] removed shims"
+      # Strip hooks + statusline from settings.json
+      if [ -f "${HOME}/.claude/settings.json" ] && command -v node >/dev/null 2>&1; then
+        node -e '
+const fs = require("fs");
+const p = process.argv[1];
+let cfg; try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch { process.exit(0); }
+const sentinel = (c) => typeof c === "string" && (c.endsWith("lattice-session-start.mjs") || c.endsWith("lattice-statusline.mjs"));
+let changed = false;
+if (cfg.hooks?.SessionStart) {
+  const filtered = cfg.hooks.SessionStart.filter(g => !(g?.hooks?.some(h => sentinel(h?.command))));
+  if (filtered.length !== cfg.hooks.SessionStart.length) { cfg.hooks.SessionStart = filtered; changed = true; }
+}
+if (cfg.statusLine && sentinel(cfg.statusLine.command)) { delete cfg.statusLine; changed = true; }
+if (changed) {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  fs.copyFileSync(p, p + ".lattice-backup-" + ts);
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+  console.log("stripped");
+}
+' "${HOME}/.claude/settings.json" 2>/dev/null && echo "[${PROG}] stripped Lattice hooks + statusLine from settings.json"
+      fi
+      # Strip mcpServers.lattice from ~/.claude.json
+      if [ -f "${HOME}/.claude.json" ] && command -v node >/dev/null 2>&1; then
+        node -e '
+const fs = require("fs");
+const p = process.argv[1];
+let cfg; try { cfg = JSON.parse(fs.readFileSync(p, "utf8")); } catch { process.exit(0); }
+if (cfg.mcpServers?.lattice) {
+  delete cfg.mcpServers.lattice;
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  fs.copyFileSync(p, p + ".lattice-backup-" + ts);
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+  console.log("stripped");
+}
+' "${HOME}/.claude.json" 2>/dev/null && echo "[${PROG}] stripped mcpServers.lattice from ~/.claude.json"
+      fi
+    fi
+  fi
+  echo "[${PROG}] uninstall complete"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # mcp — manage the Lattice MCP server (v1.0.0).
 # Subcommands:
 #   lattice mcp setup [--apply] [--yes] [--scope user|project]
@@ -5027,6 +5204,7 @@ case "${sub}" in
   ci-check)           cmd_ci_check "$@" ;;
   wire-hooks)         cmd_wire_hooks "$@" ;;
   mcp)                cmd_mcp "$@" ;;
+  uninstall)          cmd_uninstall "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;

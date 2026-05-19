@@ -82,7 +82,9 @@ function readTelemetry(root) {
 }
 
 function countFindingsByTier(root) {
-  const tiers = { CRITICAL: 0, BLOCKER: 0, HIGH: 0, RISK: 0, DRIFT: 0, MEDIUM: 0, WATCH: 0, LOW: 0 };
+  // v1.0.2: OK tier tracked separately. OK findings prove a check ran cleanly;
+  // they are NOT actionable and must not surface as "findings to address".
+  const tiers = { CRITICAL: 0, BLOCKER: 0, HIGH: 0, RISK: 0, DRIFT: 0, MEDIUM: 0, WATCH: 0, LOW: 0, OK: 0 };
   const openDir = join(root, '.lattice', 'findings', 'open');
   if (!existsSync(openDir)) return tiers;
   try {
@@ -122,6 +124,8 @@ function topFindings(root, n = 3) {
             const titleM = content.match(/^title:\s*["']?(.+?)["']?$/m);
             const dateM = content.match(/^sweep_date:\s*(\S+)/m);
             const tier = tierM ? tierM[1] : 'UNKNOWN';
+            // v1.0.2: skip OK tier — they prove checks ran, they aren't "to address"
+            if (tier === 'OK') continue;
             const slug = e.name.replace(/\.yml$/, '');
             items.push({
               tier,
@@ -187,7 +191,9 @@ const top3 = topFindings(cwd, 3);
 const adrs = countActiveADRs(cwd);
 const events = countTodaysSessionEvents(cwd);
 
-const totalFindings = Object.values(tiers).reduce((a, b) => a + b, 0);
+// v1.0.2: OK tier counted separately; not part of "actionable" total
+const okCount = tiers.OK || 0;
+const totalFindings = Object.values(tiers).reduce((a, b) => a + b, 0) - okCount;
 const highPriority = (tiers.CRITICAL || 0) + (tiers.BLOCKER || 0) + (tiers.HIGH || 0) + (tiers.RISK || 0);
 
 // ---- Build compact summary ----
@@ -203,7 +209,7 @@ const lines = [
   `- Telemetry: ${telemetry}`,
 ];
 
-// Findings summary line
+// Findings summary line — OK markers shown as "X checks verified" not findings
 if (totalFindings > 0) {
   const parts = [];
   for (const t of ['CRITICAL', 'BLOCKER', 'HIGH', 'RISK', 'DRIFT', 'MEDIUM', 'WATCH', 'LOW']) {
@@ -214,7 +220,7 @@ if (totalFindings > 0) {
     lines.push(`- ⚠️ ${highPriority} need attention soon (CRITICAL/BLOCKER/HIGH/RISK)`);
   }
 } else {
-  lines.push(`- Open findings: 0 (clean)`);
+  lines.push(`- Open findings: 0 (clean${okCount > 0 ? `; ${okCount} OK check${okCount === 1 ? '' : 's'} verified` : ''})`);
 }
 
 // ADRs summary

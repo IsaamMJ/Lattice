@@ -236,6 +236,40 @@ if [ -t 0 ] && [ -t 2 ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev
 fi
 
 echo ""
+# v1.0.2 (#5): offer to auto-wire SessionStart + statusLine + MCP via the
+# existing safe primitives (`lattice wire-hooks` + `lattice mcp setup`).
+# Only when running interactively AND user has not opted out via env.
+if [ -t 0 ] && [ -t 2 ] && [ "${LATTICE_INSTALL_NO_PROMPT:-}" != "1" ]; then
+  echo "[lattice] Auto-wire Lattice into ~/.claude/settings.json (SessionStart + statusLine)"
+  echo "[lattice]   and ~/.claude.json (MCP server)? Uses safe primitives:"
+  echo "[lattice]     - lattice wire-hooks  (backup + idempotent merge of hooks)"
+  echo "[lattice]     - lattice mcp setup   (backup + idempotent merge of mcpServers)"
+  echo "[lattice]   You can skip this and wire manually later. Hooks are reversible."
+  printf "[lattice] Auto-wire now? [y/N] "
+  read -r _wire_ans
+  case "${_wire_ans}" in
+    y|Y|yes|YES)
+      if "${SCRIPT_DEST}/lattice" wire-hooks --apply --yes 2>&1 | sed 's/^/[lattice]   /'; then
+        echo "[lattice]   ok: hooks wired"
+      fi
+      # MCP setup needs the mcp/ tree built — skip if dist/index.js missing.
+      if [ -f "${SCRIPT_DEST}/../mcp/dist/index.js" ] || [ -f "${HOME}/.claude/lattice/mcp/dist/index.js" ]; then
+        if "${SCRIPT_DEST}/lattice" mcp setup --apply --yes 2>&1 | sed 's/^/[lattice]   /'; then
+          echo "[lattice]   ok: MCP server wired"
+        fi
+      else
+        echo "[lattice]   (MCP server skipped — dist/index.js not found; run \`lattice mcp build && lattice mcp setup --apply\` later)"
+      fi
+      echo "[lattice]   restart Claude Code to load the wiring"
+      echo ""
+      ;;
+    *)
+      echo "[lattice] (skipped — wire later with: lattice wire-hooks --apply && lattice mcp setup --apply)"
+      echo ""
+      ;;
+  esac
+fi
+
 echo "[lattice] OPTIONAL — statusline (v0.9.14 — Node.js, replaces deprecated bash version)"
 echo "[lattice]   Shows Lattice findings, friction, context %, 5h/weekly limits in the"
 echo "[lattice]   Claude Code status bar. Cold start ~85ms on Windows; no subprocesses."
