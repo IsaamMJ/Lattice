@@ -2,6 +2,30 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-19
+
+**New `infra` audit dimension + Stop hook closes the friction-reporting loop.** Closes #36 and #40, plus auto-files-on-session-end for the friction-default-on protocol introduced in v1.2.0.
+
+### Added
+- **`lattice audit-infra [--path .] [--write]`** (#36) — new audit dimension. Detects whether the Claude Code infrastructure (`.claude/settings.json` hooks + `~/.claude.json` MCPs) is adequate for the detected stack. Examples it catches:
+  - TypeScript project without PostToolUse type-check hook → `infra-missing-typecheck-hook` (MEDIUM)
+  - `.env*` files present without PreToolUse env-protection block → `infra-missing-env-protection` (HIGH, security exposure)
+  - `package-lock.json` without lockfile-edit-block hook → `infra-missing-lockfile-protection` (LOW)
+  - `@supabase/supabase-js` in deps without Supabase MCP → `infra-missing-mcp-supabase` (MEDIUM)
+  - Next.js + React without browser-automation MCP → `infra-missing-mcp-playwright` (MEDIUM)
+  - Bleeding-edge framework (Next 15+, React 19+) without context7 MCP → `infra-missing-mcp-context7` (MEDIUM)
+  - Test runner detected without test-on-edit hook → `infra-missing-test-hook` (LOW)
+- **`scripts/lattice-stop.mjs`** + **`lattice wire-hooks --stop`** (#40) — Stop hook that fires `lattice review --file --yes --quiet` at session end. Catches any friction Claude didn't file inline via `lattice report`. Same safety discipline as the SessionStart hook: hard 2s timeout, silent skip when `.lattice/` absent or `lattice` CLI unreachable, `LATTICE_STOP_DISABLE=1` kill switch. `wire-hooks` now wires Stop by default; `--no-stop` opts out.
+
+### Changed
+- `wire-hooks` JSON merge now includes the Stop hook entry under `hooks.Stop[]`. Idempotent: re-running detects existing Lattice Stop entries (by basename sentinel `lattice-stop.mjs`) and replaces them cleanly.
+- `install.sh` + `update.sh` now ship `lattice-stop.mjs` alongside the other scripts.
+
+### Verified
+- `lattice audit-infra` against the real Next.js portfolio (`E:/IsaamNextJs`) emits 5 findings: typecheck hook, env protection, lockfile, playwright MCP, context7 MCP — all real gaps on that project.
+- `lattice wire-hooks` dry-run now shows the `Stop` entry alongside `SessionStart` + `statusLine`.
+- `bash -n` and `node --check` on all modified files clean.
+
 ## [1.2.0] — 2026-05-19
 
 **Friction-reporting becomes default-on + framework-aware audits + `lattice diff` lands.** Closes the next wave of dogfood-surfaced gaps (#42, #43, #48, #51, #54).

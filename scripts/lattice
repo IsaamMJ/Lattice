@@ -3332,7 +3332,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize diff write-manifest usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize diff write-manifest audit-infra usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4706,13 +4706,15 @@ YML
 # Defaults: dry-run, wires SessionStart + statusLine.
 # ---------------------------------------------------------------------------
 cmd_wire_hooks() {
-  local apply=0 auto_yes=0 want_session=1 want_status=1 restore=""
+  local apply=0 auto_yes=0 want_session=1 want_status=1 want_stop=1 restore=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --apply)         apply=1; shift ;;
       --yes|-y)        auto_yes=1; shift ;;
-      --session-start) want_status=0; shift ;;
-      --statusline)    want_session=0; shift ;;
+      --session-start) want_status=0; want_stop=0; shift ;;
+      --statusline)    want_session=0; want_stop=0; shift ;;
+      --stop)          want_session=0; want_status=0; shift ;;  # v1.3.0 (#40)
+      --no-stop)       want_stop=0; shift ;;
       --restore)       [ -z "${2:-}" ] && die "wire-hooks: --restore requires a timestamp"
                        restore="$2"; shift 2 ;;
       --help|-h)
@@ -4723,6 +4725,8 @@ lattice wire-hooks — wire Lattice into ~/.claude/settings.json
   --yes               auto-confirm (use with --apply)
   --session-start     wire only the SessionStart hook
   --statusline        wire only the statusLine
+  --stop              wire only the Stop hook (friction catch-net, #40)
+  --no-stop           skip the Stop hook when wiring everything else
   --restore <ts>      restore from backup (timestamp from a previous run)
 
 Always backs up to ~/.claude/settings.json.lattice-backup-<UTC-timestamp>
@@ -4744,6 +4748,7 @@ WHHELP
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
   local session_path="${script_dir}/lattice-session-start.mjs"
   local statusline_path="${script_dir}/lattice-statusline.mjs"
+  local stop_path="${script_dir}/lattice-stop.mjs"
 
   # Restore path: short-circuit before any other work.
   if [ -n "${restore}" ]; then
@@ -4766,11 +4771,12 @@ WHHELP
   #   first line: STATUS=<noop|wired|malformed>
   #   subsequent lines: the diff or rendered settings.json
   local out
-  out="$(node - "$settings" "$session_path" "$statusline_path" "$want_session" "$want_status" "$apply" <<'NODEJS'
+  out="$(node - "$settings" "$session_path" "$statusline_path" "$stop_path" "$want_session" "$want_status" "$want_stop" "$apply" <<'NODEJS'
 const fs = require('fs');
-const [,, settingsPath, sessionPath, statuslinePath, wantSessionStr, wantStatusStr, applyStr] = process.argv;
+const [,, settingsPath, sessionPath, statuslinePath, stopPath, wantSessionStr, wantStatusStr, wantStopStr, applyStr] = process.argv;
 const wantSession = wantSessionStr === '1';
 const wantStatus = wantStatusStr === '1';
+const wantStop = wantStopStr === '1';
 const apply = applyStr === '1';
 
 let raw;
@@ -4780,9 +4786,10 @@ let cfg;
 try { cfg = raw.trim() === '' ? {} : JSON.parse(raw); }
 catch (e) { console.log('STATUS=malformed'); console.log('JSON parse error: ' + e.message); process.exit(2); }
 
-const sentinel = (p) => p.endsWith('lattice-session-start.mjs') || p.endsWith('lattice-statusline.mjs');
+const sentinel = (p) => p.endsWith('lattice-session-start.mjs') || p.endsWith('lattice-statusline.mjs') || p.endsWith('lattice-stop.mjs');
 const sessionCmd = `node ${sessionPath}`;
 const statuslineCmd = `node ${statuslinePath}`;
+const stopCmd = `node ${stopPath}`;
 
 let changed = false;
 const before = JSON.stringify(cfg, null, 2);
@@ -4813,6 +4820,19 @@ if (wantStatus) {
     console.log('Remove it manually, or re-run with --session-start to skip statusLine.');
     process.exit(3);
   }
+}
+
+// v1.3.0 (#40): Stop hook for friction catch-net
+if (wantStop) {
+  cfg.hooks ??= {};
+  cfg.hooks.Stop ??= [];
+  cfg.hooks.Stop = cfg.hooks.Stop.filter(group => {
+    if (!group || !Array.isArray(group.hooks)) return true;
+    return !group.hooks.some(h => h && typeof h.command === 'string' && sentinel(h.command));
+  });
+  cfg.hooks.Stop.push({
+    hooks: [{ type: 'command', command: stopCmd }],
+  });
 }
 
 const after = JSON.stringify(cfg, null, 2);
@@ -4873,19 +4893,26 @@ NODEJS
       fi
       # Re-run with apply=1 (the dry-run above didn't actually write because
       # node sees apply=0 if confirmation was needed). Force apply now:
-      node - "$settings" "$session_path" "$statusline_path" "$want_session" "$want_status" "1" <<'NODEJS_APPLY' >/dev/null
+      node - "$settings" "$session_path" "$statusline_path" "$stop_path" "$want_session" "$want_status" "$want_stop" "1" <<'NODEJS_APPLY' >/dev/null
 const fs = require('fs');
-const [,, settingsPath, sessionPath, statuslinePath, wantSessionStr, wantStatusStr] = process.argv;
+const [,, settingsPath, sessionPath, statuslinePath, stopPath, wantSessionStr, wantStatusStr, wantStopStr] = process.argv;
 const wantSession = wantSessionStr === '1';
 const wantStatus = wantStatusStr === '1';
+const wantStop = wantStopStr === '1';
 const raw = fs.readFileSync(settingsPath, 'utf8');
 const cfg = raw.trim() === '' ? {} : JSON.parse(raw);
-const sentinel = (p) => p.endsWith('lattice-session-start.mjs') || p.endsWith('lattice-statusline.mjs');
+const sentinel = (p) => p.endsWith('lattice-session-start.mjs') || p.endsWith('lattice-statusline.mjs') || p.endsWith('lattice-stop.mjs');
 if (wantSession) {
   cfg.hooks ??= {};
   cfg.hooks.SessionStart ??= [];
   cfg.hooks.SessionStart = cfg.hooks.SessionStart.filter(g => !(g && Array.isArray(g.hooks) && g.hooks.some(h => h && typeof h.command === 'string' && sentinel(h.command))));
   cfg.hooks.SessionStart.push({ hooks: [{ type: 'command', command: `node ${sessionPath}` }] });
+}
+if (wantStop) {
+  cfg.hooks ??= {};
+  cfg.hooks.Stop ??= [];
+  cfg.hooks.Stop = cfg.hooks.Stop.filter(g => !(g && Array.isArray(g.hooks) && g.hooks.some(h => h && typeof h.command === 'string' && sentinel(h.command))));
+  cfg.hooks.Stop.push({ hooks: [{ type: 'command', command: `node ${stopPath}` }] });
 }
 if (wantStatus) {
   const ex = cfg.statusLine;
@@ -5062,6 +5089,241 @@ EOF_COMMITS
   echo ""
   echo "---"
   echo "_Generated by \`lattice release-notes\` from \`${since}\`..HEAD on ${today}._"
+}
+
+# ---------------------------------------------------------------------------
+# audit-infra — audit Claude Code infrastructure adequacy for the stack
+# present in cwd. v1.3.0 (#36). Detects missing hooks, missing MCPs, missing
+# protections based on what files/deps are present.
+#
+# Examples:
+#   tsconfig.json + no PostToolUse type-check hook -> infra-missing-typecheck-hook
+#   .env* present + no PreToolUse env-protect block -> infra-missing-env-protection
+#   Next.js + no context7 MCP -> infra-missing-mcp-context7
+#
+# Usage:
+#   lattice audit-infra [--path .] [--write]
+# ---------------------------------------------------------------------------
+cmd_audit_infra() {
+  local target="." write=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --path)  target="$2"; shift 2 ;;
+      --write) write=1; shift ;;
+      --help|-h)
+        cat <<'INFRA_HELP'
+lattice audit-infra — audit Claude Code infrastructure adequacy
+
+  --path <dir>   project root (default: .)
+  --write        emit findings to .lattice/findings/open/ (default: stdout)
+
+Detects:
+  - missing PostToolUse type-check hook when tsconfig present
+  - missing PreToolUse env-protect block when .env* files present
+  - missing lockfile edit-block when package-lock.json present
+  - missing supabase MCP when @supabase/supabase-js in deps
+  - missing playwright MCP when Next.js + React detected
+  - missing context7 MCP on bleeding-edge framework versions
+INFRA_HELP
+        return 0 ;;
+      *) die "audit-infra: extra arg: $1" ;;
+    esac
+  done
+  [ -d "${target}" ] || die "audit-infra: path not found: ${target}"
+
+  command -v node >/dev/null 2>&1 || die "audit-infra: node required"
+
+  local sweep_id="${LATTICE_SWEEP_ID:-$(date -u +%Y%m%d)$(printf '%06x' "$$" | tail -c6)}"
+  local today; today="$(date -u +%Y-%m-%d)"
+  if [ "${write}" -eq 1 ]; then
+    ensure_project_dirs
+    mkdir -p .lattice/findings/open
+  fi
+
+  node - "${target}" "${write}" "${sweep_id}" "${today}" <<'NODEJS'
+const fs = require("fs");
+const path = require("path");
+// argv when using node -: [nodePath, "-", ...userArgs]
+const [,, root, writeStr, sweepId, today] = process.argv;
+const write = writeStr === "1";
+
+function exists(p) { return fs.existsSync(path.join(root, p)); }
+function readJSON(p) {
+  try { return JSON.parse(fs.readFileSync(path.join(root, p), "utf8")); } catch { return null; }
+}
+function readText(p) {
+  try { return fs.readFileSync(path.join(root, p), "utf8"); } catch { return ""; }
+}
+function hasDep(pkg, name) {
+  if (!pkg) return false;
+  return !!((pkg.dependencies && pkg.dependencies[name]) ||
+            (pkg.devDependencies && pkg.devDependencies[name]) ||
+            (pkg.peerDependencies && pkg.peerDependencies[name]));
+}
+
+// Load Claude Code settings (project-level + user-level + global)
+const projectSettings = readJSON(".claude/settings.json") || readJSON(".claude/settings.local.json") || {};
+const userSettings = (() => {
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) return {};
+  try { return JSON.parse(fs.readFileSync(path.join(home, ".claude/settings.json"), "utf8")); } catch { return {}; }
+})();
+const mergedSettings = { ...userSettings, ...projectSettings };
+const hooks = mergedSettings.hooks || {};
+
+const pkg = readJSON("package.json");
+const findings = [];
+
+function emit(slug, tier, rule, title, fix, exposure = "infra") {
+  findings.push({ slug, tier, rule, title, fix, exposure });
+}
+
+// --- Detector: TypeScript without typecheck hook ---
+if (exists("tsconfig.json") || exists("tsconfig.base.json")) {
+  const post = hooks.PostToolUse || [];
+  const hasTypecheck = post.some(g => (g?.hooks || []).some(h =>
+    typeof h?.command === "string" && /tsc|type-?check|tsgo/i.test(h.command)
+  ));
+  if (!hasTypecheck) {
+    emit("infra-missing-typecheck-hook", "MEDIUM", "infra-missing-typecheck-hook",
+      "TypeScript project has no PostToolUse type-check hook in Claude settings",
+      "Add a PostToolUse hook running `tsc --noEmit` so type regressions are caught on every edit. See claude-code-setup plugin reference."
+    );
+  }
+}
+
+// --- Detector: .env* present without PreToolUse protection ---
+let hasEnvFiles = false;
+try {
+  for (const f of fs.readdirSync(root)) {
+    if (/^\.env($|\.)/.test(f)) { hasEnvFiles = true; break; }
+  }
+} catch {}
+if (hasEnvFiles) {
+  const pre = hooks.PreToolUse || [];
+  const hasEnvBlock = pre.some(g => {
+    const matcher = g?.matcher || "";
+    const cmds = (g?.hooks || []).map(h => h?.command || "").join(" ");
+    return /env|secret/i.test(matcher) || /\.env/i.test(cmds);
+  });
+  if (!hasEnvBlock) {
+    emit("infra-missing-env-protection", "HIGH", "infra-missing-env-protection",
+      ".env files present but no PreToolUse block guards edits to env paths",
+      "Add a PreToolUse Edit/Write matcher that blocks (or warns + requires confirmation) on .env* paths. Prevents secrets from being committed or rewritten without explicit consent."
+    );
+  }
+}
+
+// --- Detector: lockfile without edit protection ---
+const lockfiles = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"];
+const presentLock = lockfiles.find(f => exists(f));
+if (presentLock) {
+  const pre = hooks.PreToolUse || [];
+  const hasLockBlock = pre.some(g => {
+    const cmds = (g?.hooks || []).map(h => h?.command || "").join(" ");
+    return /lock/i.test(cmds) || /package-lock|yarn\.lock|pnpm-lock/i.test(cmds);
+  });
+  if (!hasLockBlock) {
+    emit("infra-missing-lockfile-protection", "LOW", "infra-missing-lockfile-protection",
+      `${presentLock} present but no edit-block hook guards lockfile mutations`,
+      "Add a PreToolUse hook that flags Edit/Write to the lockfile so Claude doesn't silently invalidate the dep tree."
+    );
+  }
+}
+
+// --- Detector: MCP servers based on deps ---
+const mcpServers = mergedSettings.mcpServers || {};
+const claudeDotJson = (() => {
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) return {};
+  try { return JSON.parse(fs.readFileSync(path.join(home, ".claude.json"), "utf8")); } catch { return {}; }
+})();
+const allMCP = { ...mcpServers, ...(claudeDotJson.mcpServers || {}) };
+
+function hasMCP(name) {
+  return !!allMCP[name] || Object.keys(allMCP).some(k => k.toLowerCase().includes(name.toLowerCase()));
+}
+
+if (hasDep(pkg, "@supabase/supabase-js") && !hasMCP("supabase")) {
+  emit("infra-missing-mcp-supabase", "MEDIUM", "infra-missing-mcp-supabase",
+    "@supabase/supabase-js in deps but no Supabase MCP wired",
+    "Wire the Supabase MCP into ~/.claude.json so Claude can query schema, run migrations, and inspect RLS without fabricating."
+  );
+}
+
+const isNext = hasDep(pkg, "next");
+const isReact = hasDep(pkg, "react");
+if (isNext && isReact && !hasMCP("playwright") && !hasMCP("puppeteer")) {
+  emit("infra-missing-mcp-playwright", "MEDIUM", "infra-missing-mcp-playwright",
+    "Next.js + React project without a browser-automation MCP (playwright / puppeteer)",
+    "Wire Playwright MCP for frontend verification. Without it, Claude can't visually verify UI changes — the source of many `claimed-fix-but-broken-in-browser` regressions."
+  );
+}
+
+// Bleeding-edge versions -> recommend context7 MCP
+function isBleedingEdge(name, major) {
+  if (!pkg) return false;
+  const v = (pkg.dependencies?.[name] || pkg.devDependencies?.[name] || "").replace(/[^0-9.]/g, "");
+  if (!v) return false;
+  const m = parseInt(v.split(".")[0], 10);
+  return Number.isFinite(m) && m >= major;
+}
+if ((isBleedingEdge("next", 15) || isBleedingEdge("react", 19)) && !hasMCP("context7")) {
+  emit("infra-missing-mcp-context7", "MEDIUM", "infra-missing-mcp-context7",
+    "Bleeding-edge framework (Next 15+ / React 19+) without context7 MCP",
+    "Wire context7 MCP so Claude pulls live docs for new APIs instead of hallucinating. Without it, Claude often emits APIs from older Next.js versions."
+  );
+}
+
+// --- Detector: Jest/pytest without test-on-edit hook ---
+const hasJest = hasDep(pkg, "jest") || hasDep(pkg, "vitest");
+const hasPytest = exists("pytest.ini") || exists("pyproject.toml") && /pytest/.test(readText("pyproject.toml"));
+if ((hasJest || hasPytest) && !((hooks.PostToolUse || []).some(g =>
+    (g?.hooks || []).some(h => /jest|vitest|pytest|test/i.test(h?.command || ""))
+))) {
+  emit("infra-missing-test-hook", "LOW", "infra-missing-test-hook",
+    `Test runner detected (${hasJest ? "jest/vitest" : "pytest"}) but no PostToolUse hook re-runs related tests on edit`,
+    "Add a PostToolUse hook that runs `jest --findRelatedTests` (or `pytest -k file`) on the edited file. Catches regressions before commit."
+  );
+}
+
+// Emit
+if (write) {
+  for (const f of findings) {
+    const filename = `.lattice/findings/open/${f.tier}-infra-${f.rule}.yml`;
+    const yml = [
+      `id: ${require("crypto").createHash("sha1").update(`infra:${f.rule}:${root}:${f.title}`).digest("hex").slice(0, 12)}`,
+      `rule: ${f.rule}`,
+      `dimension: infra`,
+      `tier: ${f.tier}`,
+      `module: infra`,
+      `file: .claude/settings.json`,
+      `line: 1`,
+      `title: "${f.title.replace(/"/g, '\\"')}"`,
+      `fix: "${f.fix.replace(/"/g, '\\"')}"`,
+      `sweep_date: ${today}`,
+      `sweep_id: ${sweepId}`,
+      `auditor: lattice/audit-infra@1.3.0`,
+      `status: open`,
+      `exposure: ${f.exposure}`,
+      ``
+    ].join("\n");
+    fs.writeFileSync(path.join(root, filename), yml, "utf8");
+    process.stderr.write(`[lattice] emitted: ${filename}\n`);
+  }
+  process.stderr.write(`[lattice] audit-infra: ${findings.length} finding(s) written\n`);
+} else {
+  if (findings.length === 0) {
+    process.stdout.write(`[lattice] audit-infra: 0 findings — infrastructure looks adequate for the detected stack\n`);
+  } else {
+    process.stdout.write(`tier      rule                              title\n`);
+    for (const f of findings) {
+      process.stdout.write(`${f.tier.padEnd(9)} ${f.rule.padEnd(33)} ${f.title}\n`);
+    }
+    process.stdout.write(`\n[lattice] audit-infra: ${findings.length} finding(s) (re-run with --write to emit YAMLs)\n`);
+  }
+}
+NODEJS
 }
 
 # ---------------------------------------------------------------------------
@@ -5984,6 +6246,7 @@ case "${sub}" in
   normalize)          cmd_normalize "$@" ;;
   diff)               cmd_diff "$@" ;;
   write-manifest)     cmd_write_manifest "$@" ;;
+  audit-infra)        cmd_audit_infra "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;
