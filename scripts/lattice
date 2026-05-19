@@ -5391,6 +5391,9 @@ cmd_grow() {
     status)      _grow_status "$@" ;;
     rollback)    _grow_rollback "$@" ;;
     close)       _grow_close "$@" ;;
+    measure)        _grow_measure "$@" ;;
+    check)          _grow_check "$@" ;;
+    auto-rollback)  _grow_auto_rollback "$@" ;;
     help|--help|-h)
       cat <<'GROWHELP'
 lattice grow — hypothesis lifecycle (parallel to findings; for forward-looking
@@ -5402,17 +5405,29 @@ changes: growth experiments, refactor proposals, product hypotheses).
   show <slug>
   run <slug> --commit <sha>                         mark as running
   status <slug>                                     show current state
-  rollback <slug> --reason "..."                    revert
+  rollback <slug> --reason "..."                    revert (manual)
   close <slug> --result won|lost|inconclusive [--rationale "..."]
 
-Hypotheses live as YAMLs under .lattice/hypotheses/. The lifecycle mirrors
-findings: open -> running -> closed (or rolled-back). Each transition stamps
-timestamps + transition_reason in the YAML.
+CLOSED-LOOP (v2.0):
+  measure <slug>                                    fetch metric value vs baseline + threshold; print verdict
+  check [--state running]                           measure every running hypothesis; summarize
+  auto-rollback <slug> [--execute] [--yes]          if measure verdict is `failed` AND window has elapsed,
+                                                    git-revert the run_commit and transition to rolled-back.
+                                                    Default DRY-RUN. --execute writes; --yes skips confirm.
+                                                    Always backs up branch tip ref before reverting.
 
-This is the FOUNDATION (v1.4.0). The closed-loop execution (automated PR
-creation, auto-rollback signal detection, cadence scheduling, low-traffic
-stats) is v2.0 scope and lives behind `lattice grow run --auto` (not yet
-implemented — manual flow only in v1.4.0).
+Measurement source schemes (set via --measurement-source on propose):
+  http://... or https://...      GET request expecting JSON; value at .value or .data.value
+  file:/path/to/file             read a single number from that file
+  cmd:script.sh [args]           exec script, parse last stdout line as number
+
+Hypotheses live as YAMLs under .lattice/hypotheses/. Lifecycle mirrors
+findings: open -> running -> closed (or rolled-back). Each transition stamps
+timestamps + transition reasons.
+
+NOT in v2.0: cadence scheduling (cron/queue), low-traffic confidence-
+interval stats, hypothesis auto-generation from product data — those need
+separate ships (v2.1+).
 GROWHELP
       ;;
     *) die "grow: unknown action: ${sub} (try: init | propose | list | show | run | status | rollback | close)" ;;
@@ -5619,6 +5634,300 @@ _grow_rollback() {
   ' "${src}" > "${dst}.tmp" && mv "${dst}.tmp" "${dst}"
   rm "${src}"
   echo "[${PROG}] grow: ${slug} -> rolled-back"
+}
+
+# v2.0: read a YAML's measurement.* subfields. Sub-keys live at column 2.
+_grow_measurement_field() {
+  local file="$1" key="$2"
+  awk -v k="${key}" '
+    /^measurement:/ { inblock=1; next }
+    inblock && /^[a-zA-Z_]/ { inblock=0 }
+    inblock && $1 == k":" {
+      $1=""
+      sub(/^[[:space:]]+/, "")
+      gsub(/^["'\'']|["'\'']$/, "")
+      print
+      exit
+    }
+  ' "${file}" 2>/dev/null
+}
+
+# v2.0: fetch a metric value from a `measurement.source` URI. Returns the
+# numeric value on stdout; non-zero exit + stderr on failure.
+_grow_fetch_metric() {
+  local source="$1"
+  case "${source}" in
+    http://*|https://*)
+      command -v node >/dev/null 2>&1 || { echo "[fetch] node required for http source" >&2; return 1; }
+      command -v curl >/dev/null 2>&1 || { echo "[fetch] curl required for http source" >&2; return 1; }
+      local body
+      body="$(curl -fsSL --max-time 10 "${source}" 2>/dev/null)" || { echo "[fetch] curl failed for ${source}" >&2; return 1; }
+      # Parse JSON, look for .value or .data.value or .metric
+      printf '%s' "${body}" | node -e '
+let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+  try {
+    const o = JSON.parse(s);
+    const v = o.value ?? o?.data?.value ?? o.metric ?? o?.data?.metric;
+    if (v == null || isNaN(Number(v))) { process.stderr.write("[fetch] no numeric .value / .data.value / .metric in response\n"); process.exit(2); }
+    process.stdout.write(String(Number(v)));
+  } catch (e) { process.stderr.write("[fetch] JSON parse: " + e.message + "\n"); process.exit(2); }
+});'
+      ;;
+    file:/*|file://*)
+      local path="${source#file:}"
+      path="${path#//}"
+      [ -f "${path}" ] || { echo "[fetch] file not found: ${path}" >&2; return 1; }
+      local v
+      v="$(tr -d '[:space:]' < "${path}")"
+      [[ "${v}" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || { echo "[fetch] file content not numeric: ${path}" >&2; return 1; }
+      printf '%s' "${v}"
+      ;;
+    cmd:*)
+      local script="${source#cmd:}"
+      local out
+      out="$(bash -c "${script}" 2>/dev/null)" || { echo "[fetch] cmd failed: ${script}" >&2; return 1; }
+      # Last non-empty line, parsed as number
+      local v
+      v="$(printf '%s\n' "${out}" | grep -E '^-?[0-9]+(\.[0-9]+)?$' | tail -1)"
+      [ -n "${v}" ] || { echo "[fetch] cmd produced no numeric line: ${script}" >&2; return 1; }
+      printf '%s' "${v}"
+      ;;
+    *) echo "[fetch] unsupported source scheme: ${source} (use http://, https://, file:/, or cmd:)" >&2; return 1 ;;
+  esac
+}
+
+# Compare numbers as floats via node (bash arithmetic is integer-only).
+# Returns: -1 if a<b, 0 if a==b, 1 if a>b.
+_grow_fcmp() {
+  node -e "const a=parseFloat(process.argv[1]),b=parseFloat(process.argv[2]); if(a<b)process.stdout.write('-1');else if(a>b)process.stdout.write('1');else process.stdout.write('0');" "$1" "$2"
+}
+
+# v2.0: evaluate a single running hypothesis against its measurement spec.
+_grow_measure() {
+  [ "$#" -ge 1 ] || die "grow measure: usage: lattice grow measure <slug>"
+  local slug="$1"
+  local p; p="$(_grow_resolve "${slug}")" || die "grow measure: hypothesis not found: ${slug}"
+  local state; state="$(basename "$(dirname "${p}")")"
+  if [ "${state}" != "running" ]; then
+    echo "[${PROG}] measure: ${slug} is in state '${state}', not 'running' — skipping"
+    return 0
+  fi
+
+  local source baseline threshold window_days run_at
+  source="$(_grow_measurement_field "${p}" "source")"
+  baseline="$(_grow_measurement_field "${p}" "baseline_value")"
+  threshold="$(_grow_measurement_field "${p}" "success_threshold")"
+  window_days="$(_grow_measurement_field "${p}" "window_days")"
+  run_at="$(yaml_field "${p}" "run_at")"
+
+  if [ -z "${source}" ]; then
+    echo "[${PROG}] measure: ${slug} has no measurement.source — propose with --measurement-source. Verdict: insufficient-data"
+    return 0
+  fi
+
+  local current
+  current="$(_grow_fetch_metric "${source}")" || {
+    echo "[${PROG}] measure: ${slug} -> fetch-failed (source=${source})"
+    return 1
+  }
+
+  echo "[${PROG}] measure: ${slug}"
+  echo "  source:            ${source}"
+  echo "  baseline_value:    ${baseline:-(unset)}"
+  echo "  current_value:     ${current}"
+  echo "  success_threshold: ${threshold:-(unset)}"
+  echo "  window_days:       ${window_days:-(unset)}"
+  echo "  run_at:            ${run_at:-(unset)}"
+
+  # Window elapsed?
+  local window_elapsed=0
+  if [ -n "${run_at}" ] && [ -n "${window_days}" ]; then
+    local now_s run_s elapsed_s window_s
+    now_s="$(date -u +%s)"
+    run_s="$(date -u -d "${run_at}" +%s 2>/dev/null || echo 0)"
+    elapsed_s=$((now_s - run_s))
+    window_s=$((window_days * 86400))
+    [ "${elapsed_s}" -ge "${window_s}" ] && window_elapsed=1
+    local elapsed_days=$((elapsed_s / 86400))
+    echo "  elapsed_days:      ${elapsed_days} / ${window_days}"
+  fi
+
+  # Verdict
+  local verdict="still-running"
+  if [ -n "${threshold}" ]; then
+    local cmp; cmp="$(_grow_fcmp "${current}" "${threshold}")"
+    if [ "${cmp}" -ge 0 ]; then
+      verdict="succeeded"
+    elif [ "${window_elapsed}" -eq 1 ]; then
+      verdict="failed"
+    fi
+  elif [ "${window_elapsed}" -eq 1 ]; then
+    verdict="inconclusive"
+  fi
+  echo "  verdict:           ${verdict}"
+
+  case "${verdict}" in
+    succeeded) echo "  suggest:           lattice grow close ${slug} --result won --observed-value ${current}" ;;
+    failed)    echo "  suggest:           lattice grow auto-rollback ${slug}  # or close --result lost" ;;
+    inconclusive) echo "  suggest:           lattice grow close ${slug} --result inconclusive --observed-value ${current}" ;;
+    still-running) echo "  suggest:           wait" ;;
+  esac
+}
+
+# v2.0: walk all running hypotheses and measure each.
+_grow_check() {
+  local filter_state="running"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --state) filter_state="$2"; shift 2 ;;
+      *) die "grow check: unknown arg: $1" ;;
+    esac
+  done
+  [ -d ".lattice/hypotheses/${filter_state}" ] || { echo "[${PROG}] check: no .lattice/hypotheses/${filter_state}/"; return 0; }
+  shopt -s nullglob
+  local n=0
+  for f in .lattice/hypotheses/${filter_state}/*.yml; do
+    [ -f "${f}" ] || continue
+    local slug; slug="$(basename "${f}" .yml)"
+    echo "---"
+    _grow_measure "${slug}" || true
+    n=$((n + 1))
+  done
+  echo "---"
+  echo "[${PROG}] grow check: measured ${n} ${filter_state} hypothes$([ ${n} -eq 1 ] && echo is || echo es)"
+}
+
+# v2.0: auto-rollback. DESTRUCTIVE (creates a git revert commit). Default
+# DRY-RUN. --execute writes. Always backs up branch tip ref before reverting.
+_grow_auto_rollback() {
+  [ "$#" -ge 1 ] || die "grow auto-rollback: usage: lattice grow auto-rollback <slug> [--execute] [--yes]"
+  local slug="$1"; shift
+  local execute=0 auto_yes=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --execute) execute=1; shift ;;
+      --yes|-y)  auto_yes=1; shift ;;
+      *) die "grow auto-rollback: unknown flag: $1" ;;
+    esac
+  done
+
+  local p=".lattice/hypotheses/running/${slug}.yml"
+  [ -f "${p}" ] || die "grow auto-rollback: ${slug} is not in running/"
+
+  local run_commit
+  run_commit="$(yaml_field "${p}" "run_commit")"
+  [ -n "${run_commit}" ] || die "grow auto-rollback: ${slug} has no run_commit — cannot revert"
+
+  # Re-evaluate verdict to be safe
+  local source baseline threshold window_days run_at
+  source="$(_grow_measurement_field "${p}" "source")"
+  baseline="$(_grow_measurement_field "${p}" "baseline_value")"
+  threshold="$(_grow_measurement_field "${p}" "success_threshold")"
+  window_days="$(_grow_measurement_field "${p}" "window_days")"
+  run_at="$(yaml_field "${p}" "run_at")"
+
+  local current="(not-fetched)"
+  local verdict="manual"
+  if [ -n "${source}" ]; then
+    if current="$(_grow_fetch_metric "${source}" 2>/dev/null)"; then
+      local window_elapsed=0
+      if [ -n "${run_at}" ] && [ -n "${window_days}" ]; then
+        local now_s run_s
+        now_s="$(date -u +%s)"
+        run_s="$(date -u -d "${run_at}" +%s 2>/dev/null || echo 0)"
+        [ $((now_s - run_s)) -ge $((window_days * 86400)) ] && window_elapsed=1
+      fi
+      if [ -n "${threshold}" ]; then
+        local cmp; cmp="$(_grow_fcmp "${current}" "${threshold}")"
+        if [ "${cmp}" -lt 0 ] && [ "${window_elapsed}" -eq 1 ]; then
+          verdict="failed"
+        elif [ "${cmp}" -ge 0 ]; then
+          verdict="succeeded"
+        else
+          verdict="still-running"
+        fi
+      fi
+    else
+      current="(fetch-failed)"
+    fi
+  fi
+
+  command -v git >/dev/null 2>&1 || die "grow auto-rollback: git required"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "grow auto-rollback: not in a git repo"
+
+  # Resolve full SHA + check it's reachable from HEAD
+  local full_sha
+  full_sha="$(git rev-parse "${run_commit}" 2>/dev/null)" || die "grow auto-rollback: commit not found: ${run_commit}"
+  git merge-base --is-ancestor "${full_sha}" HEAD 2>/dev/null || die "grow auto-rollback: ${run_commit} is not an ancestor of HEAD — cannot revert via git revert"
+
+  local current_branch; current_branch="$(git rev-parse --abbrev-ref HEAD)"
+  local current_head; current_head="$(git rev-parse HEAD)"
+
+  echo "[${PROG}] auto-rollback plan for ${slug}:"
+  echo "  run_commit:    ${run_commit} (full: ${full_sha})"
+  echo "  current_branch: ${current_branch}"
+  echo "  current_HEAD:  ${current_head}"
+  echo "  measure:       verdict=${verdict}, current=${current}, threshold=${threshold:-(unset)}"
+  echo ""
+
+  if [ "${verdict}" != "failed" ] && [ "${verdict}" != "manual" ]; then
+    echo "[${PROG}] auto-rollback REFUSES: verdict is '${verdict}', not 'failed'. Use \`lattice grow rollback\` (manual) to override."
+    return 2
+  fi
+
+  echo "  proposed actions (DRY RUN):"
+  echo "    1. git update-ref refs/lattice/pre-rollback/${slug} ${current_head}     # backup ref"
+  echo "    2. git revert --no-edit ${full_sha}                                      # create revert commit"
+  echo "    3. mv .lattice/hypotheses/running/${slug}.yml -> rolled-back/             # transition state"
+  echo "    4. stamp rolled_back_at + rollback_reason in YAML"
+  echo ""
+
+  if [ "${execute}" -ne 1 ]; then
+    echo "[${PROG}] DRY RUN — re-run with --execute to perform the rollback"
+    return 0
+  fi
+  if [ "${auto_yes}" -ne 1 ]; then
+    printf "[${PROG}] this will create a NEW revert commit on %s. Continue? [y/N] " "${current_branch}"
+    read -r ans
+    case "${ans}" in y|Y|yes|YES) ;; *) echo "[${PROG}] aborted"; return 0 ;; esac
+  fi
+
+  # 1. Backup ref (recoverable: git update-ref -d refs/lattice/pre-rollback/<slug> + git reset --hard <ref>)
+  git update-ref "refs/lattice/pre-rollback/${slug}" "${current_head}" || die "auto-rollback: backup ref write failed"
+  echo "[${PROG}] backed up HEAD as refs/lattice/pre-rollback/${slug} (${current_head})"
+
+  # 2. git revert. --no-edit uses default message; trap conflict.
+  if ! git revert --no-edit "${full_sha}"; then
+    echo "[${PROG}] !!! git revert produced conflicts — aborting revert" >&2
+    git revert --abort 2>/dev/null || true
+    echo "[${PROG}] !!! state unchanged. Resolve manually:" >&2
+    echo "[${PROG}] !!!   git revert ${full_sha}     # then resolve conflicts" >&2
+    return 3
+  fi
+  local revert_sha; revert_sha="$(git rev-parse HEAD)"
+  echo "[${PROG}] git revert ok — new commit ${revert_sha}"
+
+  # 3 + 4. Transition YAML
+  mkdir -p .lattice/hypotheses/rolled-back 2>/dev/null
+  local dst=".lattice/hypotheses/rolled-back/${slug}.yml"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local reason="auto-rollback: measure verdict=${verdict}, current=${current}, threshold=${threshold:-?}"
+  awk -v now="${now}" -v reason="${reason}" -v rsha="${revert_sha}" -v cur="${current}" '
+    /^state:/ { print "state: rolled-back"; next }
+    { print }
+    END {
+      print "rolled_back_at: " now
+      print "rollback_reason: \"" reason "\""
+      print "revert_commit: " rsha
+      print "observed_value: " cur
+    }
+  ' "${p}" > "${dst}.tmp" && mv "${dst}.tmp" "${dst}"
+  rm "${p}"
+
+  echo "[${PROG}] grow: ${slug} -> rolled-back (revert: ${revert_sha}, backup: refs/lattice/pre-rollback/${slug})"
+  echo "[${PROG}] to undo this rollback:"
+  echo "  git reset --hard refs/lattice/pre-rollback/${slug}"
+  echo "  mv ${dst} .lattice/hypotheses/running/${slug}.yml"
 }
 
 _grow_close() {

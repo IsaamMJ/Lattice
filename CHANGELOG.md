@@ -2,6 +2,49 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-05-19
+
+**Closed-loop hypothesis execution.** Foundation shipped in v1.4.0; structured measurement schema in v1.4.2; v2.0 wires them to real runtime behavior. A hypothesis can now be measured against its source, evaluated against its threshold, and rolled back via real `git revert` — without human intervention except for an `--execute` confirmation gate.
+
+### Added — measurement pipeline
+- **`lattice grow measure <slug>`** — fetches the live metric value from a hypothesis's `measurement.source` and renders a verdict against `baseline_value` + `success_threshold` + `window_days`. Verdicts: `still-running` / `succeeded` / `failed` / `inconclusive` / `insufficient-data`. Emits a suggested next action (`close --result won`, `auto-rollback`, or `wait`).
+- **`lattice grow check [--state running]`** — measures every running hypothesis, summarizes verdicts in one pass. Designed for cron/manual periodic invocation.
+- **Pluggable measurement-source schemes** (set via `--measurement-source` on `propose`):
+  - `http://...` / `https://...` — GET expecting JSON; reads `.value` → `.data.value` → `.metric` → `.data.metric`. Curl + node required.
+  - `file:/path` — read a single number from the file (whitespace-stripped).
+  - `cmd:<script>` — exec the script, parse last numeric stdout line.
+
+### Added — auto-rollback
+- **`lattice grow auto-rollback <slug> [--execute] [--yes]`** — when measure verdict is `failed`, performs:
+  1. Backs up current branch tip to `refs/lattice/pre-rollback/<slug>` (recoverable ref, never expires)
+  2. Runs `git revert --no-edit <run_commit>` (NEW commit on top; non-destructive)
+  3. Transitions YAML from `running/` → `rolled-back/` with `rolled_back_at`, `rollback_reason`, `revert_commit`, `observed_value` stamps
+  4. Prints the exact undo command (`git reset --hard refs/lattice/pre-rollback/<slug> && mv ...`)
+  - **Default DRY-RUN.** `--execute` required to mutate. `--yes` skips interactive confirm.
+  - **Refuses** when verdict isn't `failed` (use manual `lattice grow rollback` to override).
+  - **Refuses** when `run_commit` isn't an ancestor of HEAD (cannot revert).
+  - **On revert conflict:** runs `git revert --abort`, leaves state unchanged, prints the manual command.
+
+### Why this completes the loop
+v1.4.0 was a structured journal. v2.0 makes it autonomous:
+- Schedule `lattice grow check` periodically (manual cron, or future cadence layer)
+- On `failed` verdicts, run `lattice grow auto-rollback <slug> --execute --yes` from the same scheduler
+- The maintainer gets emails / Telegram pings (from their own infra) showing what happened
+- Every action is reversible via the backup ref
+
+### Verified
+- Live end-to-end test in `/tmp/grow-v2-test` with `file:/tmp/metric.txt` source, `window_days=0`, threshold above current:
+  - `measure` correctly verdicts `failed` with the suggested `auto-rollback` action
+  - `auto-rollback` DRY RUN shows backup ref, git revert sha, and YAML transition plan
+  - `auto-rollback --execute --yes` creates real revert commit on master, backs up old HEAD as `refs/lattice/pre-rollback/cta-test`, moves YAML to `rolled-back/`, stamps `revert_commit` + `observed_value: 0.005`
+- `bash -n scripts/lattice` clean
+
+### Explicit NON-goals in v2.0 (deferred to v2.1+)
+- **Cadence scheduling** — no built-in cron/queue. Users wire `lattice grow check` into their own cron, GitHub Actions schedule, or systemd timer. This is a packaging concern, not core logic.
+- **Low-traffic confidence intervals** — `succeeded` / `failed` is a hard threshold compare. Statistical sophistication (p-values, MDE, sample-size calc) is v2.1.
+- **Hypothesis auto-generation** — requires LLM integration + product-data analysis. v3.0+ scope.
+- **PR-based execution** — `grow run` still expects a manual `--commit <sha>`. Auto-PR-from-hypothesis is v2.1.
+
 ## [1.4.2] — 2026-05-19
 
 **Hot fix from v1.4.0 dogfood**: #58 `body: unbound variable` crash + #59 structured measurement fields.
