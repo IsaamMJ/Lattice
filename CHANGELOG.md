@@ -2,6 +2,24 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-05-19
+
+**`lattice release-notes` — auto-generate CHANGELOG.md entries (#11).** Hand-writing release notes for every ship was the last hand-cranked release step. v1.1.1 turns it into a one-liner.
+
+### Added
+- **`lattice release-notes`** — auto-detects the last git tag and emits a markdown CHANGELOG entry: version header (from `plugin.json`), categorized commit list, closed Lattice findings (if any), and a "Verified" stub. Categories follow conventional-commit prefixes: `feat:` → Added, `fix:` → Fixed, `refactor:` → Changed, `perf:` → Performance, `docs:` → Documentation, `test:` → Tests, anything else → Other. `release:` commits and merge commits are dropped (release commits ARE this command's output; merges are noise).
+- `--since <tag-or-date>` to override the range start, `--version <v>` to override the header, `--raw-commits` for un-categorized commit list, `--help` for the flag matrix.
+
+### How to use at release time
+1. `git commit -m "feat: ..."` / `fix: ...` / `refactor: ...` per change
+2. When ready to ship: `lattice release-notes > /tmp/notes.md`
+3. Paste at the top of CHANGELOG.md, fill in the "Verified" section, bump version, tag, push.
+
+### Verified
+- `lattice release-notes --since v1.1.0 --version 1.1.1` on a clean range emits the header + "Verified" stub
+- `lattice release-notes --since v1.0.0 --version 1.1.1` correctly drops all 5 `release:` commits in that range
+- `bash -n scripts/lattice` clean
+
 ## [1.1.0] — 2026-05-19
 
 **CLAUDE.md auto-tune Phase 2 (#6).** Phase 1 (deterministic block + sentinel-bounded merge) shipped in v0.9.10. Phase 2 closes the meta-loop: Lattice detects when its onboarding block needs refresh and re-applies under explicit user consent. The "without any human" automation stops at the consent gate by design — `LATTICE_AUTO_TUNE=1` is opt-in for the dogfooding window, never default.

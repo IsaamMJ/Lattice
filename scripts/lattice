@@ -3325,7 +3325,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4903,6 +4903,161 @@ NODEJS_APPLY
 }
 
 # ---------------------------------------------------------------------------
+# release-notes — auto-generate a CHANGELOG.md entry from git commits + closed
+# findings since the last tag. v1.1.1 (#11). Output is markdown ready to paste
+# at the top of CHANGELOG.md under the new ## [version] heading.
+#
+# Usage:
+#   lattice release-notes                            # auto-detect last tag
+#   lattice release-notes --since v1.0.4
+#   lattice release-notes --since 2026-05-18
+#   lattice release-notes --version 1.1.1            # override version
+#   lattice release-notes --raw-commits              # skip categorization
+#
+# Categorizes commits by conventional prefix (fix:, feat:, refactor:, etc).
+# Commits with "release:" or "Merge" prefix are dropped (release commits are
+# this command's output; merges are noise).
+# ---------------------------------------------------------------------------
+cmd_release_notes() {
+  local since="" override_version="" raw=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --since)   [ -z "${2:-}" ] && die "release-notes: --since requires a tag or YYYY-MM-DD"
+                 since="$2"; shift 2 ;;
+      --version) [ -z "${2:-}" ] && die "release-notes: --version requires a value"
+                 override_version="$2"; shift 2 ;;
+      --raw-commits) raw=1; shift ;;
+      --help|-h)
+        cat <<'RN_HELP'
+lattice release-notes — auto-generate a CHANGELOG.md entry
+
+  --since <tag-or-date>   commits/findings after this point
+                          (default: most recent git tag)
+  --version <v>           override the version header (default: plugin.json)
+  --raw-commits           skip categorization; list commits as-is
+
+Output is markdown, paste at top of CHANGELOG.md under ## [version] heading.
+Categorizes commits by conventional prefix (fix:, feat:, etc).
+Drops `release:` and merge commits.
+RN_HELP
+        return 0 ;;
+      -*) die "release-notes: unknown flag: $1" ;;
+      *)  die "release-notes: extra arg: $1" ;;
+    esac
+  done
+
+  command -v git >/dev/null 2>&1 || die "release-notes: git required"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "release-notes: not in a git repo"
+
+  # Auto-detect last tag if --since omitted
+  if [ -z "${since}" ]; then
+    since="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+    [ -z "${since}" ] && die "release-notes: no git tags found and --since not supplied"
+  fi
+
+  # Version header
+  local version="${override_version}"
+  if [ -z "${version}" ]; then
+    version="$(current_version 2>/dev/null || echo unknown)"
+  fi
+  local today
+  today="$(date -u +%Y-%m-%d)"
+
+  # Build range expression — git understands both tag and date
+  local range
+  if git rev-parse "${since}" >/dev/null 2>&1; then
+    range="${since}..HEAD"
+  else
+    # Treat as date
+    range=""
+  fi
+
+  # Fetch commits
+  local commits
+  if [ -n "${range}" ]; then
+    commits="$(git log "${range}" --pretty=format:'%h|%s' 2>/dev/null || true)"
+  else
+    commits="$(git log --since="${since}" --pretty=format:'%h|%s' 2>/dev/null || true)"
+  fi
+
+  # Header
+  echo "## [${version}] — ${today}"
+  echo ""
+
+  if [ -z "${commits}" ]; then
+    echo "_No commits since ${since}._"
+    echo ""
+  else
+    if [ "${raw}" -eq 1 ]; then
+      echo "### Commits"
+      echo ""
+      printf '%s\n' "${commits}" | while IFS='|' read -r sha subj; do
+        [ -z "${sha}" ] && continue
+        echo "- ${sha} — ${subj}"
+      done
+      echo ""
+    else
+      # Categorize by conventional prefix
+      local feats="" fixes="" refactors="" docs="" tests="" perfs="" others=""
+      while IFS='|' read -r sha subj; do
+        [ -z "${sha}" ] && continue
+        # Drop release commits + merges
+        case "${subj}" in
+          release:*|Release:*|Merge\ *|"Merge pull request"*) continue ;;
+        esac
+        case "${subj}" in
+          feat:*|feature:*)  feats="${feats}- ${subj#*: } (${sha})"$'\n' ;;
+          fix:*)             fixes="${fixes}- ${subj#fix: } (${sha})"$'\n' ;;
+          refactor:*)        refactors="${refactors}- ${subj#refactor: } (${sha})"$'\n' ;;
+          docs:*|doc:*)      docs="${docs}- ${subj#*: } (${sha})"$'\n' ;;
+          test:*|tests:*)    tests="${tests}- ${subj#*: } (${sha})"$'\n' ;;
+          perf:*)            perfs="${perfs}- ${subj#perf: } (${sha})"$'\n' ;;
+          *)                 others="${others}- ${subj} (${sha})"$'\n' ;;
+        esac
+      done <<EOF_COMMITS
+${commits}
+EOF_COMMITS
+
+      [ -n "${feats}" ]     && { echo "### Added"; echo ""; printf '%s' "${feats}"; echo ""; }
+      [ -n "${fixes}" ]     && { echo "### Fixed"; echo ""; printf '%s' "${fixes}"; echo ""; }
+      [ -n "${refactors}" ] && { echo "### Changed"; echo ""; printf '%s' "${refactors}"; echo ""; }
+      [ -n "${perfs}" ]     && { echo "### Performance"; echo ""; printf '%s' "${perfs}"; echo ""; }
+      [ -n "${docs}" ]      && { echo "### Documentation"; echo ""; printf '%s' "${docs}"; echo ""; }
+      [ -n "${tests}" ]     && { echo "### Tests"; echo ""; printf '%s' "${tests}"; echo ""; }
+      [ -n "${others}" ]    && { echo "### Other"; echo ""; printf '%s' "${others}"; echo ""; }
+    fi
+  fi
+
+  # Closed findings (delegate to cmd_changelog if .lattice/ exists)
+  if [ -d .lattice/findings/closed ]; then
+    local since_date="${since}"
+    # If since is a tag, resolve to the tag's commit date
+    if git rev-parse "${since}" >/dev/null 2>&1; then
+      since_date="$(git log -1 --format=%cd --date=short "${since}" 2>/dev/null || echo "${since}")"
+    fi
+    # cmd_changelog --since outputs its own markdown headers, so embed under H3
+    local cl_out
+    cl_out="$(cmd_changelog --since "${since_date}" 2>/dev/null | grep -v '^_Total:' || true)"
+    # Suppress noisy "no findings closed" pass-through from cmd_changelog
+    if printf '%s' "${cl_out}" | grep -qE '^_No findings|^\(no findings'; then
+      :
+    elif [ -n "${cl_out}" ]; then
+      echo "### Closed Lattice findings (since ${since_date})"
+      echo ""
+      printf '%s\n' "${cl_out}"
+      echo ""
+    fi
+  fi
+
+  # Footer hint
+  echo "### Verified"
+  echo "- (fill in: live tests, validate.sh, smoke tests)"
+  echo ""
+  echo "---"
+  echo "_Generated by \`lattice release-notes\` from \`${since}\`..HEAD on ${today}._"
+}
+
+# ---------------------------------------------------------------------------
 # setup — one-command per-project bootstrap. v1.0.3 (#2).
 # Runs the canonical first-time sequence:
 #   1. Ensure .lattice/findings/{open,closed,sweeps} exist
@@ -5494,6 +5649,7 @@ case "${sub}" in
   uninstall)          cmd_uninstall "$@" ;;
   setup)              cmd_setup "$@" ;;
   ci-check-dead)      cmd_ci_check_dead "$@" ;;
+  release-notes)      cmd_release_notes "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;
