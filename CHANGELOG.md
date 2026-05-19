@@ -2,6 +2,22 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-05-19
+
+**`lattice list` hides OK-tier by default (#16).** Closes the last actionable issue in the backlog. The "47-entry list mixing real problems with confirmed-clean OK markers" complaint is fixed at the read layer — much cheaper than moving OK findings to a separate filesystem directory (which would require migration scripts + audit-skill emission changes).
+
+### Changed
+- `lattice list` filters out `tier: OK` findings by default
+- `--include-ok` (alias `--all`) restores the previous behavior
+- `--tier OK` explicit filter overrides the hide (you can still query OK markers when you want them)
+- Behavior matches what SessionStart hook + statusline already do for OK suppression
+
+### Closed without code change
+- **#16** (OK findings should live in ok/) — addressed by read-layer hide. Filesystem layout unchanged.
+- **#17** (RFC: cross-repo finding dependencies) — deferred to v2.x. Cross-repo audit substrate is a separate design.
+- **#20** (Enforce operational knowledge at action-time) — addressed structurally by v1.3.0 `audit-infra` PreToolUse-block detection. Specific runbook-as-hook is a per-project pattern, not a Lattice-CLI feature.
+- **#28** (Telemetry blind to silent correctness bugs) — separate problem space (output validation). Deferred to v2.x.
+
 ## [1.3.0] — 2026-05-19
 
 **New `infra` audit dimension + Stop hook closes the friction-reporting loop.** Closes #36 and #40, plus auto-files-on-session-end for the friction-default-on protocol introduced in v1.2.0.

@@ -945,6 +945,9 @@ cmd_list() {
   local due_for_review=0
   local blocked_filter=""   # "" = no filter, "blocked" = only blocked, "unblocked" = only unblocked
   local show_effective=0    # --effective-tier: render tier post-demotion
+  # v1.3.1 (#16): OK-tier findings hidden by default. They're audit-passed
+  # markers, not actionable work. --include-ok or --tier OK shows them.
+  local include_ok=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --module)    filter_module="$2"; shift 2 ;;
@@ -957,9 +960,12 @@ cmd_list() {
       --due-for-review) due_for_review=1; shift ;;
       --unblocked) blocked_filter="unblocked"; shift ;;
       --blocked)   blocked_filter="blocked"; shift ;;
+      --include-ok|--all) include_ok=1; shift ;;
       *) die "list: unknown arg: $1" ;;
     esac
   done
+  # If user explicitly filters --tier OK, they want OK — let it through.
+  [ "${filter_tier^^}" = "OK" ] && include_ok=1
   # Normalize "partial" alias → "in_progress" (B2)
   [ "${filter_status}" = "partial" ] && filter_status="in_progress"
 
@@ -994,6 +1000,8 @@ cmd_list() {
     [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
     [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
     [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
+    # v1.3.1 (#16): hide OK by default
+    [ "${include_ok}" -eq 0 ] && [ "${tier}" = "OK" ] && continue
 
     if [ -n "${blocked_filter}" ]; then
       local blocked_by
