@@ -5394,6 +5394,8 @@ cmd_grow() {
     measure)        _grow_measure "$@" ;;
     check)          _grow_check "$@" ;;
     auto-rollback)  _grow_auto_rollback "$@" ;;
+    attach-measurement) _grow_attach_measurement "$@" ;;
+    schedule)       _grow_schedule "$@" ;;
     help|--help|-h)
       cat <<'GROWHELP'
 lattice grow — hypothesis lifecycle (parallel to findings; for forward-looking
@@ -5652,16 +5654,112 @@ _grow_measurement_field() {
   ' "${file}" 2>/dev/null
 }
 
+# v2.1 (#60): extract headers block from measurement.headers as
+# newline-separated "Header: value" lines. Returns empty if no headers block.
+_grow_measurement_headers() {
+  local file="$1"
+  awk '
+    /^measurement:/ { inmeas=1; next }
+    inmeas && /^[a-zA-Z_]/ { inmeas=0 }
+    inmeas && /^  headers:/ { inhdr=1; next }
+    inhdr && /^    [A-Za-z]/ {
+      # "    Key: value" or "    Key: \"value\""
+      sub(/^    /, "")
+      sub(/^"/, ""); sub(/"$/, "")
+      print
+      next
+    }
+    inhdr && /^  [a-zA-Z_]/ { inhdr=0 }
+    inhdr && /^[a-zA-Z_]/   { inhdr=0; inmeas=0 }
+  ' "${file}" 2>/dev/null
+}
+
+# v2.1 (#60 #3): extract a list of `sources:` entries under measurement.
+# Each entry becomes a line "source_url|baseline_value|weight|name".
+# Falls back to single source from measurement.source when no list.
+_grow_measurement_sources() {
+  local file="$1"
+  # First try the multi-source list shape
+  local list_output
+  list_output="$(awk '
+    /^measurement:/ { inmeas=1; next }
+    inmeas && /^[a-zA-Z_]/ { inmeas=0 }
+    inmeas && /^  sources:/ { inlist=1; next }
+    inlist && /^    - / {
+      if (src != "") {
+        print src "|" baseline "|" weight "|" name
+      }
+      src=""; baseline=""; weight="1"; name=""
+      # Parse the "- name: foo" or "- source: foo" inline part
+      line=$0
+      sub(/^    - /, "", line)
+      if (match(line, /^name:[[:space:]]*"?[^"]*"?/)) { name=substr(line, RSTART+5); gsub(/^[[:space:]]+|[[:space:]]+$|"/, "", name) }
+      else if (match(line, /^source:[[:space:]]*"?[^"]*"?/)) { src=substr(line, RSTART+7); gsub(/^[[:space:]]+|[[:space:]]+$|"/, "", src) }
+      next
+    }
+    inlist && /^      / {
+      line=$0
+      sub(/^      /, "", line)
+      if (match(line, /^source:/)) { src=substr(line, 8); gsub(/^[[:space:]]+|[[:space:]]+$|"/, "", src) }
+      else if (match(line, /^baseline_value:/)) { baseline=substr(line, 16); gsub(/^[[:space:]]+|[[:space:]]+$|"/, "", baseline) }
+      else if (match(line, /^weight:/)) { weight=substr(line, 8); gsub(/^[[:space:]]+|[[:space:]]+$|"/, "", weight) }
+      else if (match(line, /^name:/)) { name=substr(line, 6); gsub(/^[[:space:]]+|[[:space:]]+$|"/, "", name) }
+      next
+    }
+    inlist && /^  [a-zA-Z_]/ {
+      if (src != "") print src "|" baseline "|" weight "|" name
+      inlist=0
+    }
+    END {
+      if (inlist && src != "") print src "|" baseline "|" weight "|" name
+    }
+  ' "${file}" 2>/dev/null)"
+  if [ -n "${list_output}" ]; then
+    printf '%s\n' "${list_output}"
+    return 0
+  fi
+  # Fall back to single source
+  local single
+  single="$(_grow_measurement_field "${file}" "source")"
+  if [ -n "${single}" ]; then
+    local baseline; baseline="$(_grow_measurement_field "${file}" "baseline_value")"
+    printf '%s|%s|1|\n' "${single}" "${baseline}"
+  fi
+}
+
 # v2.0: fetch a metric value from a `measurement.source` URI. Returns the
 # numeric value on stdout; non-zero exit + stderr on failure.
+# v2.1 (#60): accepts optional 2nd arg = newline-separated `Header: value`
+# lines; values may reference ${ENV_VAR} and are interpolated at fetch time.
 _grow_fetch_metric() {
   local source="$1"
+  local headers="${2:-}"
   case "${source}" in
     http://*|https://*)
       command -v node >/dev/null 2>&1 || { echo "[fetch] node required for http source" >&2; return 1; }
       command -v curl >/dev/null 2>&1 || { echo "[fetch] curl required for http source" >&2; return 1; }
+      # v2.1: interpolate ${VAR} in headers + assemble -H flags for curl
+      local -a curl_args=(-fsSL --max-time 10)
+      if [ -n "${headers}" ]; then
+        local h k v interp
+        while IFS= read -r h; do
+          [ -z "${h}" ] && continue
+          # Split "Key: value" — value may contain ${VAR}
+          k="${h%%:*}"; v="${h#*:}"
+          # Strip one leading space after colon
+          v="${v# }"
+          # ${VAR} interpolation via envsubst-like loop
+          interp="${v}"
+          while [[ "${interp}" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+            local var_name="${BASH_REMATCH[1]}"
+            local var_value="${!var_name:-}"
+            interp="${interp//\$\{${var_name}\}/${var_value}}"
+          done
+          curl_args+=(-H "${k}: ${interp}")
+        done <<< "${headers}"
+      fi
       local body
-      body="$(curl -fsSL --max-time 10 "${source}" 2>/dev/null)" || { echo "[fetch] curl failed for ${source}" >&2; return 1; }
+      body="$(curl "${curl_args[@]}" "${source}" 2>/dev/null)" || { echo "[fetch] curl failed for ${source}" >&2; return 1; }
       # Parse JSON, look for .value or .data.value or .metric
       printf '%s' "${body}" | node -e '
 let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
@@ -5702,45 +5800,100 @@ _grow_fcmp() {
   node -e "const a=parseFloat(process.argv[1]),b=parseFloat(process.argv[2]); if(a<b)process.stdout.write('-1');else if(a>b)process.stdout.write('1');else process.stdout.write('0');" "$1" "$2"
 }
 
-# v2.0: evaluate a single running hypothesis against its measurement spec.
+# v2.0/v2.1: evaluate a single hypothesis. v2.1 adds: multi-source combine
+# (#60 #3), auth headers (#60 #1), --json output mode (#61).
 _grow_measure() {
-  [ "$#" -ge 1 ] || die "grow measure: usage: lattice grow measure <slug>"
-  local slug="$1"
+  [ "$#" -ge 1 ] || die "grow measure: usage: lattice grow measure <slug> [--json]"
+  local slug="$1"; shift || true
+  local output="text"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) output="json"; shift ;;
+      *) die "grow measure: unknown flag: $1" ;;
+    esac
+  done
   local p; p="$(_grow_resolve "${slug}")" || die "grow measure: hypothesis not found: ${slug}"
   local state; state="$(basename "$(dirname "${p}")")"
   if [ "${state}" != "running" ]; then
-    echo "[${PROG}] measure: ${slug} is in state '${state}', not 'running' — skipping"
+    if [ "${output}" = "json" ]; then
+      printf '{"slug":"%s","state":"%s","verdict":"skipped"}\n' "${slug}" "${state}"
+    else
+      echo "[${PROG}] measure: ${slug} is in state '${state}', not 'running' — skipping"
+    fi
     return 0
   fi
 
-  local source baseline threshold window_days run_at
-  source="$(_grow_measurement_field "${p}" "source")"
-  baseline="$(_grow_measurement_field "${p}" "baseline_value")"
+  local threshold window_days run_at combine
   threshold="$(_grow_measurement_field "${p}" "success_threshold")"
   window_days="$(_grow_measurement_field "${p}" "window_days")"
+  combine="$(_grow_measurement_field "${p}" "combine")"
+  [ -z "${combine}" ] && combine="sum"
   run_at="$(yaml_field "${p}" "run_at")"
+  local headers; headers="$(_grow_measurement_headers "${p}")"
 
-  if [ -z "${source}" ]; then
-    echo "[${PROG}] measure: ${slug} has no measurement.source — propose with --measurement-source. Verdict: insufficient-data"
+  # Read sources (1 or N). Each line: url|baseline|weight|name
+  local sources_lines; sources_lines="$(_grow_measurement_sources "${p}")"
+  if [ -z "${sources_lines}" ]; then
+    if [ "${output}" = "json" ]; then
+      printf '{"slug":"%s","verdict":"insufficient-data","reason":"no measurement.source(s)"}\n' "${slug}"
+    else
+      echo "[${PROG}] measure: ${slug} has no measurement.source — propose with --measurement-source. Verdict: insufficient-data"
+    fi
     return 0
   fi
 
-  local current
-  current="$(_grow_fetch_metric "${source}")" || {
-    echo "[${PROG}] measure: ${slug} -> fetch-failed (source=${source})"
-    return 1
-  }
+  # Fetch each source; track combined value.
+  local total=0 count=0 fetch_failed=0
+  local -a per_source=()  # rows like "name|source|value"
+  local line
+  while IFS= read -r line; do
+    [ -z "${line}" ] && continue
+    local s_url="${line%%|*}"; local rest="${line#*|}"
+    local s_base="${rest%%|*}"; rest="${rest#*|}"
+    local s_weight="${rest%%|*}"; rest="${rest#*|}"
+    local s_name="${rest}"
+    [ -z "${s_weight}" ] && s_weight=1
+    local s_val
+    if s_val="$(_grow_fetch_metric "${s_url}" "${headers}")"; then
+      # weighted contribution
+      local weighted; weighted="$(node -e "console.log(parseFloat(process.argv[1])*parseFloat(process.argv[2]))" "${s_val}" "${s_weight}")"
+      case "${combine}" in
+        sum|weighted-avg|weighted_avg)
+          total="$(node -e "console.log(parseFloat(process.argv[1])+parseFloat(process.argv[2]))" "${total}" "${weighted}")"
+          ;;
+        max)
+          if [ "${count}" -eq 0 ] || [ "$(_grow_fcmp "${s_val}" "${total}")" -gt 0 ]; then total="${s_val}"; fi
+          ;;
+        min)
+          if [ "${count}" -eq 0 ] || [ "$(_grow_fcmp "${s_val}" "${total}")" -lt 0 ]; then total="${s_val}"; fi
+          ;;
+        *) total="$(node -e "console.log(parseFloat(process.argv[1])+parseFloat(process.argv[2]))" "${total}" "${weighted}")" ;;
+      esac
+      per_source+=("${s_name:-_}|${s_url}|${s_val}")
+      count=$((count + 1))
+    else
+      fetch_failed=$((fetch_failed + 1))
+      per_source+=("${s_name:-_}|${s_url}|FETCH-FAILED")
+    fi
+  done <<< "${sources_lines}"
 
-  echo "[${PROG}] measure: ${slug}"
-  echo "  source:            ${source}"
-  echo "  baseline_value:    ${baseline:-(unset)}"
-  echo "  current_value:     ${current}"
-  echo "  success_threshold: ${threshold:-(unset)}"
-  echo "  window_days:       ${window_days:-(unset)}"
-  echo "  run_at:            ${run_at:-(unset)}"
+  if [ "${count}" -eq 0 ]; then
+    if [ "${output}" = "json" ]; then
+      printf '{"slug":"%s","verdict":"fetch-failed","sources_failed":%d}\n' "${slug}" "${fetch_failed}"
+    else
+      echo "[${PROG}] measure: ${slug} -> fetch-failed (all ${fetch_failed} sources)"
+    fi
+    return 1
+  fi
+
+  # For weighted-avg, divide total by count (or sum of weights — count is fine for v2.1)
+  local current="${total}"
+  case "${combine}" in
+    weighted-avg|weighted_avg) current="$(node -e "console.log(parseFloat(process.argv[1])/parseInt(process.argv[2]))" "${total}" "${count}")" ;;
+  esac
 
   # Window elapsed?
-  local window_elapsed=0
+  local window_elapsed=0 elapsed_days=0
   if [ -n "${run_at}" ] && [ -n "${window_days}" ]; then
     local now_s run_s elapsed_s window_s
     now_s="$(date -u +%s)"
@@ -5748,8 +5901,7 @@ _grow_measure() {
     elapsed_s=$((now_s - run_s))
     window_s=$((window_days * 86400))
     [ "${elapsed_s}" -ge "${window_s}" ] && window_elapsed=1
-    local elapsed_days=$((elapsed_s / 86400))
-    echo "  elapsed_days:      ${elapsed_days} / ${window_days}"
+    elapsed_days=$((elapsed_s / 86400))
   fi
 
   # Verdict
@@ -5764,6 +5916,28 @@ _grow_measure() {
   elif [ "${window_elapsed}" -eq 1 ]; then
     verdict="inconclusive"
   fi
+
+  if [ "${output}" = "json" ]; then
+    # JSON output for #61 scheduler. Compact one-line.
+    local title; title="$(yaml_field "${p}" "title")"
+    printf '{"slug":"%s","title":"%s","verdict":"%s","current_value":%s,"success_threshold":%s,"elapsed_days":%d,"window_days":%s,"combine":"%s","sources_count":%d,"sources_failed":%d}\n' \
+      "${slug}" "${title//\"/\\\"}" "${verdict}" "${current:-null}" "${threshold:-null}" "${elapsed_days}" "${window_days:-null}" "${combine}" "${count}" "${fetch_failed}"
+    return 0
+  fi
+
+  echo "[${PROG}] measure: ${slug}"
+  echo "  combine:           ${combine}"
+  echo "  sources:           ${count} ok, ${fetch_failed} failed"
+  for row in "${per_source[@]}"; do
+    local n="${row%%|*}" rest2="${row#*|}"
+    local u="${rest2%%|*}" v="${rest2#*|}"
+    echo "    - ${n}: ${u} -> ${v}"
+  done
+  echo "  combined_value:    ${current}"
+  echo "  success_threshold: ${threshold:-(unset)}"
+  echo "  window_days:       ${window_days:-(unset)}"
+  echo "  run_at:            ${run_at:-(unset)}"
+  [ "${elapsed_days}" -gt 0 ] && echo "  elapsed_days:      ${elapsed_days} / ${window_days:-?}"
   echo "  verdict:           ${verdict}"
 
   case "${verdict}" in
@@ -5774,18 +5948,58 @@ _grow_measure() {
   esac
 }
 
-# v2.0: walk all running hypotheses and measure each.
+# v2.0/v2.1: walk all running hypotheses and measure each.
+# v2.1 (#61): --json output mode produces one JSON object per line + a
+# final summary line — designed for the GitHub Actions workflow to pipe
+# into the Telegram formatter.
 _grow_check() {
-  local filter_state="running"
+  local filter_state="running" output="text"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --state) filter_state="$2"; shift 2 ;;
+      --json)  output="json"; shift ;;
       *) die "grow check: unknown arg: $1" ;;
     esac
   done
-  [ -d ".lattice/hypotheses/${filter_state}" ] || { echo "[${PROG}] check: no .lattice/hypotheses/${filter_state}/"; return 0; }
+  if [ ! -d ".lattice/hypotheses/${filter_state}" ]; then
+    if [ "${output}" = "json" ]; then
+      printf '{"summary":{"measured":0,"won":0,"lost":0,"waiting":0,"failed_fetch":0},"hypotheses":[]}\n'
+    else
+      echo "[${PROG}] check: no .lattice/hypotheses/${filter_state}/"
+    fi
+    return 0
+  fi
   shopt -s nullglob
-  local n=0
+  local n=0 won=0 lost=0 waiting=0 failed=0
+  if [ "${output}" = "json" ]; then
+    # Collect per-hypothesis JSON, build a single envelope at end
+    local -a rows=()
+    for f in .lattice/hypotheses/${filter_state}/*.yml; do
+      [ -f "${f}" ] || continue
+      local slug; slug="$(basename "${f}" .yml)"
+      local row
+      row="$(_grow_measure "${slug}" --json 2>/dev/null || echo "{}")"
+      rows+=("${row}")
+      n=$((n + 1))
+      # Bucket
+      case "${row}" in
+        *'"verdict":"succeeded"'*)     won=$((won + 1)) ;;
+        *'"verdict":"failed"'*)        lost=$((lost + 1)) ;;
+        *'"verdict":"still-running"'*) waiting=$((waiting + 1)) ;;
+        *'"verdict":"fetch-failed"'*)  failed=$((failed + 1)) ;;
+      esac
+    done
+    # Emit envelope (avoid jq dep — manual JSON)
+    printf '{"summary":{"measured":%d,"won":%d,"lost":%d,"waiting":%d,"failed_fetch":%d},"hypotheses":[' "${n}" "${won}" "${lost}" "${waiting}" "${failed}"
+    local first=1
+    for r in "${rows[@]}"; do
+      [ "${first}" -eq 1 ] || printf ','
+      printf '%s' "${r}"
+      first=0
+    done
+    printf ']}\n'
+    return 0
+  fi
   for f in .lattice/hypotheses/${filter_state}/*.yml; do
     [ -f "${f}" ] || continue
     local slug; slug="$(basename "${f}" .yml)"
@@ -5928,6 +6142,212 @@ _grow_auto_rollback() {
   echo "[${PROG}] to undo this rollback:"
   echo "  git reset --hard refs/lattice/pre-rollback/${slug}"
   echo "  mv ${dst} .lattice/hypotheses/running/${slug}.yml"
+}
+
+# v2.1 (#60 #2): retrofit measurement block into an existing hypothesis YAML
+# (in any state). Without this, users who proposed before v1.4.2 had to
+# hand-edit YAML to add measurement fields.
+_grow_attach_measurement() {
+  [ "$#" -ge 1 ] || die "grow attach-measurement: usage: lattice grow attach-measurement <slug> --metric-name X --measurement-source Y --baseline-value Z [...]"
+  local slug="$1"; shift
+  local metric_name="" measurement_source="" baseline_value="" baseline_source=""
+  local expected_delta="" success_threshold="" window_days=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --metric-name)        metric_name="$2"; shift 2 ;;
+      --measurement-source) measurement_source="$2"; shift 2 ;;
+      --baseline-value)     baseline_value="$2"; shift 2 ;;
+      --baseline-source)    baseline_source="$2"; shift 2 ;;
+      --expected-delta)     expected_delta="$2"; shift 2 ;;
+      --success-threshold)  success_threshold="$2"; shift 2 ;;
+      --window-days)        window_days="$2"; shift 2 ;;
+      *) die "grow attach-measurement: unknown flag: $1" ;;
+    esac
+  done
+  local p; p="$(_grow_resolve "${slug}")" || die "grow attach-measurement: hypothesis not found: ${slug}"
+  if grep -q '^measurement:' "${p}" 2>/dev/null; then
+    die "grow attach-measurement: ${p} already has a measurement block — edit YAML manually or remove it first"
+  fi
+  [ -n "${measurement_source}" ] || die "grow attach-measurement: --measurement-source required"
+
+  # Insert measurement block AFTER the metric: line (or after cadence: line if no metric:)
+  local tmp; tmp="$(mktemp 2>/dev/null || echo "${p}.tmp")"
+  awk -v mn="${metric_name}" -v ms="${measurement_source}" -v bv="${baseline_value}" \
+      -v bs="${baseline_source}" -v ed="${expected_delta}" -v st="${success_threshold}" \
+      -v wd="${window_days}" '
+    { print }
+    /^metric:/ && !inserted {
+      print "measurement:"
+      if (mn != "") print "  name: \"" mn "\""
+      if (ms != "") print "  source: \"" ms "\""
+      if (bv != "") print "  baseline_value: " bv
+      if (bs != "") print "  baseline_source: \"" bs "\""
+      if (ed != "") print "  expected_delta: " ed
+      if (st != "") print "  success_threshold: " st
+      if (wd != "") print "  window_days: " wd
+      inserted=1
+    }
+  ' "${p}" > "${tmp}" && mv "${tmp}" "${p}"
+  echo "[${PROG}] grow attach-measurement: added measurement block to ${p}"
+  echo "[${PROG}] verify: lattice grow show ${slug}"
+}
+
+# v2.1 (#61): schedule install/status/uninstall/trigger. Generates GitHub
+# Actions workflow that runs `lattice grow check --json` weekly and pipes the
+# result to lattice-grow-telegram.mjs (which formats + POSTs to Telegram).
+_grow_schedule() {
+  local action="${1:-status}"; shift || true
+  case "${action}" in
+    install)   _grow_schedule_install "$@" ;;
+    status)    _grow_schedule_status "$@" ;;
+    uninstall) _grow_schedule_uninstall "$@" ;;
+    trigger)   _grow_schedule_trigger "$@" ;;
+    --help|-h|help)
+      cat <<'SCHHELP'
+lattice grow schedule — autonomous check loop (v2.1 #61)
+
+  install [--transport github-actions|local-cron] [--time HH:MM] [--day mon|...]
+                                              wire up cron + Telegram updates
+  status                                      show current schedule + config
+  uninstall                                   remove the workflow file
+  trigger                                     manually fire a check now
+
+GitHub Actions transport requires these repo secrets:
+  TELEGRAM_BOT_TOKEN
+  TELEGRAM_CHAT_ID
+Set them at: github.com/<owner>/<repo>/settings/secrets/actions
+SCHHELP
+      ;;
+    *) die "grow schedule: unknown action: ${action} (try: install | status | uninstall | trigger)" ;;
+  esac
+}
+
+_grow_schedule_install() {
+  local transport="github-actions" time="09:00" day="mon"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --transport) transport="$2"; shift 2 ;;
+      --time)      time="$2"; shift 2 ;;
+      --day)       day="$2"; shift 2 ;;
+      *) die "grow schedule install: unknown flag: $1" ;;
+    esac
+  done
+
+  case "${transport}" in
+    github-actions) ;;
+    local-cron) echo "[${PROG}] grow schedule: local-cron transport — emitting crontab line for user to paste"
+                local h="${time%%:*}" m="${time##*:}"
+                local dow; case "${day}" in mon)dow=1;;tue)dow=2;;wed)dow=3;;thu)dow=4;;fri)dow=5;;sat)dow=6;;sun)dow=0;;*)dow=1;;esac
+                echo "  ${m} ${h} * * ${dow} cd $(pwd) && lattice grow check --json | node ${SELF_DIR}/lattice-grow-telegram.mjs"
+                return 0 ;;
+    *) die "grow schedule install: --transport must be github-actions or local-cron" ;;
+  esac
+
+  command -v git >/dev/null 2>&1 || die "grow schedule install: git required"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "grow schedule install: not in a git repo"
+
+  # Parse time + day into cron expression (UTC — GitHub Actions uses UTC)
+  local hh="${time%%:*}" mm="${time##*:}"
+  hh="${hh#0}"; mm="${mm#0}"
+  local dow; case "${day,,}" in mon)dow=1;;tue)dow=2;;wed)dow=3;;thu)dow=4;;fri)dow=5;;sat)dow=6;;sun)dow=0;;*)dow=1;;esac
+  local cron_expr="${mm:-0} ${hh:-9} * * ${dow}"
+
+  mkdir -p .github/workflows 2>/dev/null
+  local wf=".github/workflows/lattice-grow-check.yml"
+  if [ -f "${wf}" ]; then
+    echo "[${PROG}] grow schedule: ${wf} already exists — refusing to overwrite"
+    echo "[${PROG}] remove with: lattice grow schedule uninstall"
+    return 1
+  fi
+
+  cat > "${wf}" <<WORKFLOW
+# Generated by \`lattice grow schedule install\`.
+# Edit \`lattice grow schedule uninstall\` to remove. Manual trigger via
+# the "Run workflow" button in GitHub Actions UI.
+name: lattice grow check
+on:
+  schedule:
+    - cron: '${cron_expr}'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Lattice
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/install.sh | LATTICE_INSTALL_NO_PROMPT=1 bash
+
+      - name: Run grow check
+        id: check
+        run: |
+          export PATH="\$HOME/.local/bin:\$PATH"
+          lattice grow check --json > /tmp/grow-check.json
+          cat /tmp/grow-check.json
+
+      - name: Post to Telegram
+        if: \${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        env:
+          TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
+          REPO_NAME: \${{ github.repository }}
+        run: |
+          export PATH="\$HOME/.local/bin:\$PATH"
+          # Locate the telegram formatter (install.sh drops it next to the CLI)
+          FORMATTER="\$HOME/.claude/lattice/scripts/lattice-grow-telegram.mjs"
+          if [ -f "\$FORMATTER" ]; then
+            node "\$FORMATTER" < /tmp/grow-check.json
+          else
+            echo "::warning::lattice-grow-telegram.mjs not found — skipping Telegram notification"
+          fi
+WORKFLOW
+
+  echo "[${PROG}] grow schedule: wrote ${wf}"
+  echo "[${PROG}] cron expression: ${cron_expr} (UTC) — fires ${day^^} at ${time} UTC"
+  echo ""
+  echo "[${PROG}] required GitHub repo secrets (optional — without them, the workflow runs but doesn't post to Telegram):"
+  echo "  TELEGRAM_BOT_TOKEN"
+  echo "  TELEGRAM_CHAT_ID"
+  echo ""
+  echo "[${PROG}] set them at: github.com/<owner>/<repo>/settings/secrets/actions"
+  echo "[${PROG}] commit + push ${wf} to enable. Manual test: \`lattice grow schedule trigger\`"
+}
+
+_grow_schedule_status() {
+  local wf=".github/workflows/lattice-grow-check.yml"
+  if [ ! -f "${wf}" ]; then
+    echo "[${PROG}] grow schedule: not installed in this project (${wf} absent)"
+    return 0
+  fi
+  echo "[${PROG}] grow schedule:"
+  echo "  workflow:   ${wf}"
+  local cron_line; cron_line="$(grep -E "^[[:space:]]+- cron:" "${wf}" | head -1 | sed -E "s/^[[:space:]]+- cron:[[:space:]]+'(.*)'$/\1/")"
+  echo "  cron:       ${cron_line}"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    local last; last="$(gh run list --workflow lattice-grow-check.yml --limit 1 --json status,conclusion,createdAt 2>/dev/null || echo "")"
+    [ -n "${last}" ] && echo "  last run:   ${last}"
+  fi
+}
+
+_grow_schedule_uninstall() {
+  local wf=".github/workflows/lattice-grow-check.yml"
+  if [ ! -f "${wf}" ]; then
+    echo "[${PROG}] grow schedule: nothing to uninstall (${wf} absent)"
+    return 0
+  fi
+  printf "[${PROG}] grow schedule: remove %s? [y/N] " "${wf}"
+  read -r ans
+  case "${ans}" in y|Y|yes|YES) rm -f "${wf}"; echo "[${PROG}] removed ${wf}";; *) echo "[${PROG}] aborted";; esac
+}
+
+_grow_schedule_trigger() {
+  command -v gh >/dev/null 2>&1 || die "grow schedule trigger: gh CLI required for workflow_dispatch"
+  gh workflow run lattice-grow-check.yml 2>&1 | sed "s/^/[${PROG}] /"
+  echo "[${PROG}] triggered. Watch: gh run watch"
 }
 
 _grow_close() {

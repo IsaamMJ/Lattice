@@ -2,6 +2,76 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-05-19
+
+**Closes #60 + #61 from the first real v2.0 dogfood.** Auth headers, schema migration, multi-source combine, autonomous schedule, Telegram updates — all the v2.1+ deferrals from v2.0 that the trial-1 report turned from "future" into "needed now."
+
+### Added — auth + multi-source (#60)
+- **`measurement.headers` YAML block** with `${ENV_VAR}` interpolation at fetch time. HTTP sources can now hit auth-gated metric endpoints:
+  ```yaml
+  measurement:
+    source: "https://api.example.com/metrics/x"
+    headers:
+      Authorization: "Bearer ${LATTICE_METRIC_TOKEN}"
+      X-Api-Version: "2"
+  ```
+- **`measurement.sources` list** + `measurement.combine` (`sum` / `max` / `min` / `weighted-avg`). Bundled-change hypotheses (one PR touching multiple things) can declare multiple metrics:
+  ```yaml
+  measurement:
+    combine: sum
+    sources:
+      - name: "papercraft_clicks"
+        source: "https://example.com/api/m?key=papercraft"
+        baseline_value: 0
+        weight: 1
+      - name: "risecraft_clicks"
+        source: "https://example.com/api/m?key=risecraft"
+        baseline_value: 0
+    success_threshold: 1
+    window_days: 7
+  ```
+  Each source fetched independently; combined per `combine:` semantics; single verdict against `success_threshold`.
+- **`lattice grow attach-measurement <slug>`** — adds a `measurement:` block to an existing hypothesis YAML (any state). Closes the v1.4.0 → v2.0 migration gap where pre-v1.4.2 hypotheses had no way to gain a measurement block except hand-editing.
+
+### Added — autonomous schedule (#61)
+- **`lattice grow check --json`** — single-line JSON envelope `{summary, hypotheses[]}` per hypothesis. Designed for piping into the Telegram formatter.
+- **`lattice grow schedule install [--transport github-actions|local-cron] [--time HH:MM] [--day mon|...]`** — wires the autonomous check loop:
+  - `github-actions` (default): writes `.github/workflows/lattice-grow-check.yml` with a weekly cron that installs Lattice, runs `lattice grow check --json`, pipes the result through `lattice-grow-telegram.mjs`, POSTs the formatted message to Telegram (if `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` repo secrets are set; silently skips if not).
+  - `local-cron`: emits the crontab line for the user to paste — no auto-write.
+- **`lattice grow schedule status / uninstall / trigger`** — inspect/remove/manually-fire the workflow. `trigger` requires `gh` CLI.
+- **`scripts/lattice-grow-telegram.mjs`** — formatter that reads a `grow check --json` envelope from stdin, renders an HTML message with verdict icons (🟢 won, 🔴 lost, 🟡 still-running, ⚠️ fetch-failed, ⚪ skipped/inconclusive), and POSTs to the Telegram bot API. Includes copy-pasteable close/auto-rollback commands per hypothesis.
+
+### How the closed autonomous loop works now
+```bash
+# In each project (one time):
+lattice grow schedule install                # writes .github/workflows/lattice-grow-check.yml
+git add .github/workflows && git commit -m "chore: lattice grow weekly check"
+git push
+# Set repo secrets TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in GitHub settings
+
+# Then for each hypothesis:
+lattice grow propose <slug> --measurement-source 'https://...' --success-threshold N --window-days 7
+lattice grow run <slug> --commit $(git rev-parse HEAD)
+# Walk away. Each Monday 09:00 UTC, you get a Telegram message:
+#   🟢 my-hyp (Day 7/7) → verdict: succeeded
+#         current 0.025 vs threshold 0.02
+#         `lattice grow close my-hyp --result won --observed-value 0.025`
+```
+
+### Verified
+- Live `/tmp/v21-test` end-to-end:
+  - `propose` (no measurement) → `attach-measurement --metric-name ctr --measurement-source file:/tmp/m.txt --baseline-value 0.01 --success-threshold 0.02 --window-days 7` correctly inserts the `measurement:` block after the `metric:` line
+  - `grow run` + `grow check --json` returns: `{"summary":{"measured":1,"won":1,...},"hypotheses":[{...verdict:"succeeded"...}]}`
+  - `grow schedule install` writes a valid GitHub Actions workflow with cron `0 9 * * 1` (Mon 09:00 UTC) and the install/check/post pipeline
+  - `lattice-grow-telegram.mjs` correctly refuses to post without `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (exit 1 with clear error)
+- `bash -n scripts/lattice` and `node --check scripts/lattice-grow-telegram.mjs` clean.
+
+### v2.2+ deferrals (still)
+- **Multi-project digest** — one Telegram message summarizing N projects' hypotheses. Needs cross-project state aggregation.
+- **Confidence-interval / MDE stats** — verdict is still a hard threshold compare.
+- **Auto-merge of close commands from Telegram tap** — too risky for v2.1; user copies command, runs locally.
+- **Hypothesis auto-generation from product data** — v3.0+, needs LLM integration.
+
 ## [2.0.0] — 2026-05-19
 
 **Closed-loop hypothesis execution.** Foundation shipped in v1.4.0; structured measurement schema in v1.4.2; v2.0 wires them to real runtime behavior. A hypothesis can now be measured against its source, evaluated against its threshold, and rolled back via real `git revert` — without human intervention except for an `--execute` confirmation gate.
