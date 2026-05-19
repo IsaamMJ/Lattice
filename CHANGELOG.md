@@ -2,6 +2,28 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-05-19
+
+**Shim-drift detection + update self-verification.** Closes the silent-failure mode that bit us during the v1.4.0 dogfood: a session reports "you have v0.9.16, no `lattice grow`" while a parallel session insists "v1.4.0 is shipped." Both true — the GitHub release is live AND the user's `lattice` shim resolves to a different on-disk script that update.sh never touched.
+
+### Added
+- **`lattice doctor` shim drift detection.** Resolves where `lattice` actually executes from (follows symlinks + bash exec wrappers), then compares:
+  - shim target vs canonical install at `~/.claude/lattice/scripts/lattice`
+  - shim version vs canonical install version
+  - shim target vs the doctor script's own resolved path
+  Emits one of three signals:
+  - `[PASS] shim resolves to <path>` — shim path resolved cleanly
+  - `[WARN] shim non-canonical but version matches` — different file, same version (works for now; will drift after next `update --self`)
+  - `[FAIL] shim drift: running=<X> but canonical=<Y>` — different file, different version; user invokes one, update.sh wrote to the other
+- **`lattice update --self` self-verification.** Captures running version pre-update, runs the updater, then re-reads `lattice version` post-update. If the running version didn't move AND the canonical version did, exits 2 with explicit "your shim points elsewhere" message + the exact `ln -sfn` command to fix it. Replaces the previous silent "0.9.16 → 1.4.0" success message that was lying about user-visible reality.
+
+### Why this matters
+Lattice has been silently shipping fake updates whenever a user's shim points at a non-canonical install location. The v1.4.0 dogfood surfaced it: I edited `/e/Lattice/scripts/lattice` (dev checkout) and pushed v1.4.0 to GitHub, but the user's shim pointed at `/e/DXB_Superpowers/Lattice/scripts/lattice` (a separate older install). `lattice update --self` updated `~/.claude/lattice/scripts/lattice` (canonical) — yet `lattice version` kept returning 0.9.16 because that's not what the shim invoked. v1.4.1 makes this loud instead of silent.
+
+### Verified
+- Live `lattice doctor` on this machine flags the shim-non-canonical state with the exact remediation hint
+- `bash -n scripts/lattice` clean
+
 ## [1.4.0] — 2026-05-19
 
 **Operator profile + hypothesis lifecycle.** Closes the next 3 RFCs in one ship — #55 (workflow-context tier reweighting), #56 (per-user operator profile), and #57 (`lattice grow` as second dimension, reversing v1.3.1's #45 deferral).

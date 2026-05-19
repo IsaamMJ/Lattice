@@ -1728,6 +1728,15 @@ cmd_update() {
       echo "[${PROG}] up to date: ${current}"
       ;;
     --self)
+      # v1.4.1: capture the RUNNING version (what `lattice` resolves to on the
+      # user's PATH) BEFORE update, so we can verify after that the version
+      # actually moved. Without this, the update appears to succeed even when
+      # it updated a copy the user's shim doesn't point at.
+      local _pre_running=""
+      if command -v lattice >/dev/null 2>&1; then
+        _pre_running="$(lattice version 2>/dev/null | head -1 | awk '{print $NF}' || echo unknown)"
+      fi
+
       # Search order (#18): project-local sibling, global install, fresh GitHub fetch.
       local updater="${SELF_DIR}/update.sh"
       if [ -f "${updater}" ]; then
@@ -1744,6 +1753,35 @@ cmd_update() {
         else
           die "update: neither local update.sh nor curl/wget available"
         fi
+      fi
+
+      # v1.4.1: self-verify. Compare the version `lattice` resolves to NOW vs
+      # the canonical install version. If they differ, the user's shim points
+      # at a different script — update silently shipped a fake success.
+      if command -v lattice >/dev/null 2>&1; then
+        local _post_running _canonical_v _canonical="${HOME}/.claude/lattice/scripts/lattice"
+        _post_running="$(lattice version 2>/dev/null | head -1 | awk '{print $NF}' || echo unknown)"
+        if [ -f "${_canonical}" ]; then
+          _canonical_v="$(bash "${_canonical}" version 2>/dev/null | head -1 | awk '{print $NF}' || echo unknown)"
+        else
+          _canonical_v="unknown"
+        fi
+        if [ -n "${_canonical_v}" ] && [ "${_canonical_v}" != "unknown" ] && [ "${_post_running}" != "${_canonical_v}" ]; then
+          echo "" >&2
+          echo "[${PROG}] !!! UPDATE INCOMPLETE — your \`lattice\` still resolves to ${_post_running}" >&2
+          echo "[${PROG}] !!! but the canonical install at ${_canonical} is now ${_canonical_v}" >&2
+          echo "[${PROG}] !!! your shim points elsewhere — likely $(command -v lattice 2>/dev/null)" >&2
+          echo "[${PROG}] !!! Fix: re-run install.sh, OR repoint manually:" >&2
+          echo "[${PROG}] !!!   ln -sfn ${_canonical} \"$(command -v lattice 2>/dev/null)\"" >&2
+          return 2
+        fi
+        if [ -n "${_pre_running}" ] && [ "${_pre_running}" = "${_post_running}" ] && [ "${_pre_running}" != "${_canonical_v}" ]; then
+          echo "" >&2
+          echo "[${PROG}] !!! update.sh wrote to disk but your running version is unchanged (${_post_running})" >&2
+          echo "[${PROG}] !!! this means your shim points at a copy update.sh didn't touch" >&2
+          return 2
+        fi
+        echo "[${PROG}] update: verified — \`lattice version\` reports ${_post_running}"
       fi
       ;;
     --enable-auto)
@@ -1923,6 +1961,56 @@ cmd_doctor() {
   fi
   if [ -n "${found_path}" ]; then
     _check_pass "lattice in PATH (${found_path})"
+
+    # v1.4.1: shim drift detection. Resolve where `lattice` actually executes
+    # from (following symlinks + bash exec wrappers), and compare against:
+    #   1. The canonical global install at ~/.claude/lattice/scripts/lattice
+    #   2. The script invoked for THIS doctor run (this script's own path)
+    # The single most-common silent-failure mode: shim points at a stale
+    # install, `lattice update --self` updates the canonical, user's running
+    # binary stays old. v1.4.1 makes that loud.
+    local shim_target=""
+    if [ -L "${found_path}" ]; then
+      shim_target="$(readlink "${found_path}" 2>/dev/null || true)"
+    elif [ -f "${found_path}" ]; then
+      # bash wrapper — extract `exec bash <path>` line
+      shim_target="$(grep -oE 'exec bash [^"'\'']*' "${found_path}" 2>/dev/null | head -1 | sed -E 's/^exec bash //; s/[[:space:]]*"\$@".*//; s/^[[:space:]]+|[[:space:]]+$//g')"
+      [ -z "${shim_target}" ] && shim_target="${found_path}"
+    fi
+    local self_path
+    self_path="$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
+    local canonical="${HOME}/.claude/lattice/scripts/lattice"
+
+    # Compare running version (what user invokes) vs canonical install version
+    local running_version canonical_version
+    if [ -n "${shim_target}" ] && [ -f "${shim_target}" ]; then
+      running_version="$(bash "${shim_target}" version 2>/dev/null || echo unknown)"
+    else
+      running_version="$(current_version 2>/dev/null || echo unknown)"
+    fi
+    if [ -f "${canonical}" ]; then
+      canonical_version="$(bash "${canonical}" version 2>/dev/null || echo unknown)"
+    else
+      canonical_version=""
+    fi
+
+    if [ -n "${shim_target}" ] && [ -f "${shim_target}" ]; then
+      _check_pass "shim resolves to ${shim_target}"
+    fi
+    # Drift case 1: shim points at a non-canonical install
+    if [ -n "${shim_target}" ] && [ -n "${canonical_version}" ] && [ "${shim_target}" != "${canonical}" ]; then
+      if [ "${running_version}" != "${canonical_version}" ]; then
+        _check_fail "shim drift: running=${running_version} but canonical=${canonical_version}" "your \`lattice\` invokes ${shim_target}; the canonical install at ${canonical} is a different version. Fix: repoint shim — \`ln -sfn ${canonical} ${found_path}\` (or re-run install.sh)"
+      else
+        # Same version, different path — acceptable but worth noting
+        _check_warn "shim non-canonical but version matches" "shim at ${found_path} points at ${shim_target}, not canonical ${canonical} — versions agree (${running_version}) for now, but \`lattice update --self\` will update the canonical and silently leave your shim stale"
+      fi
+    fi
+    # Drift case 2: shim version != the script running THIS doctor
+    local self_version="$(current_version 2>/dev/null || echo unknown)"
+    if [ "${running_version}" != "${self_version}" ] && [ -n "${shim_target}" ] && [ "${shim_target}" != "${self_path}" ]; then
+      _check_warn "doctor invoked from different lattice than the shim" "this doctor: ${self_version} (${self_path}); shim invokes: ${running_version} (${shim_target}). Run \`lattice doctor\` (not \`bash <path> doctor\`) to see what users actually get"
+    fi
   else
     # Walk personal-bin candidates and report which are on PATH so the user
     # can see exactly where to install the shim.
