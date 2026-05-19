@@ -1050,6 +1050,19 @@ cmd_list() {
         extra="${extra} (${exposure})"
       fi
     fi
+    # v1.4.0 (#55 #56): apply operator-profile-based reweighting on top of
+    # exposure demotion. Only when --effective-tier is set, to keep the
+    # default `lattice list` view stable (and surfacing the raw audit signal).
+    if [ "${show_effective}" -eq 1 ]; then
+      local fix_text
+      fix_text="$(yaml_field "${f}" "fix")"
+      local reweighted
+      reweighted="$(_profile_reweight_tier "${display_tier}" "${dimension}" "${rule}" "${fix_text}")"
+      if [ "${reweighted}" != "${display_tier}" ]; then
+        extra="${extra} [profile: ${display_tier}->${reweighted}]"
+        display_tier="${reweighted}"
+      fi
+    fi
 
     # v1.1.2 (#50): hide the "—  :" tail when both file and line are empty,
     # which happens for finding YAMLs that lack file:/line: fields (e.g. some
@@ -3340,7 +3353,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize diff write-manifest audit-infra usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -5100,6 +5113,438 @@ EOF_COMMITS
 }
 
 # ---------------------------------------------------------------------------
+# profile — operator profile (#55, #56). Global per-user constraints +
+# preferences that reweight finding tiers and bias suggested fixes. Lives
+# at ~/.lattice/profile.yml. Project-level override at .lattice/profile.yml.
+#
+# Usage:
+#   lattice profile init                    # create ~/.lattice/profile.yml with safe defaults
+#   lattice profile show                    # print merged effective profile
+#   lattice profile set <key>=<value> [...]  # update one or more fields
+#
+# Fields read by `lattice list --effective-tier` and `lattice show`:
+#   operator.scale = solo | small-team | org | enterprise
+#   workflow_constraints.will_check_dashboards = bool
+#   workflow_constraints.will_query_databases = bool
+#   workflow_constraints.will_read_log_files = bool
+#   workflow_constraints.push_channels_only = bool
+#   preferences.prefer_delete_over_wire = bool
+# ---------------------------------------------------------------------------
+_PROFILE_GLOBAL="${HOME}/.lattice/profile.yml"
+
+_profile_default() {
+  cat <<'PROFYAML'
+# Lattice operator profile (~/.lattice/profile.yml). Read by `lattice list
+# --effective-tier`, `lattice show`, and `lattice grow` for tier reweighting
+# + suggested-fix bias. Project-level overrides go in .lattice/profile.yml.
+operator:
+  scale: solo               # solo | small-team | org | enterprise
+  on_call: false
+workflow_constraints:
+  will_check_dashboards: false
+  will_query_databases: false
+  will_read_log_files: false
+  push_channels_only: true
+preferences:
+  prefer_delete_over_wire: true
+  confirm_before_large_changes: true   # >300 LOC = confirm
+PROFYAML
+}
+
+cmd_profile() {
+  local sub="${1:-show}"; shift || true
+  case "${sub}" in
+    init)
+      if [ -f "${_PROFILE_GLOBAL}" ]; then
+        echo "[${PROG}] profile already exists at ${_PROFILE_GLOBAL} (preserved)"
+        return 0
+      fi
+      mkdir -p "$(dirname "${_PROFILE_GLOBAL}")" 2>/dev/null
+      _profile_default > "${_PROFILE_GLOBAL}"
+      echo "[${PROG}] created ${_PROFILE_GLOBAL}"
+      echo "[${PROG}] edit it to declare your workflow constraints; tier reweighting will honor them"
+      ;;
+    show)
+      if [ -f "${_PROFILE_GLOBAL}" ]; then
+        echo "# --- global: ${_PROFILE_GLOBAL} ---"
+        cat "${_PROFILE_GLOBAL}"
+      else
+        echo "[${PROG}] no profile yet. run: lattice profile init"
+      fi
+      if [ -f .lattice/profile.yml ]; then
+        echo ""
+        echo "# --- project override: $(pwd)/.lattice/profile.yml ---"
+        cat .lattice/profile.yml
+      fi
+      ;;
+    set)
+      [ "$#" -ge 1 ] || die "profile set: usage: lattice profile set key=value [key=value...]"
+      [ -f "${_PROFILE_GLOBAL}" ] || cmd_profile init >/dev/null
+      for kv in "$@"; do
+        local k="${kv%%=*}" v="${kv#*=}"
+        # Simple key-line replacement; preserves structure
+        if grep -qE "^[[:space:]]*${k}:" "${_PROFILE_GLOBAL}"; then
+          sed -i.bak -E "s|^([[:space:]]*${k}:).*|\1 ${v}|" "${_PROFILE_GLOBAL}"
+          rm -f "${_PROFILE_GLOBAL}.bak"
+          echo "[${PROG}] set ${k}=${v}"
+        else
+          echo "[${PROG}] WARN: key '${k}' not found in profile — append manually" >&2
+        fi
+      done
+      ;;
+    --help|-h)
+      cat <<'PROFHELP'
+lattice profile — operator profile for tier reweighting + fix bias
+
+  init                              create ~/.lattice/profile.yml with defaults
+  show                              print merged effective profile
+  set key=value [key=value...]      update one or more keys
+
+Profile fields drive `lattice list --effective-tier`:
+  scale=solo + audit/dead-code               -> demote 1 step
+  will_check_dashboards=false + fix=dashboard -> demote 2 steps
+  prefer_delete_over_wire=true               -> bias suggested_fix toward delete
+PROFHELP
+      ;;
+    *) die "profile: unknown action: ${sub} (try: init | show | set)" ;;
+  esac
+}
+
+# Read a profile field (dot-path like "operator.scale"). Used by tier
+# reweighting + lattice grow. Returns empty string if not set.
+_profile_get() {
+  local path="$1"
+  local last="${path##*.}"
+  local file
+  for file in .lattice/profile.yml "${_PROFILE_GLOBAL}"; do
+    [ -f "${file}" ] || continue
+    local v
+    v="$(grep -E "^[[:space:]]*${last}:" "${file}" 2>/dev/null | head -1 | sed -E "s|^[[:space:]]*${last}:[[:space:]]*||; s|[[:space:]]*#.*$||; s|^[\"']||; s|[\"']$||")"
+    [ -n "${v}" ] && { printf '%s' "${v}"; return 0; }
+  done
+}
+
+# Reweight tier based on profile. Args: tier, dimension, rule, fix_text.
+# Returns the (possibly demoted) tier. Demotion ladder:
+#   CRITICAL -> BLOCKER -> HIGH -> RISK -> MEDIUM -> WATCH -> LOW
+_profile_reweight_tier() {
+  local tier="$1" dimension="$2" rule="$3" fix_text="$4"
+  local demote=0
+  local scale; scale="$(_profile_get operator.scale)"
+  local will_dash; will_dash="$(_profile_get workflow_constraints.will_check_dashboards)"
+  local will_db; will_db="$(_profile_get workflow_constraints.will_query_databases)"
+  local push_only; push_only="$(_profile_get workflow_constraints.push_channels_only)"
+
+  # Rule 1: solo + dead-code -> demote 1
+  if [ "${scale}" = "solo" ] && [[ "${rule}" == *dead-code* || "${rule}" == *unused* ]]; then
+    demote=$((demote + 1))
+  fi
+  # Rule 2: will_check_dashboards=false + fix mentions dashboard -> demote 2
+  if [ "${will_dash}" = "false" ] && [[ "${fix_text,,}" == *dashboard* ]]; then
+    demote=$((demote + 2))
+  fi
+  # Rule 3: will_query_databases=false + fix mentions "query the database" -> demote 1
+  if [ "${will_db}" = "false" ] && [[ "${fix_text,,}" == *"query the database"* || "${fix_text,,}" == *"check the database"* ]]; then
+    demote=$((demote + 1))
+  fi
+  # Rule 4: push_channels_only=true + fix mentions "open the admin" -> demote 1
+  if [ "${push_only}" = "true" ] && [[ "${fix_text,,}" == *"open the admin"* || "${fix_text,,}" == *"check the admin panel"* ]]; then
+    demote=$((demote + 1))
+  fi
+
+  if [ "${demote}" -eq 0 ]; then
+    printf '%s' "${tier}"
+    return 0
+  fi
+  # Apply demotion ladder
+  local ladder=("CRITICAL" "BLOCKER" "HIGH" "RISK" "MEDIUM" "WATCH" "LOW")
+  local idx=-1 i
+  for i in "${!ladder[@]}"; do
+    [ "${ladder[$i]}" = "${tier}" ] && idx=${i}
+  done
+  if [ ${idx} -lt 0 ]; then
+    printf '%s' "${tier}"
+    return 0
+  fi
+  local new=$((idx + demote))
+  [ ${new} -ge ${#ladder[@]} ] && new=$((${#ladder[@]} - 1))
+  printf '%s' "${ladder[${new}]}"
+}
+
+# ---------------------------------------------------------------------------
+# grow — hypothesis lifecycle (v1.4.0, #57). Mirror of the findings lifecycle
+# but for forward-looking changes (growth experiments, refactor proposals,
+# product hypotheses). Same YAML-per-file pattern, separate directory tree.
+#
+# .lattice/hypotheses/
+#   open/        proposed, not yet executing
+#   running/     in-flight (PR open, A/B running, etc)
+#   closed/      resolved (won/lost/inconclusive)
+#   rolled-back/ executed but reverted due to negative signal
+#
+# Usage:
+#   lattice grow init
+#   lattice grow propose <slug> --title "..." --change "..." --metric "..." [--cadence weekly]
+#   lattice grow list [--state running|open|closed]
+#   lattice grow show <slug>
+#   lattice grow run <slug> --commit <sha>   # mark as running, link to commit/PR
+#   lattice grow status <slug>
+#   lattice grow rollback <slug> --reason "..."
+#   lattice grow close <slug> --result <won|lost|inconclusive> [--rationale "..."]
+# ---------------------------------------------------------------------------
+cmd_grow() {
+  local sub="${1:-help}"; shift || true
+  case "${sub}" in
+    init)        _grow_init "$@" ;;
+    propose)     _grow_propose "$@" ;;
+    list|ls)     _grow_list "$@" ;;
+    show)        _grow_show "$@" ;;
+    run)         _grow_run "$@" ;;
+    status)      _grow_status "$@" ;;
+    rollback)    _grow_rollback "$@" ;;
+    close)       _grow_close "$@" ;;
+    help|--help|-h)
+      cat <<'GROWHELP'
+lattice grow — hypothesis lifecycle (parallel to findings; for forward-looking
+changes: growth experiments, refactor proposals, product hypotheses).
+
+  init                                              create .lattice/hypotheses/{open,running,closed,rolled-back}/
+  propose <slug> --title "..." --change "..." --metric "..." [--cadence weekly]
+  list [--state open|running|closed|rolled-back]
+  show <slug>
+  run <slug> --commit <sha>                         mark as running
+  status <slug>                                     show current state
+  rollback <slug> --reason "..."                    revert
+  close <slug> --result won|lost|inconclusive [--rationale "..."]
+
+Hypotheses live as YAMLs under .lattice/hypotheses/. The lifecycle mirrors
+findings: open -> running -> closed (or rolled-back). Each transition stamps
+timestamps + transition_reason in the YAML.
+
+This is the FOUNDATION (v1.4.0). The closed-loop execution (automated PR
+creation, auto-rollback signal detection, cadence scheduling, low-traffic
+stats) is v2.0 scope and lives behind `lattice grow run --auto` (not yet
+implemented — manual flow only in v1.4.0).
+GROWHELP
+      ;;
+    *) die "grow: unknown action: ${sub} (try: init | propose | list | show | run | status | rollback | close)" ;;
+  esac
+}
+
+_grow_init() {
+  mkdir -p .lattice/hypotheses/open .lattice/hypotheses/running .lattice/hypotheses/closed .lattice/hypotheses/rolled-back 2>/dev/null
+  echo "[${PROG}] grow: created .lattice/hypotheses/{open,running,closed,rolled-back}/"
+  echo "[${PROG}] next: lattice grow propose <slug> --title \"...\" --change \"...\" --metric \"...\""
+}
+
+_grow_propose() {
+  [ "$#" -ge 1 ] || die "grow propose: usage: lattice grow propose <slug> --title ... --change ... --metric ..."
+  local slug="$1"; shift
+  local title="" change="" metric="" cadence="weekly" effort="MEDIUM" risk="LOW"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --title)   title="$2"; shift 2 ;;
+      --change)  change="$2"; shift 2 ;;
+      --metric)  metric="$2"; shift 2 ;;
+      --cadence) cadence="$2"; shift 2 ;;
+      --effort)  effort="$2"; shift 2 ;;
+      --risk)    risk="$2"; shift 2 ;;
+      *) die "grow propose: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${title}" ] || die "grow propose: --title required"
+  [ -n "${change}" ] || die "grow propose: --change required (one-line description of the change)"
+  [ -n "${metric}" ] || die "grow propose: --metric required (what metric this changes and how)"
+
+  mkdir -p .lattice/hypotheses/open 2>/dev/null
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local dest=".lattice/hypotheses/open/${slug}.yml"
+  [ -f "${dest}" ] && die "grow propose: ${dest} already exists"
+
+  local id
+  id="$(printf '%s' "growth:${slug}:${change}:${metric}" | sha1sum 2>/dev/null | cut -c1-12 || \
+        printf '%s' "growth:${slug}:${change}:${metric}" | shasum -a 1 | cut -c1-12)"
+
+  cat > "${dest}" <<HYPO
+id: ${id}
+slug: ${slug}
+state: open
+title: "${title//\"/\\\"}"
+change: "${change//\"/\\\"}"
+metric: "${metric//\"/\\\"}"
+cadence: ${cadence}
+effort: ${effort}
+risk: ${risk}
+proposed_at: ${now}
+proposed_by: lattice-cli
+# Lifecycle stamps (filled by run/rollback/close):
+# run_at: <ISO>
+# run_commit: <sha>
+# closed_at: <ISO>
+# result: <won|lost|inconclusive>
+# rationale: "..."
+HYPO
+  echo "[${PROG}] grow: proposed ${dest}"
+  echo "[${PROG}] start running with: lattice grow run ${slug} --commit <sha>"
+}
+
+# Resolve a hypothesis path by slug. Walks open/running/closed/rolled-back.
+_grow_resolve() {
+  local slug="$1"
+  local state
+  for state in open running closed rolled-back; do
+    local p=".lattice/hypotheses/${state}/${slug}.yml"
+    [ -f "${p}" ] && { printf '%s' "${p}"; return 0; }
+  done
+  return 1
+}
+
+_grow_list() {
+  local filter_state=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --state) filter_state="$2"; shift 2 ;;
+      *) die "grow list: unknown arg: $1" ;;
+    esac
+  done
+  [ -d .lattice/hypotheses ] || { echo "[${PROG}] no .lattice/hypotheses/ — run: lattice grow init" >&2; return 0; }
+  local count=0 state
+  printf '%-12s %-30s %s\n' "STATE" "SLUG" "TITLE"
+  for state in open running closed rolled-back; do
+    [ -n "${filter_state}" ] && [ "${state}" != "${filter_state}" ] && continue
+    [ -d ".lattice/hypotheses/${state}" ] || continue
+    shopt -s nullglob
+    for f in .lattice/hypotheses/${state}/*.yml; do
+      [ -f "${f}" ] || continue
+      local s t
+      s="$(basename "${f}" .yml)"
+      t="$(yaml_field "${f}" "title")"
+      printf '%-12s %-30s %s\n' "${state}" "${s}" "${t}"
+      count=$((count + 1))
+    done
+  done
+  echo ""
+  echo "[${PROG}] ${count} hypothes$([ ${count} -eq 1 ] && echo is || echo es)"
+}
+
+_grow_show() {
+  [ "$#" -ge 1 ] || die "grow show: usage: lattice grow show <slug>"
+  local p; p="$(_grow_resolve "$1")" || die "grow show: hypothesis not found: $1"
+  echo "# ${p}"
+  cat "${p}"
+}
+
+_grow_run() {
+  [ "$#" -ge 1 ] || die "grow run: usage: lattice grow run <slug> --commit <sha>"
+  local slug="$1"; shift
+  local commit=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --commit) commit="$2"; shift 2 ;;
+      *) die "grow run: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${commit}" ] || die "grow run: --commit <sha> required"
+  local src=".lattice/hypotheses/open/${slug}.yml"
+  [ -f "${src}" ] || die "grow run: not in open/: ${src}"
+  mkdir -p .lattice/hypotheses/running 2>/dev/null
+  local dst=".lattice/hypotheses/running/${slug}.yml"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Append lifecycle stamps + transition
+  awk -v now="${now}" -v sha="${commit}" '
+    /^state:/ { print "state: running"; next }
+    { print }
+    END {
+      print "run_at: " now
+      print "run_commit: " sha
+    }
+  ' "${src}" > "${dst}.tmp" && mv "${dst}.tmp" "${dst}"
+  rm "${src}"
+  echo "[${PROG}] grow: ${slug} -> running (commit ${commit})"
+}
+
+_grow_status() {
+  [ "$#" -ge 1 ] || die "grow status: usage: lattice grow status <slug>"
+  local p; p="$(_grow_resolve "$1")" || die "grow status: hypothesis not found: $1"
+  local state run_at run_commit closed_at result
+  state="$(basename "$(dirname "${p}")")"
+  run_at="$(yaml_field "${p}" "run_at")"
+  run_commit="$(yaml_field "${p}" "run_commit")"
+  closed_at="$(yaml_field "${p}" "closed_at")"
+  result="$(yaml_field "${p}" "result")"
+  echo "slug:        $1"
+  echo "state:       ${state}"
+  [ -n "${run_at}" ]     && echo "run_at:      ${run_at}"
+  [ -n "${run_commit}" ] && echo "run_commit:  ${run_commit}"
+  [ -n "${closed_at}" ]  && echo "closed_at:   ${closed_at}"
+  [ -n "${result}" ]     && echo "result:      ${result}"
+}
+
+_grow_rollback() {
+  [ "$#" -ge 1 ] || die "grow rollback: usage: lattice grow rollback <slug> --reason \"...\""
+  local slug="$1"; shift
+  local reason=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --reason) reason="$2"; shift 2 ;;
+      *) die "grow rollback: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${reason}" ] || die "grow rollback: --reason required"
+  local src=".lattice/hypotheses/running/${slug}.yml"
+  [ -f "${src}" ] || die "grow rollback: hypothesis not running: ${src}"
+  mkdir -p .lattice/hypotheses/rolled-back 2>/dev/null
+  local dst=".lattice/hypotheses/rolled-back/${slug}.yml"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  awk -v now="${now}" -v reason="${reason}" '
+    /^state:/ { print "state: rolled-back"; next }
+    { print }
+    END {
+      print "rolled_back_at: " now
+      print "rollback_reason: \"" reason "\""
+    }
+  ' "${src}" > "${dst}.tmp" && mv "${dst}.tmp" "${dst}"
+  rm "${src}"
+  echo "[${PROG}] grow: ${slug} -> rolled-back"
+}
+
+_grow_close() {
+  [ "$#" -ge 1 ] || die "grow close: usage: lattice grow close <slug> --result <won|lost|inconclusive>"
+  local slug="$1"; shift
+  local result="" rationale=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --result)    result="$2"; shift 2 ;;
+      --rationale) rationale="$2"; shift 2 ;;
+      *) die "grow close: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${result}" ] || die "grow close: --result <won|lost|inconclusive> required"
+  case "${result}" in won|lost|inconclusive) ;; *) die "grow close: --result must be won|lost|inconclusive" ;; esac
+
+  local src
+  for state in running open; do
+    [ -f ".lattice/hypotheses/${state}/${slug}.yml" ] && { src=".lattice/hypotheses/${state}/${slug}.yml"; break; }
+  done
+  [ -n "${src:-}" ] || die "grow close: hypothesis not found in open/ or running/: ${slug}"
+
+  mkdir -p .lattice/hypotheses/closed 2>/dev/null
+  local dst=".lattice/hypotheses/closed/${slug}.yml"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  awk -v now="${now}" -v r="${result}" -v rat="${rationale}" '
+    /^state:/ { print "state: closed"; next }
+    { print }
+    END {
+      print "closed_at: " now
+      print "result: " r
+      if (rat != "") print "rationale: \"" rat "\""
+    }
+  ' "${src}" > "${dst}.tmp" && mv "${dst}.tmp" "${dst}"
+  rm "${src}"
+  echo "[${PROG}] grow: ${slug} -> closed (${result})"
+}
+
+# ---------------------------------------------------------------------------
 # audit-infra — audit Claude Code infrastructure adequacy for the stack
 # present in cwd. v1.3.0 (#36). Detects missing hooks, missing MCPs, missing
 # protections based on what files/deps are present.
@@ -6255,6 +6700,8 @@ case "${sub}" in
   diff)               cmd_diff "$@" ;;
   write-manifest)     cmd_write_manifest "$@" ;;
   audit-infra)        cmd_audit_infra "$@" ;;
+  profile)            cmd_profile "$@" ;;
+  grow)               cmd_grow "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;

@@ -2,6 +2,40 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-05-19
+
+**Operator profile + hypothesis lifecycle.** Closes the next 3 RFCs in one ship — #55 (workflow-context tier reweighting), #56 (per-user operator profile), and #57 (`lattice grow` as second dimension, reversing v1.3.1's #45 deferral).
+
+### Added — operator profile (#55 #56)
+- **`lattice profile init | show | set`** — global per-user profile at `~/.lattice/profile.yml`, project-level override at `.lattice/profile.yml`. Declares `operator.scale` (solo/small-team/org/enterprise), `workflow_constraints` (will_check_dashboards, will_query_databases, will_read_log_files, push_channels_only), `preferences` (prefer_delete_over_wire, confirm_before_large_changes).
+- **Tier reweighting under `--effective-tier`** applies profile rules in addition to existing exposure-based demotion:
+  - `scale=solo` + dead-code/unused rules → demote 1 step
+  - `will_check_dashboards=false` + fix mentions "dashboard" → demote 2 steps
+  - `will_query_databases=false` + fix mentions "query the database" → demote 1 step
+  - `push_channels_only=true` + fix mentions "open the admin" → demote 1 step
+- Render-time only — the raw `tier:` field in YAML stays unchanged. Reweighting shows as `[profile: HIGH->MEDIUM]` in the `extra` column so the original signal is auditable.
+
+### Added — `lattice grow` hypothesis lifecycle (#57 foundation)
+- **`lattice grow`** subcommand tree mirroring the findings lifecycle but for forward-looking changes (growth experiments, refactor proposals, product hypotheses):
+  - `grow init` — creates `.lattice/hypotheses/{open,running,closed,rolled-back}/`
+  - `grow propose <slug> --title --change --metric [--cadence --effort --risk]` — files a new hypothesis YAML
+  - `grow list [--state ...]` — table of hypotheses by state
+  - `grow show <slug>` — full YAML
+  - `grow run <slug> --commit <sha>` — `open` → `running`, stamps run_at + run_commit
+  - `grow status <slug>` — current state + lifecycle stamps
+  - `grow rollback <slug> --reason "..."` — `running` → `rolled-back`, stamps rolled_back_at + rollback_reason
+  - `grow close <slug> --result won|lost|inconclusive [--rationale "..."]` — `running|open` → `closed`, stamps closed_at + result
+- Hypothesis YAML schema parallels finding schema: `id`, `slug`, `state`, `title`, `change`, `metric`, `cadence`, `effort`, `risk`, lifecycle stamps. `id` is sha1-derived (12-char prefix) of `growth:slug:change:metric` — stable across line shifts, same algorithm as `lattice id-gen` for findings.
+
+### Scope honesty — what's NOT in v1.4.0
+- **Closed-loop execution** (auto PR creation, auto-rollback signal detection, cadence scheduling, low-traffic stats, confounder modeling) is v2.0 scope. v1.4.0 ships the manual lifecycle — you manually `grow propose` → `grow run --commit <sha>` → `grow close --result`. The closed-loop sits behind a future `grow run --auto` flag that's not implemented yet. Foundation first, automation after evidence accumulates that the schema holds up.
+- The v1.3.1 closing of #45 ("24/7 always-on Lattice → NOT in Lattice") stands as the boundary for the **auto-loop**; #57 reverses the framing on the foundation only.
+
+### Verified
+- `/tmp/grow-test`: full lifecycle works end-to-end. `propose test-hyp` → `run --commit abc1234` → `status` shows running + commit → `close --result won` → `list` shows closed.
+- `profile init` creates `~/.lattice/profile.yml`; `profile show` reads global + project override correctly.
+- `bash -n scripts/lattice` clean.
+
 ## [1.3.1] — 2026-05-19
 
 **`lattice list` hides OK-tier by default (#16).** Closes the last actionable issue in the backlog. The "47-entry list mixing real problems with confirmed-clean OK markers" complaint is fixed at the read layer — much cheaper than moving OK findings to a separate filesystem directory (which would require migration scripts + audit-skill emission changes).
