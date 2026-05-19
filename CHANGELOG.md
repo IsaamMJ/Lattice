@@ -2,6 +2,30 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-05-19
+
+**CLAUDE.md auto-tune Phase 2 (#6).** Phase 1 (deterministic block + sentinel-bounded merge) shipped in v0.9.10. Phase 2 closes the meta-loop: Lattice detects when its onboarding block needs refresh and re-applies under explicit user consent. The "without any human" automation stops at the consent gate by design — `LATTICE_AUTO_TUNE=1` is opt-in for the dogfooding window, never default.
+
+### Added
+- **`lattice claude-md-tune --check`** — emit current trigger state without changing anything. Reports current version, last-tune version, releases since (triggers at 3+), unknown_subcommand event count (triggers at 5+). Exit 1 if either trigger fired.
+- **`lattice claude-md-tune --auto`** — apply if a trigger fired AND `LATTICE_AUTO_TUNE=1`. Reports the trigger and refuses without the env var, so dry-running is safe at any time.
+- **Diff logging.** Every `--apply` / `--bootstrap` / `--auto` run writes a timestamped diff to `~/.claude/lattice/claude-md-tune-history/<UTC-ts>.diff` containing the previous block and the new block side-by-side. Auditable trail for what Lattice changed about its own onboarding doc.
+- **`last-tune-version` + `last-tune-timestamp` stamps** at `~/.claude/lattice/claude-md-tune-history/` — used by `--check` to compute "releases since last tune" without parsing diff files.
+- **`--help` for the subcommand** — full flag matrix in one place.
+
+### Trigger logic
+- **Release trigger:** `_ver_int(current) - _ver_int(last_tune) >= 3` patch steps. Versions parse as `MAJ*10000 + MIN*100 + PAT`. Pre-release suffixes (`-rc1`) are stripped.
+- **Friction trigger:** count of `unknown_subcommand` events in `~/.claude/lattice/usage/global.jsonl` since `last-tune-timestamp` >= 5. Reads the JSONL line-by-line via Node; ignores malformed lines.
+- Either trigger alone fires.
+
+### Why opt-in stays opt-in
+Per the locked spec in `project_lattice_backlog.md`: "Opt-in via `LATTICE_AUTO_TUNE=1` env var for the first 30 days of dogfooding. After 30 days clean on owner's own setup, flip to opt-OUT (default on; users can disable)." v1.1.0 lands the opt-in gate; the default-on flip is deferred until evidence accumulates.
+
+### Verified
+- Live `lattice claude-md-tune --check` reports "no trigger" right after a tune (releases=0)
+- Live `LATTICE_AUTO_TUNE=1 lattice claude-md-tune --auto` correctly: detects trigger, takes backup, prepends block, logs diff, stamps last-tune-version
+- `bash -n scripts/lattice` clean post-edit
+
 ## [1.0.4] — 2026-05-19
 
 **update.sh now keeps MCP + `.cmd` shim in sync.** Live-tested on a v0.9.16 → v1.0.3 upgrade on Windows + Git Bash — succeeded cleanly (so update isn't broken on Windows as feared in the v1.0.2 friction inventory), but three gaps surfaced.

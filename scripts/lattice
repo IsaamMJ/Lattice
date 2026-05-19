@@ -3808,6 +3808,26 @@ cmd_claude_md_tune() {
       --apply)          mode="apply"; shift ;;
       --bootstrap)      mode="bootstrap"; shift ;;
       --review-prompt)  mode="review-prompt"; shift ;;
+      --check)          mode="check"; shift ;;
+      --auto)           mode="auto"; shift ;;
+      --help|-h)
+        cat <<'TUNE_HELP'
+lattice claude-md-tune — manage the Lattice block in ~/.claude/CLAUDE.md
+
+  --propose          (default) preview what would be written
+  --apply            write the deterministic block, backing up the existing file
+  --bootstrap        same as --apply but used during initial install
+  --review-prompt    emit a structured prompt for the running Claude session
+                     to review the current block
+  --check            check if a trigger fired (3 releases since last tune OR
+                     5+ unknown_subcommand events). Exit 1 if trigger fired.
+  --auto             when LATTICE_AUTO_TUNE=1 and a trigger fired, apply.
+                     Logs the diff to ~/.claude/lattice/claude-md-tune-history/.
+
+Auto-tune is opt-in via LATTICE_AUTO_TUNE=1 for the first 30 days of
+dogfooding. Without it, --auto reports the trigger but does not apply.
+TUNE_HELP
+        return 0 ;;
       -*)               die "claude-md-tune: unknown flag: $1" ;;
       *)                die "claude-md-tune: extra arg: $1" ;;
     esac
@@ -3823,10 +3843,127 @@ cmd_claude_md_tune() {
       echo "[${PROG}] apply this with: lattice claude-md-tune --apply"
       ;;
     apply|bootstrap)
+      # v1.1.0 (#6): log the diff before applying, so history is auditable.
+      local hist_dir="${HOME}/.claude/lattice/claude-md-tune-history"
+      mkdir -p "${hist_dir}" 2>/dev/null || true
+      local hist_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+      local hist_file="${hist_dir}/${hist_ts}.diff"
+      local old_block="(no previous block)"
+      if [ -f "${_LATTICE_GLOBAL_MD}" ] && grep -qF "${_LATTICE_MD_SENTINEL_START}" "${_LATTICE_GLOBAL_MD}" 2>/dev/null; then
+        old_block="$(awk -v s="${_LATTICE_MD_SENTINEL_START}" -v e="${_LATTICE_MD_SENTINEL_END}" \
+          'index($0,s)>0{p=1} p{print} index($0,e)>0{p=0; exit}' "${_LATTICE_GLOBAL_MD}")"
+      fi
+      local new_block
+      new_block="$(_lattice_md_block)"
+      {
+        echo "# claude-md-tune diff — ${hist_ts}"
+        echo "# mode: ${mode}"
+        echo "# version: $(current_version)"
+        echo "---"
+        echo "## old"
+        printf '%s\n' "${old_block}"
+        echo "---"
+        echo "## new"
+        printf '%s\n' "${new_block}"
+      } > "${hist_file}" 2>/dev/null || true
+
       _lattice_md_apply "${_LATTICE_GLOBAL_MD}" || die "claude-md-tune: write failed"
+      # Record the version at which we tuned, so --check can detect "N releases
+      # since last tune" without parsing the diff history.
+      printf '%s\n' "$(current_version)" > "${hist_dir}/last-tune-version" 2>/dev/null || true
+      printf '%s\n' "${hist_ts}" > "${hist_dir}/last-tune-timestamp" 2>/dev/null || true
       if [ "${mode}" = "apply" ]; then
         echo "[${PROG}] claude-md-tune: applied — restore via lattice claude-md-restore --list"
+        echo "[${PROG}] diff logged: ${hist_file}"
       fi
+      ;;
+    check|auto)
+      # v1.1.0 (#6): trigger detection.
+      # Trigger A — release-driven: 3+ Lattice releases since last tune.
+      # Trigger B — friction-driven: 5+ unknown_subcommand events since last tune.
+      local hist_dir="${HOME}/.claude/lattice/claude-md-tune-history"
+      local last_ver=""
+      [ -f "${hist_dir}/last-tune-version" ] && last_ver="$(cat "${hist_dir}/last-tune-version")"
+      local cur_ver
+      cur_ver="$(current_version)"
+
+      # Count releases between last_ver and cur_ver. Naive parse:
+      # X.Y.Z -> integer (X*10000 + Y*100 + Z); diff >= 3 patch bumps triggers.
+      _ver_int() {
+        local v="$1" maj min pat
+        v="${v#v}"; v="${v%%-*}"
+        maj="${v%%.*}"; v="${v#*.}"
+        min="${v%%.*}"; pat="${v#*.}"
+        [ -z "${maj}" ] && maj=0; [ -z "${min}" ] && min=0; [ -z "${pat}" ] && pat=0
+        echo $((maj * 10000 + min * 100 + pat))
+      }
+      local cur_int last_int delta_releases=99
+      cur_int="$(_ver_int "${cur_ver}")"
+      if [ -n "${last_ver}" ]; then
+        last_int="$(_ver_int "${last_ver}")"
+        delta_releases=$((cur_int - last_int))
+      fi
+      local trigger_release=0
+      [ "${delta_releases}" -ge 3 ] && trigger_release=1
+
+      # Count unknown_subcommand events in the global usage log since last tune
+      local global_log="${HOME}/.claude/lattice/usage/global.jsonl"
+      local unknown_count=0
+      if [ -f "${global_log}" ] && command -v node >/dev/null 2>&1; then
+        local since_ts="0"
+        [ -f "${hist_dir}/last-tune-timestamp" ] && since_ts="$(cat "${hist_dir}/last-tune-timestamp")"
+        unknown_count="$(node -e '
+const fs = require("fs");
+const [, log, sinceTs] = process.argv;
+const since = sinceTs && sinceTs !== "0" ? Date.parse(
+  sinceTs.replace(/T(\d{2})(\d{2})(\d{2})Z/, "T$1:$2:$3Z")
+) : 0;
+let n = 0;
+try {
+  for (const line of fs.readFileSync(log, "utf8").split("\n")) {
+    if (!line) continue;
+    let ev; try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.command !== "unknown_subcommand") continue;
+    const ts = ev.ts ? Date.parse(ev.ts) : NaN;
+    if (Number.isFinite(ts) && (since === 0 || ts >= since)) n++;
+  }
+} catch {}
+process.stdout.write(String(n));
+' "${global_log}" "${since_ts}" 2>/dev/null)"
+        [ -z "${unknown_count}" ] && unknown_count=0
+      fi
+      local trigger_friction=0
+      [ "${unknown_count}" -ge 5 ] && trigger_friction=1
+
+      echo "[${PROG}] claude-md-tune --check:"
+      echo "  current version:           ${cur_ver}"
+      echo "  last tune version:         ${last_ver:-(never)}"
+      echo "  releases since last tune:  ${delta_releases}  (triggers at 3+)"
+      echo "  unknown_subcommand events: ${unknown_count}  (triggers at 5+)"
+
+      if [ "${trigger_release}" -eq 0 ] && [ "${trigger_friction}" -eq 0 ]; then
+        echo "  -> no trigger fired"
+        return 0
+      fi
+      echo -n "  -> trigger fired:"
+      [ "${trigger_release}" -eq 1 ] && echo -n " release"
+      [ "${trigger_friction}" -eq 1 ] && echo -n " friction"
+      echo ""
+
+      if [ "${mode}" = "check" ]; then
+        echo "  apply with:  lattice claude-md-tune --apply"
+        echo "  or auto:     LATTICE_AUTO_TUNE=1 lattice claude-md-tune --auto"
+        return 1
+      fi
+      # auto mode — only apply if LATTICE_AUTO_TUNE=1
+      if [ "${LATTICE_AUTO_TUNE:-0}" != "1" ]; then
+        echo "  LATTICE_AUTO_TUNE != 1 — reporting trigger but not applying."
+        echo "  To enable auto-tune for the next 30 days of dogfooding:"
+        echo "    export LATTICE_AUTO_TUNE=1"
+        return 1
+      fi
+      # Recurse into apply mode (handles diff logging + last-tune-version stamp)
+      cmd_claude_md_tune --apply
       ;;
     review-prompt)
       # Emit a structured prompt the running Claude session can act on:
