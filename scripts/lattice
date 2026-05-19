@@ -3325,7 +3325,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check wire-hooks mcp uninstall usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -4766,6 +4766,156 @@ NODEJS_APPLY
 }
 
 # ---------------------------------------------------------------------------
+# setup — one-command per-project bootstrap. v1.0.3 (#2).
+# Runs the canonical first-time sequence:
+#   1. Ensure .lattice/findings/{open,closed,sweeps} exist
+#   2. Ensure .lattice/config.yml exists (idempotent — preserves existing)
+#   3. Ensure CLAUDE.md exists with the Lattice block
+#   4. Suggest /audit-sweep as the next action
+# Replaces the multi-step "doctor + config init + sync + restart" dance.
+#
+# Usage:
+#   lattice setup [--global]   # --global runs install.sh + per-machine wiring
+# ---------------------------------------------------------------------------
+cmd_setup() {
+  local global=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --global) global=1; shift ;;
+      --help|-h)
+        cat <<'SETUP_HELP'
+lattice setup — one-command bootstrap
+
+  (default)    per-project: create .lattice/ tree + config + CLAUDE.md
+  --global     per-machine: prints the curl|bash install command and
+               (if installed) runs wire-hooks + mcp setup wizard
+SETUP_HELP
+        return 0 ;;
+      -*) die "setup: unknown flag: $1" ;;
+      *)  die "setup: extra arg: $1" ;;
+    esac
+  done
+
+  if [ "${global}" -eq 1 ]; then
+    echo "[${PROG}] global setup — install Lattice across this machine:"
+    echo ""
+    echo "  curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/install.sh | bash"
+    echo ""
+    echo "[${PROG}] After install, the script will prompt to auto-wire hooks + MCP."
+    return 0
+  fi
+
+  echo "[${PROG}] setup: bootstrapping Lattice in $(pwd)"
+  # 1. Findings tree
+  mkdir -p .lattice/findings/open .lattice/findings/closed .lattice/findings/sweeps .lattice/cache 2>/dev/null
+  echo "  [ok] .lattice/findings/{open,closed,sweeps}"
+
+  # 2. Config (only if missing — never overwrite existing)
+  if [ ! -f .lattice/config.yml ]; then
+    cmd_config init >/dev/null 2>&1 || true
+    if [ -f .lattice/config.yml ]; then
+      echo "  [ok] .lattice/config.yml created"
+    else
+      echo "  [warn] could not create .lattice/config.yml (lattice config init failed)"
+    fi
+  else
+    echo "  [ok] .lattice/config.yml already present (preserved)"
+  fi
+
+  # 3. CLAUDE.md (call sync to bootstrap)
+  if [ ! -f CLAUDE.md ] || ! grep -q "lattice:checklist:start" CLAUDE.md 2>/dev/null; then
+    cmd_sync >/dev/null 2>&1 || true
+    if [ -f CLAUDE.md ] && grep -q "lattice:checklist:start" CLAUDE.md 2>/dev/null; then
+      echo "  [ok] CLAUDE.md created with Lattice block"
+    else
+      echo "  [warn] could not create CLAUDE.md (lattice sync failed)"
+    fi
+  else
+    echo "  [ok] CLAUDE.md already has lattice markers (preserved)"
+  fi
+
+  echo ""
+  echo "[${PROG}] setup complete. Next:"
+  echo "  - In Claude Code:  /audit-sweep ."
+  echo "  - Or CLI:          lattice list      (will be empty until first audit)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# ci-check-dead — fail if any subcommand has 0 invocations across global usage
+# log. Used as a release-time check to enforce dead-feature pruning practice.
+# v1.0.3 (#7). Same exit-code shape as `lattice ci-check`.
+# ---------------------------------------------------------------------------
+cmd_ci_check_dead() {
+  local days=14 fail=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --days) days="$2"; shift 2 ;;
+      --help|-h)
+        echo "lattice ci-check-dead [--days N]  # exit 1 if any subcmd has 0 invocations in last N days (default 14)"
+        return 0 ;;
+      *) die "ci-check-dead: unknown arg: $1" ;;
+    esac
+  done
+
+  local global_log="${HOME}/.claude/lattice/usage/global.jsonl"
+  if [ ! -f "${global_log}" ]; then
+    echo "[${PROG}] ci-check-dead: no global usage log (${global_log}) — skipping"
+    return 0
+  fi
+
+  command -v node >/dev/null 2>&1 || die "ci-check-dead: node required for log parsing"
+
+  local subs="${_KNOWN_SUBS}"
+  local dead
+  dead="$(node -e '
+const fs = require("fs");
+// node -e argv: [nodePath, ...userArgs] — no script slot when using -e
+const [, log, daysStr, subsStr] = process.argv;
+const days = parseInt(daysStr, 10);
+const subs = subsStr.split(/\s+/).filter(Boolean);
+const since = Date.now() - days * 86400000;
+const used = new Set();
+try {
+  for (const line of fs.readFileSync(log, "utf8").split("\n")) {
+    if (!line) continue;
+    let ev; try { ev = JSON.parse(line); } catch { continue; }
+    const ts = ev.ts ? Date.parse(ev.ts) : NaN;
+    if (!Number.isFinite(ts) || ts < since) continue;
+    if (ev.command) used.add(ev.command);
+  }
+} catch {}
+// Whitelist: subcommands intentionally rare/CI-only OR aliases of others.
+// Aliases (ls/cat/regenerate) share a cmd_* function but log under the alias
+// name; flagging them as dead would be a false positive.
+const whitelist = new Set([
+  "help", "version", "doctor", "uninstall", "setup",
+  "ci-check", "ci-check-dead", "validate",
+  "claude-md-restore", "claude-md-tune", "project-restore",
+  "wire-hooks", "mcp",
+  "report",
+  "migrate", "migrate-status", "migrate-v0.7",
+  // Aliases — keep
+  "ls", "cat", "regenerate",
+]);
+const dead = subs.filter(s => !used.has(s) && !whitelist.has(s));
+process.stdout.write(dead.join("\n"));
+' "${global_log}" "${days}" "${subs}")"
+
+  if [ -z "${dead}" ]; then
+    echo "[${PROG}] ci-check-dead: all subcommands used within last ${days} days (or whitelisted)"
+    return 0
+  fi
+
+  echo "[${PROG}] ci-check-dead: subcommands with 0 invocations in last ${days} days:"
+  printf '  - %s\n' ${dead}
+  echo ""
+  echo "[${PROG}] consider pruning these (delete from dispatcher, _KNOWN_SUBS, usage()) before release."
+  echo "[${PROG}] to suppress a specific subcommand permanently, add it to the whitelist in cmd_ci_check_dead."
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # uninstall — remove Lattice from the current project (default) or globally
 # (--global). Always lists what will be deleted; requires --yes to actually
 # remove. Backs up CLAUDE.md before deletion. v1.0.2 (#9).
@@ -5205,6 +5355,8 @@ case "${sub}" in
   wire-hooks)         cmd_wire_hooks "$@" ;;
   mcp)                cmd_mcp "$@" ;;
   uninstall)          cmd_uninstall "$@" ;;
+  setup)              cmd_setup "$@" ;;
+  ci-check-dead)      cmd_ci_check_dead "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;

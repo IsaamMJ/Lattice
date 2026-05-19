@@ -2,6 +2,21 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-05-19
+
+**`lattice setup` + `lattice ci-check-dead`.** Per-project bootstrap collapses to one command. Release-time dead-feature pruning becomes automated.
+
+### Added
+- **`lattice setup`** (#2) — one-command per-project bootstrap. Creates `.lattice/findings/{open,closed,sweeps}`, calls `lattice config init`, calls `lattice sync` to bootstrap CLAUDE.md. Idempotent: preserves existing config + CLAUDE.md. Emits a "Next: /audit-sweep ." pointer. `--global` prints the curl|bash install command. Replaces the multi-step "doctor + config init + sync + restart" dance for new projects.
+- **`lattice ci-check-dead [--days N]`** (#7) — exit 1 if any subcommand has 0 invocations in `~/.claude/lattice/usage/global.jsonl` within the last N days (default 14). Whitelist covers aliases (`ls`, `cat`, `regenerate`), CI-only subcommands (`validate`, `ci-check`), restore-flow subcommands (`claude-md-restore`, `project-restore`), and rare-but-intentional (`wire-hooks`, `mcp`, `report`, `migrate*`). Used at release time to enforce the dead-feature pruning discipline introduced in v0.9.18.
+
+### Fixed
+- `node -e` argv destructuring in `ci-check-dead`'s log parser — with `-e`, argv is `[nodePath, ...userArgs]` (no script slot), not `[nodePath, scriptPath, ...userArgs]`. Skip only 1, not 2.
+
+### Verified
+- `lattice setup` in a fresh `/tmp/setup-test` dir creates the full tree + config + CLAUDE.md with one command
+- `lattice ci-check-dead --days 30` runs cleanly against the real global usage log on this machine; whitelist correctly suppresses aliases
+
 ## [1.0.2] — 2026-05-19
 
 **Install-UX hardening + `lattice uninstall` + signal in the statusline brand block.** Five frictions surfaced during the v1.0.1 dogfood window, all addressed in one ship.
