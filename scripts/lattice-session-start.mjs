@@ -248,6 +248,24 @@ if (top3.length > 0) {
 lines.push(``);
 lines.push('Workflow: `lattice list` to triage, `lattice show <id>` for detail, `lattice next` for the single highest-priority finding, `lattice close <id> --reason fixed` to close. Lifecycle actions need explicit user invocation — Claude can recommend but should not auto-close.');
 
+// v1.2.0 (#42 #54): friction-reporting default-on protocol. Without this
+// directive, sessions encounter Lattice friction (missing commands, parser
+// gaps, doc drift) and silently work around it instead of filing — leaving
+// the maintainer blind to real-world failure modes.
+lines.push(``);
+lines.push('## Friction reporting (DEFAULT-ON, not optional)');
+lines.push('');
+lines.push('When you hit ANY of these during this session, file IMMEDIATELY via `lattice report` — do not wait for the user to ask at session end:');
+lines.push('- A documented command/flag does not exist or fails unexpectedly');
+lines.push('- A workaround beats the canonical path (manual `mkdir`/`mv`/inline node script instead of a Lattice subcommand)');
+lines.push('- An error message is wrong, missing, or unhelpful');
+lines.push('- A docs/code drift (skill references X, X does not exist)');
+lines.push('- A skill / hook output spam, slow path, or ambiguous instruction');
+lines.push('');
+lines.push('Filing template: `lattice report <bug|ux|enhancement|docs|perf|security> --title "..." --body "..."`. Default severity LOW unless blocking. The workaround you just used IS the evidence — paste it into the body.');
+lines.push('');
+lines.push('**Do not batch at session end.** File as friction occurs — that\'s the data the maintainer needs to fix the gap before the next session. Silence == accepting that future sessions hit the same wall.');
+
 const out = lines.join('\n');
 
 // ---- Emit ----

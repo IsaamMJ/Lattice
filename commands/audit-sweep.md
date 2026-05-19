@@ -72,13 +72,27 @@ Detects env-var silent-fallback patterns (`process.env.X || 'literal'`, `??`, de
 
 ### Step 1 — Enumerate modules + generate sweep_id
 
+**Framework-aware module discovery (v1.2.0, #51).** Detect the project layout BEFORE globbing `src/modules/`. Try in order:
+
+| Layout signal | Module enumeration |
+|---|---|
+| `src/modules/*/` non-empty | Use `src/modules/*/` (legacy / explicit-module projects) |
+| `apps/*/` + `packages/*/` (monorepo: nx, turbo, pnpm) | Each `apps/X/` and `packages/X/` is a module |
+| `next.config.{js,ts,mjs}` or `app/` directory present | Next.js App Router: enumerate `src/app/api/*/`, `src/app/*/page.tsx`, `src/lib/`, `src/components/`, `src/hooks/`, plus `prisma/` if present, as separate modules |
+| `pages/` + `package.json` mentions Next | Next.js Pages Router: enumerate `pages/api/*/`, top-level `pages/*.tsx`, `src/lib/`, etc. |
+| `lib/`, `internal/`, `cmd/` at root (Go) | Each top-level dir as a module |
+| `app/`, `lib/`, `test/` (Flutter, Dart) | Each as a module |
+| None of the above | **Flat-repo fallback:** treat top-level directories under the project root as modules; cap at 12, prefer non-trivial ones (skip `node_modules`, `.git`, `dist`, `build`, `.next`, `coverage`) |
+
+**Never invent paths.** Every module enumerated MUST exist on disk. If detection lands on zero modules, ask the user once for a hint instead of fabricating.
+
 | # | Action |
 |---|---|
-| 1 | `Glob <project-root>/src/modules/*/` to enumerate module directories |
+| 1 | Run the framework-aware enumeration above. Record which layout signal fired (used as `runtime_warnings` if unusual). |
 | 2 | For each module, locate its TTD doc by matching basename (`src/modules/lumi/` → `docs/ttd/*lumi*.md`). If no doc exists, note "no TTD" and audit code-only |
 | 3 | Generate `sweep_id` via Bash: `lattice sweep-id`. This emits `<YYYYMMDD><6-hex>` — stable, sortable, collision-resistant. Capture it; pass into every per-module dispatch in Step 2 |
 | 4 | Note **start time** (Bash `date +%s` or ms equivalent) — used for `duration_ms` in the manifest |
-| 5 | Print planned sweep: `Will audit N modules: [list]. Mode: SEQUENTIAL. sweep_id: <id>` |
+| 5 | Print planned sweep: `Will audit N modules from <layout> layout: [list]. Mode: SEQUENTIAL. sweep_id: <id>` |
 
 ### Step 2 — Per-module sequential dispatch
 
@@ -109,7 +123,7 @@ The YAML findings on disk are the source of truth; the CLAUDE.md checklist (rege
 
 **v1.1.2: Normalize ids + filenames first.** Run `lattice normalize --apply` before manifest aggregation. This re-derives `id:` from each YAML's `(dimension, rule, file, code_context)` tuple (per the v0.7 sha1 algorithm) and renames files to canonical `TIER-MODULE-RULE.yml` form with leading-dot module segments stripped. Without this, subagents that fabricate 16-hex ids (#52) cause every subsequent sweep to report all findings as "new" because hashes won't match.
 
-After all module dispatches complete, write the sweep manifest via `bash scripts/lattice-write-manifest.sh` with computed inputs. Load [references/audit-sweep-manifest.md](references/audit-sweep-manifest.md) for the exact command + input computation + manifest YAML shape + commit instructions.
+After all module dispatches complete, write the sweep manifest via `lattice write-manifest` (v1.2.0, #48 — wraps `scripts/lattice-write-manifest.sh` so the path resolves whether installed globally or from a dev checkout). Load [references/audit-sweep-manifest.md](references/audit-sweep-manifest.md) for the exact command + input computation + manifest YAML shape + commit instructions.
 
 ### Step 4 — Cross-cutting pattern detection
 

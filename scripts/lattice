@@ -3332,7 +3332,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize diff write-manifest usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -5065,6 +5065,138 @@ EOF_COMMITS
 }
 
 # ---------------------------------------------------------------------------
+# diff — diff two sweep manifests by their slug sets. v1.2.0 (#43).
+# Surfaces what changed between two audit sweeps. The sweep manifest at
+# .lattice/findings/sweeps/<sweep-id>.yml already carries opened / unchanged /
+# closed_since_last / regressed arrays; this command renders the diff between
+# two manifests as a single table.
+#
+# Usage:
+#   lattice diff <sweep-id-a> <sweep-id-b>   # compare two specific sweeps
+#   lattice diff <sweep-id>                  # compare against previous sweep
+#   lattice diff --latest                    # compare last two sweeps
+# ---------------------------------------------------------------------------
+cmd_diff() {
+  local a="" b=""
+  case "${1:-}" in
+    --latest|"")
+      # Find the two most-recent sweep manifests
+      mapfile -t _sweeps < <(ls -t .lattice/findings/sweeps/*.yml 2>/dev/null | head -2)
+      [ "${#_sweeps[@]}" -lt 2 ] && die "diff: need at least 2 sweep manifests in .lattice/findings/sweeps/"
+      b="$(basename "${_sweeps[0]}" .yml)"
+      a="$(basename "${_sweeps[1]}" .yml)"
+      ;;
+    --help|-h)
+      cat <<'DIFF_HELP'
+lattice diff — compare two sweep manifests
+
+  lattice diff <sweep-id-a> <sweep-id-b>   # compare two specific sweeps
+  lattice diff <sweep-id>                  # compare against previous sweep
+  lattice diff --latest                    # compare last two sweeps
+
+Sweep manifests live at .lattice/findings/sweeps/<sweep-id>.yml.
+Output: table of opened / closed / unchanged / regressed counts per dimension.
+DIFF_HELP
+      return 0 ;;
+    *)
+      if [ -n "${2:-}" ]; then
+        a="$1"; b="$2"
+      else
+        # Single arg — compare against previous sweep on disk
+        b="$1"
+        mapfile -t _sweeps < <(ls -t .lattice/findings/sweeps/*.yml 2>/dev/null)
+        local found=0
+        for s in "${_sweeps[@]}"; do
+          local stem; stem="$(basename "${s}" .yml)"
+          if [ "${found}" -eq 1 ]; then a="${stem}"; break; fi
+          [ "${stem}" = "${b}" ] && found=1
+        done
+        [ -z "${a}" ] && die "diff: no sweep older than ${b} found"
+      fi
+      ;;
+  esac
+
+  local fa=".lattice/findings/sweeps/${a}.yml"
+  local fb=".lattice/findings/sweeps/${b}.yml"
+  [ -f "${fa}" ] || die "diff: manifest not found: ${fa}"
+  [ -f "${fb}" ] || die "diff: manifest not found: ${fb}"
+
+  command -v node >/dev/null 2>&1 || die "diff: node required"
+
+  node - "${fa}" "${fb}" <<'NODEJS'
+const fs = require("fs");
+// node - argv: [nodePath, "-", ...userArgs]
+const [,, fa, fb] = process.argv;
+
+function parseManifest(p) {
+  const text = fs.readFileSync(p, "utf8");
+  const lines = text.split(/\r?\n/);
+  // Pull the slug arrays under opened:, unchanged:, closed_since_last:, regressed:
+  const out = { opened: [], unchanged: [], closed_since_last: [], regressed: [], sweep_id: "", sweep_date: "", totals: {} };
+  let curList = null;
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, "");
+    if (line.match(/^opened:\s*$/)) { curList = "opened"; continue; }
+    if (line.match(/^unchanged:\s*$/)) { curList = "unchanged"; continue; }
+    if (line.match(/^closed_since_last:\s*$/)) { curList = "closed_since_last"; continue; }
+    if (line.match(/^regressed:\s*$/)) { curList = "regressed"; continue; }
+    if (line.match(/^sweep_id:\s*(.+)$/)) out.sweep_id = RegExp.$1.replace(/^["']|["']$/g, "");
+    else if (line.match(/^sweep_date:\s*(.+)$/)) out.sweep_date = RegExp.$1.replace(/^["']|["']$/g, "");
+    if (curList && line.match(/^\s+-\s+(.+)$/)) {
+      out[curList].push(RegExp.$1.replace(/^["']|["']$/g, "").trim());
+      continue;
+    }
+    // List ended — non-list line that isn't a continuation
+    if (curList && /^\S/.test(line)) curList = null;
+  }
+  return out;
+}
+
+const A = parseManifest(fa);
+const B = parseManifest(fb);
+
+const setA = new Set(A.opened);
+const setB = new Set(B.opened);
+
+const newlyOpened = [...setB].filter(s => !setA.has(s));
+const newlyClosed = [...setA].filter(s => !setB.has(s));
+const stillOpen = [...setA].filter(s => setB.has(s));
+
+console.log(`# Sweep diff: ${A.sweep_id || fa} -> ${B.sweep_id || fb}`);
+console.log(`#   A: ${A.sweep_date}  (${A.opened.length} open)`);
+console.log(`#   B: ${B.sweep_date}  (${B.opened.length} open)`);
+console.log("");
+console.log(`opened (B not in A): ${newlyOpened.length}`);
+for (const s of newlyOpened) console.log(`  + ${s}`);
+console.log("");
+console.log(`closed (A not in B): ${newlyClosed.length}`);
+for (const s of newlyClosed) console.log(`  - ${s}`);
+console.log("");
+console.log(`unchanged (in both): ${stillOpen.length}`);
+if (stillOpen.length <= 10) {
+  for (const s of stillOpen) console.log(`  = ${s}`);
+} else {
+  console.log(`  (${stillOpen.length} slugs — too many to list; pass --verbose to print)`);
+}
+NODEJS
+}
+
+# ---------------------------------------------------------------------------
+# write-manifest — wrap scripts/lattice-write-manifest.sh so it's reachable
+# from project dirs via the lattice dispatcher. v1.2.0 (#48). The audit-sweep
+# skill's Step 3 instruction now points at `lattice write-manifest`, removing
+# the broken "bash scripts/lattice-write-manifest.sh" reference.
+# ---------------------------------------------------------------------------
+cmd_write_manifest() {
+  local helper="${SELF_DIR}/lattice-write-manifest.sh"
+  if [ ! -f "${helper}" ]; then
+    helper="${HOME}/.claude/lattice/scripts/lattice-write-manifest.sh"
+  fi
+  [ -f "${helper}" ] || die "write-manifest: helper not found at ${SELF_DIR}/ or ~/.claude/lattice/scripts/"
+  bash "${helper}" "$@"
+}
+
+# ---------------------------------------------------------------------------
 # normalize — walk .lattice/findings/open/*.yml and canonicalize each file's
 # id + filename. Fixes two friction surfaces:
 #   #44: leading-dot module paths (.claude/agents) producing slugs like
@@ -5113,7 +5245,8 @@ NORM_HELP
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const apply = process.argv[1] === "1";
+// v1.2.0: node - has argv[1] = "-"; first user arg is argv[2].
+const apply = process.argv[2] === "1";
 const root = ".lattice/findings/open";
 
 function readTop(text) {
@@ -5849,6 +5982,8 @@ case "${sub}" in
   ci-check-dead)      cmd_ci_check_dead "$@" ;;
   release-notes)      cmd_release_notes "$@" ;;
   normalize)          cmd_normalize "$@" ;;
+  diff)               cmd_diff "$@" ;;
+  write-manifest)     cmd_write_manifest "$@" ;;
   usage)              cmd_usage "$@" ;;
   update)             cmd_update "$@" ;;
   config)             cmd_config "$@" ;;

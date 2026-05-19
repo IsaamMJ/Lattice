@@ -2,6 +2,24 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-19
+
+**Friction-reporting becomes default-on + framework-aware audits + `lattice diff` lands.** Closes the next wave of dogfood-surfaced gaps (#42, #43, #48, #51, #54).
+
+### Added
+- **`lattice diff <sweep-a> <sweep-b>`** (#43) — compare two sweep manifests by their slug sets. Reports `opened` (in B not A), `closed` (in A not B), `unchanged` (in both). `--latest` auto-selects the two most-recent. Eliminates the doc-vs-code drift where `docs/finding-schema.md` referenced `lattice diff` but the dispatcher rejected it.
+- **`lattice write-manifest`** (#48) — wraps `scripts/lattice-write-manifest.sh` so audit-sweep skill can reach the manifest writer whether installed globally or from a dev checkout. Fixes the "bash scripts/lattice-write-manifest.sh ... not found" error in project-installed sessions.
+- **Framework-aware module enumeration in audit-sweep skill** (#51). Detects layout BEFORE globbing `src/modules/`. Order: `src/modules/*/` → monorepo (`apps/*/`+`packages/*/`) → Next.js App Router (`src/app/api/`, `src/app/*/page.tsx`, `src/lib/`, etc) → Next.js Pages Router → Go (`lib/`, `internal/`, `cmd/`) → Flutter/Dart (`app/`, `lib/`, `test/`) → flat-repo fallback (top-level dirs, skip `node_modules`/`.git`/`dist`/`build`/`.next`/`coverage`, cap at 12). Hardcoded `src/**` is gone.
+- **Friction-reporting default-on protocol in SessionStart hook** (#42 #54). Hook output now carries an explicit "DEFAULT-ON, not optional" directive: when Claude hits ANY of {missing command, workaround beats canonical path, wrong/missing error message, doc-code drift, slow/spammy path}, it MUST `lattice report` immediately — not batch at session end. The workaround IS the evidence. Closes the recurring failure where audit-sweep sessions surface 7 friction points and file zero of them until the user explicitly asks.
+
+### Fixed
+- **`node -` argv parsing in `lattice normalize` + `lattice diff`** — when Node reads source from stdin via heredoc, `argv[1]` is the literal `"-"`, not the first user arg. Both commands corrected to destructure `[,, ...userArgs]`. Pre-fix: `normalize --apply` was a silent no-op because the apply flag never reached the helper.
+
+### Verified
+- `/tmp/sync-test`: pre-v1.2.0 `normalize --apply` left files untouched; post-fix the file is renamed to canonical `BLOCKER-test-mod-test-rule.yml` and `id:` is rewritten to the sha1-derived value.
+- `lattice diff --help` resolves, `lattice write-manifest --help` resolves
+- `bash -n scripts/lattice` and `node --check scripts/lattice-session-start.mjs` clean
+
 ## [1.1.2] — 2026-05-19
 
 **Six issues surfaced by the first real-world `/audit-sweep` dogfood — fixed.** A user-filed audit-sweep run on a Next.js portfolio produced 8 friction reports (#47–#54); v1.1.2 closes the actionable bugs and ships `lattice normalize` as the canonical post-sweep healer.
