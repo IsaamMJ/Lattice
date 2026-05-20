@@ -1887,6 +1887,12 @@ updates:
   channel: stable
   check_interval_hours: 24
   pinned_version:
+
+security:
+  # v2.2: the `cmd:` measurement.source scheme runs arbitrary shell on
+  # `lattice grow measure`. Default deny. Flip to true ONLY if you understand
+  # that any hypothesis YAML with `source: cmd:rm -rf ~` will execute on cron.
+  allow_cmd_sources: false
 YML
       echo "[${PROG}] wrote .lattice/config.yml"
       ;;
@@ -5575,6 +5581,12 @@ _grow_propose() {
   } > "${dest}"
   echo "[${PROG}] grow: proposed ${dest}"
   echo "[${PROG}] start running with: lattice grow run ${slug} --commit <sha>"
+  # v2.2: warn loudly if measurement.source uses the cmd: scheme — RCE surface
+  if [[ "${measurement_source}" == cmd:* ]]; then
+    echo "[${PROG}] WARNING: measurement.source uses 'cmd:' — arbitrary shell. Default-deny." >&2
+    echo "[${PROG}]   to permit, set security.allow_cmd_sources: true in .lattice/config.yml" >&2
+    echo "[${PROG}]   (or export LATTICE_ALLOW_CMD_SOURCES=1 for one-shot runs)" >&2
+  fi
   if [ -z "${metric_name}${measurement_source}${baseline_value}" ]; then
     echo "[${PROG}] note: structured measurement fields (--metric-name, --measurement-source, --baseline-value, --expected-delta, --success-threshold, --window-days) omitted. v2.0 auto-rollback requires these — see #59." >&2
   fi
@@ -5789,6 +5801,21 @@ _grow_measurement_sources() {
   fi
 }
 
+# v2.2: gate for the cmd: source scheme. Returns 0 (allowed) only when
+# explicitly opted in via .lattice/config.yml `security.allow_cmd_sources: true`
+# OR the env override LATTICE_ALLOW_CMD_SOURCES=1. Default: refuse.
+_grow_cmd_source_allowed() {
+  [ "${LATTICE_ALLOW_CMD_SOURCES:-0}" = "1" ] && return 0
+  [ -f .lattice/config.yml ] || return 1
+  # Look for `allow_cmd_sources: true` inside a top-level `security:` block.
+  awk '
+    /^security:/ { ins=1; next }
+    ins && /^[a-zA-Z_]/ { ins=0 }
+    ins && /^[[:space:]]+allow_cmd_sources:[[:space:]]*true[[:space:]]*$/ { found=1; exit }
+    END { exit (found ? 0 : 1) }
+  ' .lattice/config.yml
+}
+
 # v2.0: fetch a metric value from a `measurement.source` URI. Returns the
 # numeric value on stdout; non-zero exit + stderr on failure.
 # v2.1 (#60): accepts optional 2nd arg = newline-separated `Header: value`
@@ -5844,6 +5871,15 @@ let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
       ;;
     cmd:*)
       local script="${source#cmd:}"
+      # v2.2 (#cmd-rce): cmd: scheme is DEFAULT-DENY. Maintainer must opt in via
+      # .lattice/config.yml `security.allow_cmd_sources: true` OR env override
+      # LATTICE_ALLOW_CMD_SOURCES=1. This prevents a hypothesis YAML containing
+      # `source: cmd:rm -rf ~` from executing on `lattice grow measure`.
+      if ! _grow_cmd_source_allowed; then
+        echo "[fetch] cmd: scheme refused — set security.allow_cmd_sources: true in .lattice/config.yml (or export LATTICE_ALLOW_CMD_SOURCES=1) to enable" >&2
+        echo "[fetch] refused source: ${source}" >&2
+        return 1
+      fi
       local out
       out="$(bash -c "${script}" 2>/dev/null)" || { echo "[fetch] cmd failed: ${script}" >&2; return 1; }
       # Last non-empty line, parsed as number
