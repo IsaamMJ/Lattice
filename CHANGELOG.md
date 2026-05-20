@@ -2,6 +2,34 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-05-20
+
+**Autonomous loop closure + multi-project setup collapse.** v2.1 made measurement autonomous (cron → Telegram digest). v2.2 closes the loop on action (close / rollback) and collapses per-project setup from ~3h to ~30s.
+
+7 of 8 design-doc slices shipped. Slice 8 (agent platform F) deferred to v2.3 — multi-hour subsystem that deserves a dedicated session.
+
+### Security (HIGH, ships first)
+- **HIGH-scripts-cmd-source-arbitrary-exec: `cmd:` source scheme now default-deny.** Any hypothesis YAML containing `measurement.source: cmd:...` previously ran arbitrary shell on `lattice grow measure` / cron — RCE surface with repo secrets. Opt-in via `.lattice/config.yml` `security.allow_cmd_sources: true` OR `LATTICE_ALLOW_CMD_SOURCES=1`. `lattice grow propose` warns loudly when `--measurement-source` starts with `cmd:`. New `security:` block in default `lattice config init` template documents the gate.
+
+### Added
+- **#77: `lattice onboard`** — one command runs the full per-project sequence: `setup` → `wire-hooks --apply --yes` → `mcp setup --apply --yes` → `grow init` → `grow schedule install`. Prints the GH secret `set` commands and the next-step `/audit-sweep .` prompt. Flags: `--time HH:MM`, `--day mon..sun`, `--transport github-actions|local-cron`, `--utc`, `--auto-action`, `--skip-mcp`, `--skip-schedule`.
+- **#80 #83: `lattice link <id-a> <id-b> --kind <blocks|duplicate-of> [--reason "..."]`** — bidirectional cross-ref primitive. Writes structured flow-style entries to both YAMLs' `relates_to:` blocks. Idempotent. v2.2 starts narrow with `blocks` + `duplicate-of` per design doc.
+- **Close-time cross-ref nudge.** `lattice close` scans the target's `relates_to` and prints each related finding's tier + state. Stale links surface as `(NOT FOUND — stale link)`.
+- **#66: `lattice grow schedule install --auto-action`** — generated workflow gains a "Dispatch @claude autonomous action" step that opens a `@claude`-mentioning GH issue for every succeeded/failed verdict. `succeeded` → close direct (low risk YAML rename); `failed` → @claude opens a PR (NOT direct push) for `auto-rollback --execute`. Requires `permissions: issues: write` — only enabled with `--auto-action`.
+- **#82: SessionStart deltas-since-last-fire.** Hook persists last-fire ISO in `.lattice/.session-start-last` and emits `- Since last session (YYYY-MM-DD): 2 closed, 1 reported`. First fire writes marker silently. Pure-Node + 1.5s hard timeout preserved.
+- **#78 #79: `lattice file --from <multidoc.yml> [--no-confirm-dup]`** — batch finding creation from `---`-separated YAML. Dupe-detect normalizes title (lowercase + alphanumeric + first 40 chars) and warns / skips matching existing finding. Interactive prompt unless `--no-confirm-dup`.
+- **#84: prepare-commit-msg verify hint.** New `prepare-commit-msg-lattice.sh` hook scans staged files vs `.lattice/findings/open/*.yml` and appends `Lattice: touches files referenced by HIGH-foo, ... Run \`lattice verify\` after commit.` Wire via `lattice install-hooks`. Opt-out: `LATTICE_PREPARE_COMMIT_MSG_DISABLE=1`. Skips amend/merge/squash sources.
+
+### Changed
+- `cmd_install_hooks` refactored to install both `post-commit` and `prepare-commit-msg` via shared `_install_one_hook` helper.
+- `_KNOWN_SUBS` extended: `link`, `onboard`, `file`.
+- `usage()` mentions `onboard` explicitly.
+- Default `.lattice/config.yml` template includes the `security:` block.
+- `install.sh` + `update.sh` SCRIPTS arrays include `prepare-commit-msg-lattice.sh`.
+
+### Deferred to v2.3
+- **Slice F — agent platform:** `lattice agent new|list|suggest|review` + telemetry-driven iteration loop mirroring grow architecture (propose → run → measure → close-or-rollback). Needs a fresh session to ship cleanly.
+
 ## [2.1.4] — 2026-05-20
 
 **Hot-fix for #76: `lattice grow check --json` emitted invalid JSON.** The bug silently broke the Telegram digest on the first real cron fire (no message reached the channel despite secrets being set correctly).
