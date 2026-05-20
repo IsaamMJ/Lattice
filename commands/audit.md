@@ -173,4 +173,4 @@ Output the unified diff. **Do not write the doc.** Tell the user findings path +
 
 ---
 
-After running: `lattice list` / `lattice triage` / `lattice sync` to triage findings. Slash commands produce findings; the `lattice` CLI manages lifecycle.
+After running: `lattice list` / `lattice next` / `lattice sync` to triage findings. Slash commands produce findings; the `lattice` CLI manages lifecycle.

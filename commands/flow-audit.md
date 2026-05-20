@@ -175,4 +175,4 @@ Reply 'fix <id>' / 'fix all critical' / 'apply checklist' / 'discuss'.
 
 ---
 
-After running: `lattice list` / `lattice triage` / `lattice sync` to manage findings.
+After running: `lattice list` / `lattice next` / `lattice sync` to manage findings.

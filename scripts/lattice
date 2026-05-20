@@ -30,9 +30,21 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-HELPER_CLOSE="${SELF_DIR}/lattice-close.sh"
-HELPER_REOPEN="${SELF_DIR}/lattice-reopen.sh"
-HELPER_REGEN="${SELF_DIR}/lattice-regenerate.sh"
+# v2.1.2 (#70): helpers may not live next to a stale/literal-copy shim.
+# Resolve via: SELF_DIR first, then canonical install, then fail.
+_resolve_helper() {
+  local name="$1"
+  for d in "${SELF_DIR}" "${HOME}/.claude/lattice/scripts" "/usr/local/lattice/scripts"; do
+    if [ -f "${d}/${name}" ]; then
+      printf '%s' "${d}/${name}"
+      return 0
+    fi
+  done
+  printf '%s' "${SELF_DIR}/${name}"  # default to first-tried; require_helper will surface the error
+}
+HELPER_CLOSE="$(_resolve_helper lattice-close.sh)"
+HELPER_REOPEN="$(_resolve_helper lattice-reopen.sh)"
+HELPER_REGEN="$(_resolve_helper lattice-regenerate.sh)"
 
 PROG="lattice"
 
@@ -85,6 +97,21 @@ Usage:
   lattice wire-hooks [--apply] [--yes] [--session-start] [--statusline]
   lattice mcp setup [--apply] [--yes] [--scope user|project]
   lattice mcp serve | mcp build | mcp status
+  lattice grow init | propose <slug> ... | list | show <slug> | run <slug> --commit <sha>
+  lattice grow measure <slug> [--json] | check [--state running] [--json]
+  lattice grow rollback <slug> --reason "..." | auto-rollback <slug> [--execute] [--yes]
+  lattice grow close <slug> --result won|lost|inconclusive [--observed-value <n>] [--rationale "..."]
+  lattice grow attach-measurement <slug> --metric-name --measurement-source ...
+  lattice grow schedule install [--time HH:MM] [--day mon] [--utc] | status | uninstall | trigger
+  lattice profile init | show | set <k>=<v> [...]
+  lattice normalize [--apply]
+  lattice diff <sweep-a> <sweep-b> | diff --latest
+  lattice write-manifest --sweep-id ... --sweep-date ... ...
+  lattice audit-infra [--path .] [--write]
+  lattice release-notes [--since <tag-or-date>] [--version <v>]
+  lattice setup [--global]
+  lattice uninstall [--global] [--purge] [--yes]
+  lattice ci-check-dead [--days N]
   lattice usage [--since <days>] [--unused <days>] [--json]
   lattice update --check|--self|--enable-auto|--disable-auto
   lattice config init|show|telemetry on|off|show
@@ -115,6 +142,20 @@ Subcommands:
               (dry-run by default; --apply writes with backup; idempotent)
   mcp         manage the Lattice MCP server: setup | serve | build | status
               (v1.0.0; wires mcpServers.lattice into ~/.claude.json)
+  grow        hypothesis lifecycle (v2.0+): init/propose/run/measure/check/
+              auto-rollback/rollback/close/attach-measurement/schedule.
+              Forward-looking experiments, parallel to findings.
+  profile     operator profile for tier reweighting + suggested_fix bias
+              (v1.4.0; ~/.lattice/profile.yml; init | show | set)
+  normalize   canonicalize finding ids + filenames in .lattice/findings/open/
+              (v1.1.2; re-derives ids per v0.7 sha1; default dry-run)
+  diff        compare two sweep manifests by slug sets (v1.2.0; --latest)
+  audit-infra audit Claude Code infra adequacy: hooks + MCPs for detected stack
+              (v1.3.0; new dimension; --write emits YAMLs)
+  release-notes  auto-generate CHANGELOG entry from git commits since last tag
+              (v1.1.1; conventional-commit categorization)
+  setup       one-command per-project bootstrap (v1.0.3)
+  uninstall   remove Lattice from cwd or --global  (v1.0.2)
   usage       summarize local command usage from .lattice/usage/events.jsonl
   update      check for or apply Lattice updates using .lattice/config.yml
   config      create a project-local .lattice/config.yml
@@ -1635,7 +1676,7 @@ const sinceDays = Number(sinceDaysRaw);
 const unusedDays = Number(unusedDaysRaw);
 const jsonMode = jsonRaw === '1';
 const known = [
-  'close','reopen','sync','regenerate','defer','list','ls','show','cat','triage',
+  'close','reopen','sync','regenerate','defer','list','ls','show','cat',
   'cluster','bulk-close','handoff','next','timeline','verify','ci-check','pr-body',
   'validate','sweeps','sweep-id','id-gen','usage','update','config','version'
 ];
@@ -3107,9 +3148,11 @@ cmd_report() {
     bug|enhancement|ux|docs|perf|security) ;;
     *) die "report: category must be one of: bug | enhancement | ux | docs | perf | security" ;;
   esac
+  # v2.1.2 (#73): accept MEDIUM as alias for MED to match finding-schema.md vocab
   case "${severity}" in
+    MEDIUM) severity="MED" ;;
     LOW|MED|HIGH) ;;
-    *) die "report: --severity must be LOW | MED | HIGH" ;;
+    *) die "report: --severity must be LOW | MED | HIGH (also accepts MEDIUM)" ;;
   esac
 
   if [ -n "${body_file}" ]; then
@@ -4604,6 +4647,15 @@ _env_plausibility_tier() {
 _env_emit_finding() {
   # args: tier, env_key, fallback_value, file, line, write_mode, slug_seq
   local tier="$1" key="$2" fallback="$3" file="$4" line="$5" write="$6" seq="$7"
+  # v2.1.2 (#68): defensive sanitization. Regex capture from minified bundles
+  # (ora spinners.json was the original trigger) can leak binary content into
+  # ${key}, causing filename-too-long when composed into the slug. Strip to
+  # valid env-var chars and cap at 60.
+  key="$(printf '%s' "${key}" | tr -cd 'A-Z0-9_' | head -c 60)"
+  if [ -z "${key}" ]; then
+    # Refuse to emit a finding without a real key
+    return 0
+  fi
   local slug="${tier}-env-fallback-${key}"
   # If multiple findings share the same key+tier (e.g. two callsites), suffix.
   [ "${seq}" -gt 0 ] && slug="${slug}-${seq}"
@@ -4756,6 +4808,8 @@ cmd_audit_env_contract() {
     if [ -n "${code_keys}" ]; then
       local k
       while IFS= read -r k; do
+        # v2.1.2 (#68): same sanitization as _env_emit_finding
+        k="$(printf '%s' "${k}" | tr -cd 'A-Z0-9_' | head -c 60)"
         [ -z "${k}" ] && continue
         if ! printf '%s\n' "${contract_keys}" | grep -qFx "${k}"; then
           # Emit DRIFT finding

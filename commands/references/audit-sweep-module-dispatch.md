@@ -46,6 +46,18 @@ Write findings to .lattice/findings/open/ using the v0.7 YAML schema
 markdown audit reports. Filename pattern: <TIER>-<module-slug>-<rule-slug>.yml
 Example: HIGH-payments-missing-rate-limit.yml
 
+**v2.1.2 (#72) — per-tier REQUIRED EXTRA fields beyond core (id/rule/dimension/
+tier/module/file/line/title/fix/sweep_date/sweep_id/auditor/status):**
+
+| Tier × Dimension | Extra required |
+|---|---|
+| security CRITICAL or HIGH | owasp (A01..A10), exploitability (Remote-unauth/Remote-auth/Local-only), blast_radius, attack_scenario, secure_code_example |
+| flow CRITICAL or HIGH | impact (one sentence) |
+| scale BLOCKER | failure_mode (one sentence) |
+
+Without these fields, `lattice sync` will reject the YAML at aggregation time
+and the manifest writer fails. Emit them on the first pass.
+
 Return a JSON summary to the orchestrator:
 {
   "module": "<path>",

@@ -118,12 +118,18 @@ function createServer() {
       inputSchema: {
         tier: z
           .enum([
+            // v2.1.2: match scripts/lattice tier vocabulary completely.
+            // Missing previously: RISK, WATCH, INTENTIONAL, UNVERIFIABLE.
             "CRITICAL",
             "BLOCKER",
             "HIGH",
+            "RISK",
             "MEDIUM",
+            "WATCH",
             "LOW",
             "DRIFT",
+            "INTENTIONAL",
+            "UNVERIFIABLE",
             "OK",
           ])
           .optional()
@@ -139,11 +145,18 @@ function createServer() {
             "security",
             "flow",
             "env-contract",
+            "coverage",
+            "configuration",
+            "quality",
+            "product",
+            "infra",
           ])
           .optional()
           .describe("Filter by audit dimension"),
         status: z
-          .enum(["open", "closed", "deferred", "partial"])
+          // v2.1.2: bash CLI normalizes "partial" -> "in_progress"; expose
+          // both so clients can filter either way.
+          .enum(["open", "closed", "deferred", "in_progress", "partial"])
           .optional()
           .describe("Filter by lifecycle status (default: open)"),
       },

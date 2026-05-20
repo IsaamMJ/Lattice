@@ -11,7 +11,7 @@ You are auto-fixing exactly one Lattice finding by dispatching a Haiku subagent.
 
 Findings live as one YAML per finding under `.lattice/findings/open/<slug>.yml` (and `.lattice/findings/closed/<slug>.yml` after close). Load this one:
 
-Run: `bash scripts/lattice show $ARGUMENTS` (or `bash ~/.claude/lattice/scripts/lattice show $ARGUMENTS` if installed globally and not in the source repo).
+Run: `bash scripts/lattice show "$ARGUMENTS"` (or `bash ~/.claude/lattice/scripts/lattice show "$ARGUMENTS"` if installed globally and not in the source repo).
 
 Read the YAML output. Extract: `tier`, `dimension`, `fix`, `file`, `line`, `title`, `relates_to`, `cluster_root`.
 
@@ -36,7 +36,7 @@ and stop. Do not dispatch.
 
 ## Step 3 — Generate the Haiku brief
 
-Run: `bash scripts/lattice handoff $ARGUMENTS`
+Run: `bash scripts/lattice handoff "$ARGUMENTS"`
 
 Capture the output. This is your prompt foundation.
 

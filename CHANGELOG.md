@@ -2,6 +2,35 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — 2026-05-20
+
+**TIER-1 fixes from this morning's audit-sweep on Lattice itself + dogfood reports.** Eight bugs from issues #68–#73 and 14 cross-module DRIFT findings, all addressed. Architectural work (cmd: RCE, drift-detection rewrite, scale-fork-tax) deferred to v2.2.
+
+### Fixed
+- **#70 (HIGH): `lattice close` fails on subsequent calls — helper-path resolution.** Dispatcher resolved `HELPER_CLOSE` / `HELPER_REOPEN` / `HELPER_REGEN` at script-load time relative to `SELF_DIR`. When the shim resolved to a directory without those helpers (the literal-copy-shim drift case), every helper invocation failed. New `_resolve_helper(name)` tries `SELF_DIR` first, falls back to `~/.claude/lattice/scripts/` (canonical install), then `/usr/local/lattice/scripts/`. Same HELPER_* constants resolve through this on script load.
+- **#68 (MED): audit-env-contract YAML filename-too-long from regex-capture pollution.** Defensive sanitization in `_env_emit_finding` + the contract-drift path: `key=$(printf '%s' "${key}" | tr -cd 'A-Z0-9_' | head -c 60)` before composing the slug. Refuses to emit when sanitization leaves an empty key (regex matched something that wasn't an env var).
+- **#69 (MED): `lattice triage` advertised but unimplemented.** Removed `triage` from `cmd_usage`'s hardcoded known-subcommand list (line 1650) — it was already gone from `_KNOWN_SUBS` and from the dispatcher in v0.9.18, but this fourth source of truth still advertised it. Also stripped `lattice triage` references from `commands/audit.md`, `audit-sweep.md`, `flow-audit.md`, `scale-audit.md`, `security-audit.md`, and `README.md` — replaced with `lattice next` (the actual highest-priority-finding command).
+- **#73 (LOW): `lattice report --severity MEDIUM` rejected.** Accepted vocabulary was `LOW | MED | HIGH`; finding-schema uses `MEDIUM`. Now `MEDIUM` is silently aliased to `MED` before validation. Error message also mentions the alias.
+
+### Changed (DRIFT cleanup from this morning's sweep)
+- **Per-tier required-fields cheatsheet** appended to `commands/references/audit-sweep-module-dispatch.md` so subagents emit fully-schema-compliant YAML on first pass (#72): security CRITICAL/HIGH need owasp+exploitability+blast_radius+attack_scenario+secure_code_example; flow CRITICAL/HIGH need impact; scale BLOCKER needs failure_mode. Without this, `lattice sync` blocks mid-aggregation on any HIGH/CRITICAL security finding.
+- **MCP zod schemas synced to bash CLI tier vocab.** Added `RISK`, `WATCH`, `INTENTIONAL`, `UNVERIFIABLE` to tier enum (was missing 4 of 11 tiers). Added `coverage`, `configuration`, `quality`, `product`, `infra` to dimension enum (was missing 5). Added `in_progress` to status enum (the canonical name `partial` aliases to internally). Closes the 4 DRIFT findings on mcp/src/index.ts.
+- **`scripts/lattice` usage() now lists the full grow + profile + normalize + diff + audit-infra + release-notes + setup + uninstall + ci-check-dead surface** (v2.0+). Previously these were dispatcher-only with no help-text mention — users couldn't discover them.
+- **README.md** now lists `lattice grow` alongside the lifecycle CLI verbs, and drops `lattice triage` from the example list.
+- **`$ARGUMENTS` now quoted** in `commands/lattice-fix.md` (3 sites). Prevents shell-metachar interpretation when a user passes a slug with spaces or special characters.
+
+### Verified
+- `bash -n scripts/lattice` clean
+- `lattice triage` now correctly errors as "unknown subcommand" instead of being advertised+broken
+- `lattice report bug --severity MEDIUM ...` files cleanly (alias converts to MED)
+- `npx tsc` clean in `mcp/` after enum updates
+
+### Held for v2.2.0
+- **#HIGH cmd: scheme RCE** — needs allow-list design (default deny? per-project config? PR-merge-time check?)
+- **#71 literal-copy shim drift** — drift detection should compare `lattice version` output, not file-shape heuristic
+- **3 MEDIUM security** — env-var-leak via `${VAR}` in headers, eval in `lattice verify`, MCP close-finding no programmatic gate
+- **3 WATCH scale** — yaml_field fork tax, MCP subprocess caching, audit-sweep module cap
+
 ## [2.1.1] — 2026-05-20
 
 **Trial-1 v2.1 dogfood patch.** Four real-use frictions filed overnight, all fixed.

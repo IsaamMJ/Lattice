@@ -194,7 +194,7 @@ Lattice sweep complete. Manifest: .lattice/findings/sweeps/<sweep_id>.yml
 - Cross-cutting bundles flagged: <n>
 - Skipped (parse errors): <n>
 
-Use `lattice list` to triage, `lattice triage` for interactive walk, `lattice show <id>` for one finding.
+Use `lattice list` to triage, `lattice next` for the single highest-priority finding, `lattice show <id>` for one finding.
 Reply 'fix all critical', 'apply checklist', 'show bundles', or 'discuss'.
 ```
 
@@ -228,4 +228,4 @@ Reply 'fix all critical', 'apply checklist', 'show bundles', or 'discuss'.
 
 ---
 
-After running: `lattice list` / `lattice triage` / `lattice sync` to manage findings.
+After running: `lattice list` / `lattice next` / `lattice sync` to manage findings.
