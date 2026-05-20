@@ -155,6 +155,8 @@ Subcommands:
   release-notes  auto-generate CHANGELOG entry from git commits since last tag
               (v1.1.1; conventional-commit categorization)
   setup       one-command per-project bootstrap (v1.0.3)
+  onboard     full per-project bootstrap: setup + wire-hooks + mcp + grow init
+              + grow schedule install. Collapses ~3h setup to ~30s. (v2.2 #77)
   uninstall   remove Lattice from cwd or --global  (v1.0.2)
   usage       summarize local command usage from .lattice/usage/events.jsonl
   update      check for or apply Lattice updates using .lattice/config.yml
@@ -3482,7 +3484,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -7220,6 +7222,111 @@ GITATTR
 }
 
 # ---------------------------------------------------------------------------
+# v2.2 — onboard — multi-project setup collapse (#77).
+#
+# Wraps the full per-project sequence into one command so adding Lattice to a
+# new repo goes from ~3h (setup + wire-hooks + mcp + grow init + schedule +
+# secrets) to ~30s.
+#
+# Steps:
+#   1. lattice setup                              (findings tree, config, CLAUDE.md)
+#   2. lattice wire-hooks --apply --yes           (SessionStart + statusLine + Stop)
+#   3. lattice mcp setup --apply --yes            (MCP server, if not already)
+#   4. lattice grow init                          (hypotheses tree + README)
+#   5. lattice grow schedule install              (workflow + manifest)
+#   6. Prints required GH secrets + next-step prompt
+#
+# Defaults match maintainer's standard cadence: github-actions transport,
+# Monday 09:00 local. Override via --time / --day / --transport.
+# ---------------------------------------------------------------------------
+cmd_onboard() {
+  local time="09:00" day="mon" transport="github-actions" skip_mcp=0 skip_schedule=0 utc=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --time)      time="$2"; shift 2 ;;
+      --day)       day="$2"; shift 2 ;;
+      --transport) transport="$2"; shift 2 ;;
+      --utc)       utc="--utc"; shift ;;
+      --skip-mcp)      skip_mcp=1; shift ;;
+      --skip-schedule) skip_schedule=1; shift ;;
+      --help|-h)
+        cat <<'ONBOARD_HELP'
+lattice onboard — collapse per-project setup into one command (v2.2 #77)
+
+Usage:
+  lattice onboard [--time HH:MM] [--day mon..sun] [--transport github-actions|local-cron]
+                  [--utc] [--skip-mcp] [--skip-schedule]
+
+Runs: setup → wire-hooks → mcp setup → grow init → grow schedule install.
+Prints GH secret list and next-step `/audit-sweep .` prompt at the end.
+
+Defaults: --time 09:00 --day mon --transport github-actions
+ONBOARD_HELP
+        return 0 ;;
+      *) die "onboard: unknown flag: $1" ;;
+    esac
+  done
+
+  echo "[${PROG}] onboard: bootstrapping Lattice in $(pwd)"
+  echo ""
+
+  # Step 1 — setup (idempotent)
+  echo "[1/5] lattice setup"
+  cmd_setup 2>&1 | sed 's/^/      /'
+  echo ""
+
+  # Step 2 — wire-hooks
+  echo "[2/5] lattice wire-hooks --apply --yes"
+  if cmd_wire_hooks --apply --yes 2>&1 | sed 's/^/      /'; then :; else
+    echo "      [warn] wire-hooks reported issues — continuing"
+  fi
+  echo ""
+
+  # Step 3 — mcp setup (optional, only if node/npm available)
+  if [ "${skip_mcp}" -eq 1 ]; then
+    echo "[3/5] mcp setup — SKIPPED (--skip-mcp)"
+  elif ! command -v node >/dev/null 2>&1; then
+    echo "[3/5] mcp setup — SKIPPED (node not on PATH)"
+  else
+    echo "[3/5] lattice mcp setup --apply --yes"
+    cmd_mcp setup --apply --yes 2>&1 | sed 's/^/      /' || echo "      [warn] mcp setup reported issues — continuing"
+  fi
+  echo ""
+
+  # Step 4 — grow init
+  echo "[4/5] lattice grow init"
+  cmd_grow init 2>&1 | sed 's/^/      /'
+  echo ""
+
+  # Step 5 — grow schedule install
+  if [ "${skip_schedule}" -eq 1 ]; then
+    echo "[5/5] grow schedule install — SKIPPED (--skip-schedule)"
+  else
+    echo "[5/5] lattice grow schedule install --time ${time} --day ${day} --transport ${transport} ${utc}"
+    # shellcheck disable=SC2086
+    cmd_grow schedule install --time "${time}" --day "${day}" --transport "${transport}" ${utc} 2>&1 | sed 's/^/      /' || true
+  fi
+  echo ""
+
+  # Closing pointers
+  echo "[${PROG}] onboard complete."
+  echo ""
+  echo "Next steps:"
+  echo "  1. (REQUIRED if transport=github-actions) set repo secrets so the"
+  echo "     scheduled measure can reach your metric endpoints + Telegram:"
+  echo "       gh secret set LATTICE_TELEGRAM_TOKEN   --body \"\$(read -sp 'token: ' x; echo \"\$x\")\""
+  echo "       gh secret set LATTICE_TELEGRAM_CHAT_ID --body \"<chat-id>\""
+  echo '     Any extra ${LATTICE_FETCH_HEADER_FOO} you reference in hypothesis'
+  echo "     YAML headers must also be added as repo secrets."
+  echo ""
+  echo "  2. Populate findings — in Claude Code, run:"
+  echo "       /audit-sweep ."
+  echo ""
+  echo "  3. Verify scheduled job: lattice grow schedule status"
+  echo "  4. List open findings:   lattice list   (empty until step 2)"
+}
+
+# ---------------------------------------------------------------------------
 # ci-check-dead — fail if any subcommand has 0 invocations across global usage
 # log. Used as a release-time check to enforce dead-feature pruning practice.
 # v1.0.3 (#7). Same exit-code shape as `lattice ci-check`.
@@ -7737,6 +7844,7 @@ case "${sub}" in
   mcp)                cmd_mcp "$@" ;;
   uninstall)          cmd_uninstall "$@" ;;
   setup)              cmd_setup "$@" ;;
+  onboard)            cmd_onboard "$@" ;;
   ci-check-dead)      cmd_ci_check_dead "$@" ;;
   release-notes)      cmd_release_notes "$@" ;;
   normalize)          cmd_normalize "$@" ;;
