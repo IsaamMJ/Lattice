@@ -6040,7 +6040,15 @@ _grow_check() {
       [ -f "${f}" ] || continue
       local slug; slug="$(basename "${f}" .yml)"
       local row
-      row="$(_grow_measure "${slug}" --json 2>/dev/null || echo "{}")"
+      # v2.1.4 (#76): use `|| true` not `|| echo "{}"`. _grow_measure --json
+      # prints a valid JSON object even when it returns 1 (fetch-failed). The
+      # previous `|| echo "{}"` appended a stray `{}` AFTER the real object,
+      # breaking the envelope's array. `|| true` swallows the exit code so
+      # `set -e` doesn't kill the loop, without adding garbage to stdout.
+      row="$(_grow_measure "${slug}" --json 2>/dev/null || true)"
+      # Strip trailing newline from printf — array entries are comma-joined.
+      row="${row%$'\n'}"
+      [ -z "${row}" ] && row="{}"
       rows+=("${row}")
       n=$((n + 1))
       # Bucket

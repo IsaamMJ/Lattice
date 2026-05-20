@@ -2,6 +2,24 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.4] — 2026-05-20
+
+**Hot-fix for #76: `lattice grow check --json` emitted invalid JSON.** The bug silently broke the Telegram digest on the first real cron fire (no message reached the channel despite secrets being set correctly).
+
+### Fixed (#76, HIGH)
+- `_grow_check`'s json branch used `|| echo "{}"` as a fallback on per-hypothesis measure failures. `_grow_measure --json` correctly emits a valid JSON object even when it returns 1 (fetch-failed case) — the OR-echo then appended a stray `{}` AFTER the real object, breaking the envelope's `hypotheses` array.
+- Replaced with `|| true` so `set -e` doesn't kill the loop without adding garbage to stdout.
+- Also strip trailing newlines from per-hypothesis rows before joining with commas (printf added a `\n` that was leaking into the array).
+
+### Verified
+- Synthetic test on `/tmp/grow-v2-test` with 2 hypotheses both fetch-failed:
+  - Pre-fix: `{...hyp1...}\n{},{...hyp2...}\n{}]}` — fails `JSON.parse` at position 169
+  - Post-fix: `{"summary":{...,"failed_fetch":2},"hypotheses":[{"slug":"t1",...},{"slug":"t2",...}]}` — parses cleanly via node
+- Validated round-trip via `node -e 'JSON.parse(...)'`
+
+### Why this matters
+Without this fix, the autonomous loop shipped in v2.1.0/v2.1.2 silently failed on its first real cron fire: GitHub Actions ran cleanly, `lattice grow check --json` "succeeded" (exit 0), but `lattice-grow-telegram.mjs` crashed parsing the malformed JSON. No Telegram message reached the channel. User finds out by *not* getting their Monday morning verdicts.
+
 ## [2.1.3] — 2026-05-20
 
 **Three real-use bugs from overnight + Part A origin tracking** (per design conversation about cross-project bug aggregation).
