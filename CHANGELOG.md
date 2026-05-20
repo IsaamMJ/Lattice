@@ -2,6 +2,28 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-05-20
+
+**Trial-1 v2.1 dogfood patch.** Four real-use frictions filed overnight, all fixed.
+
+### Fixed
+- **#62 (UX): `grow schedule install --time` now interprets HH:MM as user-local time.** Detects local TZ offset via `date +%z`, converts to UTC for the GitHub Actions cron expression (which has no choice but UTC). Handles day-rollover when the conversion crosses midnight. Prints both interpretations:
+  - `cron expression: 30 3 * * 1 (UTC) — fires MON at 03:30 UTC`
+  - `             = MON 09:00 IST (local). Override with --utc to treat --time as UTC.`
+  - `--utc` flag opts out (HH:MM treated as already-UTC).
+- **#63 (BUG): `lattice update --self` now detects shim drift explicitly.** `update.sh` resolves the user's shim, compares the shim-target's plugin.json version against the canonical install's new VERSION, and emits a `!!! SHIM DRIFT` warning with the exact `ln -sfn` fix when they disagree. Previous behavior: `update.sh` printed "0.9.16 -> 1.4.0" and exited 0 even when `lattice --version` would still report the old number because the shim pointed at a non-canonical install. v1.4.1 added this check inside the `lattice` script itself, but standalone `bash scripts/update.sh` runs (and curl-pipe installs) skipped it; v2.1.1 puts the same check in update.sh.
+- **#64 (BUG): generated workflow uses `actions/setup-node@v4` with Node 22.** Pre-fix: workflow only used `actions/checkout@v4` and relied on the runner's default Node, which GitHub flagged as deprecated (Node 20 → forced Node 24 on 2026-06-02). Explicit Node 22 pin keeps the workflow stable through the runner migration.
+- **#65 (UX): `grow schedule status` renders last-run as human-readable.** Pre-fix: `last run: []` (bash array literal). Post-fix: `last run: 2026-05-19T16:56:30Z  success  (id 12345)`. Falls back to `never` when no runs exist. `grow schedule trigger` now polls for the new run ID (up to 6s) and prints concrete `gh run watch <id>` + `gh run view <id>` commands instead of the generic `gh run watch` that prompts.
+
+### Verified
+- Live: `grow schedule install --time 09:00 --day mon` on Asia/Kolkata (UTC+5:30) → cron `30 3 * * 1` (correct: 09:00 IST = 03:30 UTC)
+- Live: `grow schedule install --time 14:30 --day mon --utc` → cron `30 14 * * 1` (UTC preserved)
+- Generated workflow contains `actions/setup-node@v4` + `node-version: '22'`
+- `bash -n scripts/lattice` + `bash -n scripts/update.sh` clean
+
+### Held for later
+- **#66** (HIGH enh, v2.2): `@claude` GitHub App integration — autonomous *action* after autonomous measurement. Big scope; held for design discussion after the v2.1 loop has fired at least once in real life (first cron: Mon 2026-05-25 09:00 local).
+
 ## [2.1.0] — 2026-05-19
 
 **Closes #60 + #61 from the first real v2.0 dogfood.** Auth headers, schema migration, multi-source combine, autonomous schedule, Telegram updates — all the v2.1+ deferrals from v2.0 that the trial-1 report turned from "future" into "needed now."

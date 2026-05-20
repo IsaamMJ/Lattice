@@ -130,7 +130,39 @@ printf "%s\n" "${VERSION}" > "${HOME}/.claude/lattice/VERSION"
 
 echo ""
 echo "[lattice] updated ${#COMMANDS[@]} commands + ${#SCRIPTS[@]} scripts + ${#DOCS[@]} docs."
-echo "[lattice] ${PREV} -> ${VERSION}"
+echo "[lattice] canonical install: ${PREV} -> ${VERSION}"
+
+# v2.1.1 (#63): if the user's `lattice` shim points at a different copy than
+# the canonical install, `lattice --version` will keep reporting the old
+# value even though update.sh wrote the new VERSION. Detect + tell the user
+# explicitly so they don't think the update lied.
+if command -v lattice >/dev/null 2>&1; then
+  _SHIM_PATH="$(command -v lattice 2>/dev/null)"
+  _SHIM_TARGET=""
+  if [ -L "${_SHIM_PATH}" ]; then
+    _SHIM_TARGET="$(readlink "${_SHIM_PATH}" 2>/dev/null || true)"
+  elif [ -f "${_SHIM_PATH}" ]; then
+    _SHIM_TARGET="$(grep -oE 'exec bash [^"'\'']*' "${_SHIM_PATH}" 2>/dev/null | head -1 | sed -E 's/^exec bash //; s/[[:space:]]*"\$@".*//; s/^[[:space:]]+|[[:space:]]+$//g')"
+  fi
+  _CANONICAL="${SCRIPT_DEST}/lattice"
+  if [ -n "${_SHIM_TARGET}" ] && [ "${_SHIM_TARGET}" != "${_CANONICAL}" ]; then
+    # Read the shim target's reported version (plugin.json next to it)
+    _SHIM_PLUGIN="$(dirname "${_SHIM_TARGET}")/../.claude-plugin/plugin.json"
+    _SHIM_VERSION="unknown"
+    if [ -f "${_SHIM_PLUGIN}" ]; then
+      _SHIM_VERSION="$(grep -oE '"version"\s*:\s*"[^"]+"' "${_SHIM_PLUGIN}" 2>/dev/null | head -1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/' || echo unknown)"
+    fi
+    if [ "${_SHIM_VERSION}" != "${VERSION}" ]; then
+      echo ""
+      echo "[lattice] !!! SHIM DRIFT — \`lattice version\` will report ${_SHIM_VERSION}, not ${VERSION}"
+      echo "[lattice] !!! your shim ${_SHIM_PATH} points at ${_SHIM_TARGET}"
+      echo "[lattice] !!! the canonical install at ${_CANONICAL} is now ${VERSION}"
+      echo "[lattice] !!! to use the new version, repoint the shim:"
+      echo "[lattice] !!!   ln -sfn ${_CANONICAL} \"${_SHIM_PATH}\""
+      echo "[lattice] !!! or run: lattice doctor   (will diagnose + suggest exact fix)"
+    fi
+  fi
+fi
 
 # v0.7.7: detect project-local copy of scripts/ in CWD. Projects sometimes
 # pin a copy (e.g. jiive-backend keeps scripts/lattice next to its source) —
