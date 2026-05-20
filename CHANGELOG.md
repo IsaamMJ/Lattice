@@ -2,6 +2,35 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3] — 2026-05-20
+
+**Three real-use bugs from overnight + Part A origin tracking** (per design conversation about cross-project bug aggregation).
+
+### Fixed
+- **#75 (HIGH): generated workflow YAML invalid** — `if: secrets.X` was rejected by GitHub Actions with `'Unrecognized named-value: secrets'`. Workflow now always runs the Post-to-Telegram step and short-circuits internally when tokens are absent (the formatter already exits cleanly without them per v2.1.0). The generated `.github/workflows/lattice-grow-check.yml` now parses cleanly on push.
+- **#67 (MED): audit-env-contract walks `node_modules` and vendored deps.** Added `--exclude-dir` to every env-contract grep call: `node_modules`, `.git`, `dist`, `build`, `.next`, `coverage`, `vendor`, `.lattice`, plus Python (`__pycache__`, `.venv`, `venv`) and Dart (`.dart_tool`) equivalents. Pearl_Website_NextJS audit went from 48 noisy findings (Next.js internals + ora spinner garbage) to ~25 real ones.
+- **#71 (HIGH): literal-copy shim drift detection rewrite.** Previous (v1.4.1) detection only recognized symlinks + bash `exec` wrappers; missed literal copies entirely. New approach: `lattice doctor` and `update.sh` both invoke `lattice version` through the shim and compare against the canonical install's reported version. Catches ALL shim forms (symlink, wrapper, literal copy, alias) because we compare *output*, not file shape. The audit-sweep this morning hit this exact bug on a literal-copy at `~/bin/lattice`.
+
+### Added — Part A: origin tracking on `lattice report`
+- **`lattice report` now sends `project: <basename of cwd>`** in the manual-report payload. Worker validates + sanitizes to a label-safe form.
+- **Worker tags each manual-report GitHub Issue with `project:<basename>` label.** `gh issue list --label project:IsaamNextJs` now surfaces per-project bug pressure across all your projects.
+- **Project name also appears in the issue body** (`**Project:** \`<basename>\``) so the source is visible at-a-glance, not just in label state.
+- Sanitization: lowercase, `[a-z0-9._-]` only, capped 40 chars (GitHub label rules).
+
+### Why Part A (not Part B)
+You asked: should reporters submit architecture suggestions too, with tier-weighted diff selection? My honest read: yes to origin tracking (cheap, immediate signal value), no to architecture-by-vote (premature for current scale, architecture decisions don't aggregate well by majority). When v2.2 surfaces real cross-project convergence (multiple projects independently filing the same shape of friction), then the data justifies a richer aggregator. Today: just the labels.
+
+### Held for v2.2
+- **HIGH cmd: scheme RCE** — allow-list design
+- **#66** — @claude GitHub App
+- **3 MEDIUM security** (env-var leak via headers, eval in verify, MCP close gate)
+- **3 WATCH scale** (yaml_field fork tax, MCP subprocess caching, audit-sweep cap)
+
+### Verified
+- Synthetic test: env-contract on `/tmp/v213-test` with both `node_modules/fake/index.js` (fallback `'pwned'`) and `app.js` (fallback `'dev-default'`) — output contains only `REAL_KEY`, not `FAKE_KEY`.
+- Manual test: `lattice report bug --severity MED ...` from `/e/Lattice` cwd → GH issue gets `project:lattice` label and `**Project:** \`lattice\`` body line.
+- `bash -n scripts/lattice`, `bash -n scripts/update.sh`, `node --check worker/lattice-telemetry.js` all clean.
+
 ## [2.1.2] — 2026-05-20
 
 **TIER-1 fixes from this morning's audit-sweep on Lattice itself + dogfood reports.** Eight bugs from issues #68–#73 and 14 cross-module DRIFT findings, all addressed. Architectural work (cmd: RCE, drift-detection rewrite, scale-fork-tax) deferred to v2.2.

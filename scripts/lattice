@@ -2003,54 +2003,40 @@ cmd_doctor() {
   if [ -n "${found_path}" ]; then
     _check_pass "lattice in PATH (${found_path})"
 
-    # v1.4.1: shim drift detection. Resolve where `lattice` actually executes
-    # from (following symlinks + bash exec wrappers), and compare against:
-    #   1. The canonical global install at ~/.claude/lattice/scripts/lattice
-    #   2. The script invoked for THIS doctor run (this script's own path)
-    # The single most-common silent-failure mode: shim points at a stale
-    # install, `lattice update --self` updates the canonical, user's running
-    # binary stays old. v1.4.1 makes that loud.
-    local shim_target=""
-    if [ -L "${found_path}" ]; then
-      shim_target="$(readlink "${found_path}" 2>/dev/null || true)"
-    elif [ -f "${found_path}" ]; then
-      # bash wrapper — extract `exec bash <path>` line
-      shim_target="$(grep -oE 'exec bash [^"'\'']*' "${found_path}" 2>/dev/null | head -1 | sed -E 's/^exec bash //; s/[[:space:]]*"\$@".*//; s/^[[:space:]]+|[[:space:]]+$//g')"
-      [ -z "${shim_target}" ] && shim_target="${found_path}"
-    fi
+    # v2.1.3 (#71): version-based drift detection. Previous (v1.4.1) approach
+    # inspected the shim file shape (readlink for symlinks, grep for bash
+    # `exec` wrappers) — missed LITERAL COPY shims entirely. New approach:
+    # invoke `lattice version` through the shim, compare against canonical.
+    # Catches ALL drift forms (symlink, wrapper, literal copy, alias, whatever)
+    # because we're comparing output, not file structure.
+    local canonical="${HOME}/.claude/lattice/scripts/lattice"
     local self_path
     self_path="$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
-    local canonical="${HOME}/.claude/lattice/scripts/lattice"
 
-    # Compare running version (what user invokes) vs canonical install version
-    local running_version canonical_version
-    if [ -n "${shim_target}" ] && [ -f "${shim_target}" ]; then
-      running_version="$(bash "${shim_target}" version 2>/dev/null || echo unknown)"
-    else
-      running_version="$(current_version 2>/dev/null || echo unknown)"
-    fi
+    # Version reported when the user types `lattice version` from a fresh shell.
+    # This is what actually executes for them — invoke the shim as the OS would.
+    local shim_version
+    shim_version="$(bash "${found_path}" version 2>/dev/null | head -1 | awk '{print $NF}' || echo unknown)"
+
+    local canonical_version=""
     if [ -f "${canonical}" ]; then
-      canonical_version="$(bash "${canonical}" version 2>/dev/null || echo unknown)"
+      canonical_version="$(bash "${canonical}" version 2>/dev/null | head -1 | awk '{print $NF}' || echo unknown)"
+    fi
+    local self_version="$(current_version 2>/dev/null || echo unknown)"
+
+    # Drift case 1: shim version != canonical version (the silent-update bug)
+    if [ -n "${canonical_version}" ] && [ "${canonical_version}" != "unknown" ] \
+        && [ "${shim_version}" != "${canonical_version}" ]; then
+      _check_fail "shim drift: running=${shim_version} but canonical=${canonical_version}" "your \`lattice\` shim at ${found_path} runs ${shim_version}; \`~/.claude/lattice/scripts/lattice\` is at ${canonical_version}. \`lattice update --self\` touched the canonical install but not your shim. Fix: replace the shim with a wrapper pointing at the canonical install: cat > \"${found_path}\" <<<\"#!/usr/bin/env bash\\nexec bash ${canonical} \\\"\\\$@\\\"\" && chmod +x \"${found_path}\""
+    elif [ -n "${canonical_version}" ] && [ "${canonical_version}" != "unknown" ]; then
+      _check_pass "shim version ${shim_version} matches canonical install"
     else
-      canonical_version=""
+      _check_pass "shim resolves and reports version ${shim_version} (no canonical install to compare)"
     fi
 
-    if [ -n "${shim_target}" ] && [ -f "${shim_target}" ]; then
-      _check_pass "shim resolves to ${shim_target}"
-    fi
-    # Drift case 1: shim points at a non-canonical install
-    if [ -n "${shim_target}" ] && [ -n "${canonical_version}" ] && [ "${shim_target}" != "${canonical}" ]; then
-      if [ "${running_version}" != "${canonical_version}" ]; then
-        _check_fail "shim drift: running=${running_version} but canonical=${canonical_version}" "your \`lattice\` invokes ${shim_target}; the canonical install at ${canonical} is a different version. Fix: repoint shim — \`ln -sfn ${canonical} ${found_path}\` (or re-run install.sh)"
-      else
-        # Same version, different path — acceptable but worth noting
-        _check_warn "shim non-canonical but version matches" "shim at ${found_path} points at ${shim_target}, not canonical ${canonical} — versions agree (${running_version}) for now, but \`lattice update --self\` will update the canonical and silently leave your shim stale"
-      fi
-    fi
-    # Drift case 2: shim version != the script running THIS doctor
-    local self_version="$(current_version 2>/dev/null || echo unknown)"
-    if [ "${running_version}" != "${self_version}" ] && [ -n "${shim_target}" ] && [ "${shim_target}" != "${self_path}" ]; then
-      _check_warn "doctor invoked from different lattice than the shim" "this doctor: ${self_version} (${self_path}); shim invokes: ${running_version} (${shim_target}). Run \`lattice doctor\` (not \`bash <path> doctor\`) to see what users actually get"
+    # Drift case 2: shim version != the script running THIS doctor invocation
+    if [ "${shim_version}" != "${self_version}" ] && [ "${shim_version}" != "unknown" ]; then
+      _check_warn "doctor running from different lattice than the shim" "this doctor: ${self_version} (${self_path}); shim invokes: ${shim_version}. The user's \`lattice doctor\` sees the shim's view; this run sees the dev/canonical view. Run plain \`lattice doctor\` (not via full path) to see what users actually get."
     fi
   else
     # Walk personal-bin candidates and report which are on PATH so the user
@@ -3192,8 +3178,14 @@ cmd_report() {
   title_json="$(_json_escape "${title}")"
   body_json="$(_json_escape "${body}")"
 
+  # v2.1.3 (Part A): include project name so the Worker can tag the GH issue
+  # with `project:<basename>` label. Lets `gh issue list --label project:X`
+  # surface per-project bug pressure across many projects.
+  local project_name; project_name="$(basename "$(pwd)" 2>/dev/null || echo unknown)"
+  local project_json; project_json="$(_json_escape "${project_name}")"
+
   local payload
-  payload="{\"version\":\"${version}\",\"command\":\"report\",\"exit_code\":0,\"os\":\"${os}\",\"msg_fingerprint\":\"${fingerprint}\",\"user_hash\":\"${user_hash}\",\"timestamp\":\"${timestamp}\",\"kind\":\"manual_report\",\"category\":\"${category}\",\"severity\":\"${severity}\",\"title\":${title_json},\"body\":${body_json}}"
+  payload="{\"version\":\"${version}\",\"command\":\"report\",\"exit_code\":0,\"os\":\"${os}\",\"msg_fingerprint\":\"${fingerprint}\",\"user_hash\":\"${user_hash}\",\"timestamp\":\"${timestamp}\",\"kind\":\"manual_report\",\"category\":\"${category}\",\"severity\":\"${severity}\",\"title\":${title_json},\"body\":${body_json},\"project\":${project_json}}"
 
   if [ "${LATTICE_TELEMETRY_DEBUG:-0}" = "1" ]; then
     echo "[${PROG}-report] payload (would send):" >&2
@@ -4747,6 +4739,9 @@ cmd_audit_env_contract() {
   done < <(grep -REn "process\.env\.[A-Z][A-Z0-9_]*[[:space:]]*(\|\||\?\?)[[:space:]]*['\"]" \
             --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' \
             --include='*.mjs' --include='*.cjs' \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+            --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage \
+            --exclude-dir=vendor --exclude-dir=.lattice \
             "${target_path}" 2>/dev/null)
 
   # --- Pattern 3: const { X = 'lit' } = process.env -----------------------
@@ -4768,6 +4763,9 @@ cmd_audit_env_contract() {
     [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
   done < <(grep -REn "\{[^}]*[A-Z][A-Z0-9_]+[[:space:]]*=[[:space:]]*['\"][^'\"]*['\"][^}]*\}[[:space:]]*=[[:space:]]*process\.env" \
             --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+            --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage \
+            --exclude-dir=vendor --exclude-dir=.lattice \
             "${target_path}" 2>/dev/null)
 
   # --- Pattern 5: os.environ.get('X', 'lit') ------------------------------
@@ -4779,6 +4777,9 @@ cmd_audit_env_contract() {
     [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
   done < <(grep -REn "os\.environ\.get\([[:space:]]*['\"][A-Z][A-Z0-9_]*['\"][[:space:]]*,[[:space:]]*['\"]" \
             --include='*.py' \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+            --exclude-dir=build --exclude-dir=__pycache__ --exclude-dir=.venv \
+            --exclude-dir=venv --exclude-dir=vendor --exclude-dir=.lattice \
             "${target_path}" 2>/dev/null)
 
   # --- Pattern 6: String.fromEnvironment('X', defaultValue: 'lit') -------
@@ -4790,6 +4791,8 @@ cmd_audit_env_contract() {
     [ -n "${key}" ] && [ -n "${fallback}" ] && _process_match "${file}" "${line}" "${key}" "${fallback}"
   done < <(grep -REn "String\.fromEnvironment\([[:space:]]*['\"][A-Z][A-Z0-9_]*['\"].*defaultValue" \
             --include='*.dart' \
+            --exclude-dir=.dart_tool --exclude-dir=build --exclude-dir=.git \
+            --exclude-dir=vendor --exclude-dir=.lattice \
             "${target_path}" 2>/dev/null)
 
   # --- Contract-file cross-check (optional, only if docs/env.contract.md
@@ -4800,7 +4803,12 @@ cmd_audit_env_contract() {
     local contract_keys
     contract_keys="$(grep -oE '\b[A-Z][A-Z0-9_]+\b' "${target_path}/docs/env.contract.md" 2>/dev/null | sort -u)"
     local code_keys
-    code_keys="$(grep -REho '\bprocess\.env\.[A-Z][A-Z0-9_]+|os\.environ\.get\(['\''"][A-Z][A-Z0-9_]+|String\.fromEnvironment\(['\''"][A-Z][A-Z0-9_]+' \
+    code_keys="$(grep -REho \
+                 --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+                 --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage \
+                 --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=__pycache__ \
+                 --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.dart_tool \
+                 '\bprocess\.env\.[A-Z][A-Z0-9_]+|os\.environ\.get\(['\''"][A-Z][A-Z0-9_]+|String\.fromEnvironment\(['\''"][A-Z][A-Z0-9_]+' \
                  --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' --include='*.py' --include='*.dart' \
                  "${target_path}" 2>/dev/null \
                  | sed -E 's/.*[\.\(]['\''"]?([A-Z][A-Z0-9_]+).*/\1/' \
@@ -6386,7 +6394,9 @@ jobs:
           cat /tmp/grow-check.json
 
       - name: Post to Telegram
-        if: \${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        # v2.1.3 (#75): GH Actions rejects \`secrets\` in if: expressions
+        # ('Unrecognized named-value'). Always run; formatter exits cleanly
+        # when tokens are absent (per v2.1.0 design).
         env:
           TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
@@ -6394,6 +6404,10 @@ jobs:
         run: |
           export PATH="\$HOME/.local/bin:\$PATH"
           FORMATTER="\$HOME/.claude/lattice/scripts/lattice-grow-telegram.mjs"
+          if [ -z "\${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "\${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::notice::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID secret not set — skipping notification"
+            exit 0
+          fi
           if [ -f "\$FORMATTER" ]; then
             node "\$FORMATTER" < /tmp/grow-check.json
           else
