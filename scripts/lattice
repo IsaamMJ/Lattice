@@ -870,6 +870,8 @@ cmd_close() {
   fi
   local slug
   slug="$(basename "${src}" .yml)"
+  # v2.2: print related-finding nudge before delegating to helper.
+  _close_print_relates_nudge "${src}" || true
   local rc=0
   bash "${HELPER_CLOSE}" "${slug}" "$@" || rc=$?
   # v0.9.11: auto-refresh project CLAUDE.md state block. Quiet, best-effort,
@@ -877,6 +879,135 @@ cmd_close() {
   # a block (no surprise-creation on first close).
   [ "${rc}" -eq 0 ] && _lattice_project_sync_auto
   return "${rc}"
+}
+
+# ---------------------------------------------------------------------------
+# v2.2: cross-reference primitive (#80, #83).
+#
+# `_relates_to_ids <yaml>` — emit each related-finding ID, one per line.
+#     Accepts both shapes:
+#       relates_to:
+#         - HIGH-other-finding              (legacy string form)
+#         - id: HIGH-other-finding          (v2.2 structured form)
+#           kind: blocks
+#           reason: "..."
+#         - {id: HIGH-other-finding, kind: duplicate-of, reason: "..."}
+#
+# `_append_relates_to <yaml> <id> <kind> <reason>` — append a structured entry,
+#     creating the relates_to: block if absent. Idempotent: skips if (id, kind)
+#     pair already present. Reason gets quote-escaped.
+# ---------------------------------------------------------------------------
+_relates_to_ids() {
+  local file="$1"
+  [ -f "${file}" ] || return 0
+  awk '
+    /^relates_to:/ { inr=1; next }
+    inr && /^[a-zA-Z_]/ { inr=0 }
+    inr {
+      # Strip leading whitespace + dash
+      line=$0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      # Flow style: {id: X, kind: ..., reason: ...} OR block style id: X
+      if (match(line, /id:[[:space:]]*"?[A-Za-z0-9_.-]+/)) {
+        s=substr(line, RSTART, RLENGTH)
+        sub(/^id:[[:space:]]*"?/, "", s)
+        print s; next
+      }
+      # Plain string entry
+      if (line ~ /^[A-Z]/) { gsub(/[" ]/, "", line); print line; next }
+    }
+  ' "${file}" 2>/dev/null | awk 'NF && !seen[$0]++'
+}
+
+_append_relates_to() {
+  local file="$1" rid="$2" kind="$3" reason="${4:-}"
+  [ -f "${file}" ] || { echo "[link] target yaml not found: ${file}" >&2; return 1; }
+  # Idempotent: skip if id+kind already present
+  if grep -qE "id:[[:space:]]*\"?${rid}\"?.*kind:[[:space:]]*${kind}" "${file}" 2>/dev/null; then
+    return 0
+  fi
+  local esc_reason="${reason//\"/\\\"}"
+  local entry="  - {id: ${rid}, kind: ${kind}, reason: \"${esc_reason}\"}"
+  if grep -q '^relates_to:' "${file}"; then
+    # Append inside existing block. Find the line range, insert after last item.
+    awk -v entry="${entry}" '
+      BEGIN { ins=0 }
+      { lines[NR]=$0 }
+      /^relates_to:/ { rstart=NR }
+      rstart && NR>rstart && /^[a-zA-Z_]/ && !done { rend=NR-1; done=1 }
+      END {
+        if (!done) rend=NR
+        for (i=1; i<=NR; i++) {
+          print lines[i]
+          if (i==rend) print entry
+        }
+      }
+    ' "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
+  else
+    printf 'relates_to:\n%s\n' "${entry}" >> "${file}"
+  fi
+}
+
+# v2.2 cmd_link — `lattice link <id-a> <id-b> --kind <blocks|duplicate-of>
+# [--reason "..."]`. Writes structured entries to BOTH YAMLs (bidirectional).
+# Default kinds (v2.2 start small): blocks, duplicate-of. More to come.
+cmd_link() {
+  local a="" b="" kind="" reason=""
+  [ "$#" -ge 2 ] || die "link: usage: lattice link <id-a> <id-b> --kind <blocks|duplicate-of> [--reason \"...\"]"
+  a="$1"; b="$2"; shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --kind)   kind="$2"; shift 2 ;;
+      --reason) reason="$2"; shift 2 ;;
+      --help|-h)
+        echo "lattice link <id-a> <id-b> --kind <blocks|duplicate-of> [--reason \"...\"]"
+        echo "  Bidirectional cross-ref between two findings (v2.2 #80 #83)."
+        return 0 ;;
+      *) die "link: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${kind}" ] || die "link: --kind required (blocks | duplicate-of)"
+  case "${kind}" in
+    blocks|duplicate-of) ;;
+    *) die "link: --kind must be one of: blocks, duplicate-of (v2.2 starts narrow; more kinds in v2.3)" ;;
+  esac
+  local fa fb
+  fa="$(locate_finding "${a}" 2>/dev/null)" || die "link: not found: ${a}"
+  fb="$(locate_finding "${b}" 2>/dev/null)" || die "link: not found: ${b}"
+  local slug_a slug_b
+  slug_a="$(basename "${fa}" .yml)"
+  slug_b="$(basename "${fb}" .yml)"
+  [ "${slug_a}" = "${slug_b}" ] && die "link: can't link a finding to itself"
+
+  _append_relates_to "${fa}" "${slug_b}" "${kind}" "${reason}"
+  # Reverse kind for the back-link: duplicate-of is symmetric; blocks reverses
+  # to "blocked-by" — but to stay narrow, reuse `blocks` (the kind is "this
+  # finding has a blocks-relationship with that one"; readers can disambiguate
+  # via id ordering or by looking at the other side). Simpler than introducing
+  # blocked-by in v2.2.
+  _append_relates_to "${fb}" "${slug_a}" "${kind}" "${reason}"
+  echo "[${PROG}] link: ${slug_a} <-${kind}-> ${slug_b}"
+}
+
+# Used by cmd_close before delegating to HELPER_CLOSE — prints related-finding
+# nudge so the maintainer sees blocked/duplicate edges they're about to leave.
+_close_print_relates_nudge() {
+  local src="$1"
+  local ids; ids="$(_relates_to_ids "${src}")"
+  [ -z "${ids}" ] && return 0
+  local rid rfile rtier rstate
+  echo "[${PROG}] cross-references (v2.2):" >&2
+  while IFS= read -r rid; do
+    [ -z "${rid}" ] && continue
+    rfile="$(locate_finding "${rid}" 2>/dev/null || true)"
+    if [ -z "${rfile}" ]; then
+      echo "  🔗 ${rid} (NOT FOUND — stale link)" >&2
+      continue
+    fi
+    rtier="$(yaml_field "${rfile}" "tier" 2>/dev/null || echo '?')"
+    if [[ "${rfile}" == .lattice/findings/closed/* ]]; then rstate="closed"; else rstate="open"; fi
+    echo "  🔗 ${rid} (tier=${rtier}, ${rstate}) — closing this may affect it" >&2
+  done <<< "${ids}"
 }
 
 # ---------------------------------------------------------------------------
@@ -3484,7 +3615,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -7830,6 +7961,7 @@ case "${sub}" in
 esac
 case "${sub}" in
   close)              cmd_close "$@" ;;
+  link)               cmd_link "$@" ;;
   reopen)             cmd_reopen "$@" ;;
   sync|regenerate)    cmd_sync "$@" ;;
   defer)              cmd_defer "$@" ;;
