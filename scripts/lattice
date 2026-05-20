@@ -1420,6 +1420,137 @@ cmd_id_gen() {
 }
 
 # ---------------------------------------------------------------------------
+# v2.2 (#78, #79) — `lattice file --from <multidoc.yml>` — batch finding creation.
+#
+# Reads a YAML file containing one or more findings separated by `---` (YAML
+# multi-doc form). For each doc, computes id via id-gen, validates required
+# fields, writes `.lattice/findings/open/TIER-MODULE-RULE.yml`.
+#
+# Dupe-detect (#79): before writing, scans existing open findings for any
+# whose title-prefix (first 40 chars, lowercased, alphanumeric only) matches.
+# Warns and asks confirmation unless --no-confirm-dup is set.
+#
+# Required fields per doc: tier, dimension, module, rule, file, line, title, fix.
+# ---------------------------------------------------------------------------
+cmd_file() {
+  local input="" no_confirm_dup=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from)            input="$2"; shift 2 ;;
+      --no-confirm-dup)  no_confirm_dup=1; shift ;;
+      --help|-h)
+        cat <<'FILEHELP'
+lattice file --from <multidoc.yml> [--no-confirm-dup]
+
+Batch-create findings from a multi-doc YAML file. Each doc separated by `---`.
+Required fields: tier, dimension, module, rule, file, line, title, fix.
+
+Dupe-detect: warns if a new title's first 40 chars match an existing finding's.
+FILEHELP
+        return 0 ;;
+      *) die "file: unknown arg: $1" ;;
+    esac
+  done
+  [ -n "${input}" ] || die "file: --from <path> required"
+  [ -f "${input}" ] || die "file: not found: ${input}"
+  mkdir -p .lattice/findings/open 2>/dev/null
+
+  # Normalize title for dupe detection: lowercase, alphanumeric only, first 40 chars.
+  _norm_title() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:] ' | tr -s ' ' | head -c 40
+  }
+
+  # Build a list of (normalized-title, slug) for existing open findings.
+  declare -A existing_titles=()
+  local f t
+  shopt -s nullglob
+  for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+    [ -f "${f}" ] || continue
+    t="$(grep -E '^title:[[:space:]]' "${f}" | head -1 | sed -E 's/^title:[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')"
+    [ -z "${t}" ] && continue
+    existing_titles["$(_norm_title "${t}")"]="$(basename "${f}" .yml)"
+  done
+
+  # Split input on `---` lines into per-doc temp files.
+  local tmpdir; tmpdir="$(mktemp -d 2>/dev/null || echo "/tmp/lattice-file-$$")"
+  mkdir -p "${tmpdir}" 2>/dev/null
+  awk -v dir="${tmpdir}" '
+    BEGIN { idx=0; out=dir "/" sprintf("%03d", idx) ".yml" }
+    /^---[[:space:]]*$/ { close(out); idx++; out=dir "/" sprintf("%03d", idx) ".yml"; next }
+    { print > out }
+  ' "${input}"
+
+  local written=0 skipped=0 dupe_prompted=0
+  local doc tier dim mod rule ff line title fix
+  for doc in "${tmpdir}"/*.yml; do
+    [ -s "${doc}" ] || { rm -f "${doc}"; continue; }
+    tier="$(grep -E '^tier:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^tier:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+    dim="$(grep -E '^dimension:[[:space:]]'  "${doc}" | head -1 | sed -E 's/^dimension:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+    mod="$(grep -E '^module:[[:space:]]'     "${doc}" | head -1 | sed -E 's/^module:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+    rule="$(grep -E '^rule:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^rule:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+    ff="$(grep -E '^file:[[:space:]]'        "${doc}" | head -1 | sed -E 's/^file:[[:space:]]*//' | tr -d '"' | tr -d "'")"
+    line="$(grep -E '^line:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^line:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+    title="$(grep -E '^title:[[:space:]]'    "${doc}" | head -1 | sed -E 's/^title:[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')"
+
+    if [ -z "${tier}" ] || [ -z "${mod}" ] || [ -z "${rule}" ] || [ -z "${title}" ]; then
+      echo "[${PROG}] file: skipping doc (missing required fields tier/module/rule/title)" >&2
+      skipped=$((skipped+1))
+      continue
+    fi
+
+    # Dupe detection
+    local norm; norm="$(_norm_title "${title}")"
+    if [ -n "${norm}" ] && [ -n "${existing_titles[${norm}]:-}" ]; then
+      local existing_slug="${existing_titles[${norm}]}"
+      if [ "${no_confirm_dup}" -eq 1 ]; then
+        echo "[${PROG}] file: dupe-skip '${title}' — matches ${existing_slug}" >&2
+        skipped=$((skipped+1))
+        continue
+      fi
+      if [ -t 0 ]; then
+        echo "[${PROG}] file: POSSIBLE DUPE — new title:" >&2
+        echo "  ${title}" >&2
+        echo "  matches existing finding: ${existing_slug}" >&2
+        printf "[${PROG}] write anyway? [y/N] " >&2
+        local ans; read -r ans </dev/tty
+        case "${ans}" in y|Y|yes|YES) ;; *) skipped=$((skipped+1)); continue ;; esac
+      else
+        echo "[${PROG}] file: dupe (non-interactive) — skipping '${title}' (existing: ${existing_slug})" >&2
+        skipped=$((skipped+1))
+        continue
+      fi
+      dupe_prompted=$((dupe_prompted+1))
+    fi
+
+    # Generate id + dest path
+    local id; id="$(cmd_id_gen "${dim:-audit}" "${rule}" "${ff}" "${title}")"
+    local dest=".lattice/findings/open/${tier}-${mod}-${rule}.yml"
+    if [ -f "${dest}" ]; then
+      echo "[${PROG}] file: dest exists, skipping: ${dest}" >&2
+      skipped=$((skipped+1))
+      continue
+    fi
+
+    # Copy the doc; ensure id: is present (override if missing).
+    if grep -qE '^id:[[:space:]]' "${doc}"; then
+      cp "${doc}" "${dest}"
+    else
+      { printf 'id: %s\n' "${id}"; cat "${doc}"; } > "${dest}"
+    fi
+    # Stamp status: open if not present.
+    if ! grep -qE '^status:[[:space:]]' "${dest}"; then
+      printf 'status: open\n' >> "${dest}"
+    fi
+    echo "[${PROG}] file: wrote ${dest}"
+    written=$((written+1))
+    existing_titles["${norm}"]="${tier}-${mod}-${rule}"
+  done
+
+  rm -rf "${tmpdir}" 2>/dev/null
+  echo "[${PROG}] file: ${written} written, ${skipped} skipped (${dupe_prompted} dupe prompts)"
+}
+
+# ---------------------------------------------------------------------------
 # sweep-id — emit <YYYYMMDD><6-hex>. Used by audit skills to tag findings
 # and the sweep manifest with a stable, sortable, collision-resistant ID.
 # ---------------------------------------------------------------------------
@@ -3627,7 +3758,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -8075,6 +8206,7 @@ case "${sub}" in
   validate)           cmd_validate "$@" ;;
   sweeps)             cmd_sweeps "$@" ;;
   sweep-id)           cmd_sweep_id ;;
+  file)               cmd_file "$@" ;;
   id-gen)             cmd_id_gen "$@" ;;
   doctor)             cmd_doctor "$@" ;;
   export)             cmd_export "$@" ;;
