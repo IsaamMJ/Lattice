@@ -29,7 +29,7 @@
  *   LATTICE_SESSION_START_DISABLE=1   instant no-op
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 // ---- Emergency kill switch ----
@@ -171,6 +171,53 @@ function countActiveADRs(root) {
   return { count, top };
 }
 
+// v2.2 (#82): compute deltas since the previous SessionStart fire by reading
+// .lattice/.session-start-last (a single ISO timestamp). Scans recent session
+// jsonl files for close / reopen / report events newer than that timestamp.
+// Returns { since: ISO, opened: N, closed: N, reopened: N, reported: N } or
+// null on first fire (no last marker).
+function readDeltas(root) {
+  try {
+    const markerPath = join(root, '.lattice', '.session-start-last');
+    let since = null;
+    if (existsSync(markerPath)) {
+      since = readFileSync(markerPath, 'utf8').trim();
+    }
+    // Always update marker for next fire — even on first call.
+    const now = new Date().toISOString();
+    try { writeFileSync(markerPath, now); } catch {}
+    if (!since) return null;
+    const sinceMs = Date.parse(since);
+    if (!Number.isFinite(sinceMs)) return null;
+
+    const dir = join(root, '.lattice', 'sessions');
+    if (!existsSync(dir)) return null;
+    let opened = 0, closed = 0, reopened = 0, reported = 0;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      let content;
+      try { content = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+      for (const line of content.split('\n')) {
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        const ts = ev.ts ? Date.parse(ev.ts) : NaN;
+        if (!Number.isFinite(ts) || ts <= sinceMs) continue;
+        switch (ev.cmd) {
+          case 'close':   closed++;   break;
+          case 'reopen':  reopened++; break;
+          case 'report':  reported++; break;
+          // No direct "open" event — findings appear via audit-sweep, which
+          // logs as `audit-sweep` or `write-manifest`. Skip for now.
+        }
+      }
+    }
+    return { since, opened, closed, reopened, reported };
+  } catch {
+    return null;
+  }
+}
+
 function countTodaysSessionEvents(root) {
   try {
     const d = new Date();
@@ -190,6 +237,7 @@ const tiers = countFindingsByTier(cwd);
 const top3 = topFindings(cwd, 3);
 const adrs = countActiveADRs(cwd);
 const events = countTodaysSessionEvents(cwd);
+const deltas = readDeltas(cwd);
 
 // v1.0.2: OK tier counted separately; not part of "actionable" total
 const okCount = tiers.OK || 0;
@@ -234,6 +282,19 @@ if (adrs.count > 0) {
 // Friction (heuristic — event count above threshold)
 if (events > 10) {
   lines.push('- Session log: ' + events + ' events today (run `lattice review` for friction candidates)');
+}
+
+// v2.2 (#82): deltas since last SessionStart fire — surfaces "what changed
+// while I was away" without forcing the user to run `lattice list` first.
+if (deltas) {
+  const parts = [];
+  if (deltas.closed)   parts.push(`${deltas.closed} closed`);
+  if (deltas.reopened) parts.push(`${deltas.reopened} reopened`);
+  if (deltas.reported) parts.push(`${deltas.reported} reported`);
+  if (parts.length > 0) {
+    const sinceDate = deltas.since.replace(/T.*$/, '');
+    lines.push(`- Since last session (${sinceDate}): ${parts.join(', ')}`);
+  }
 }
 
 // Top 3 findings to surface explicitly
