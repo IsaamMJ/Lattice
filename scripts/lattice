@@ -1420,6 +1420,212 @@ cmd_id_gen() {
 }
 
 # ---------------------------------------------------------------------------
+# v2.2 slice F — agent platform.
+#
+# Maintainer reality: Claude Code agents (subagents in `agents/` of a project)
+# are static config. Once shipped, they stay v1 until manually iterated. With
+# many projects, "manually iterate" becomes a chore that never happens.
+#
+# Lattice's contribution: a registry + per-agent feedback log + iterate command
+# that dispatches @claude to read accumulated feedback and propose improvements.
+#
+# Out of scope for v2.2 (defer to v2.3+): telemetry pipeline, friction
+# clustering across projects, automated A/B harness. v2.2 ships the registry +
+# manual-feedback loop only — enough to dogfood the architecture.
+#
+# Subcommands:
+#   lattice agent new <slug> --kind <code-review|trace|scenario|...> --description "..."
+#   lattice agent list
+#   lattice agent show <slug>
+#   lattice agent feedback <slug> --type <bug|enhancement|win|miss> --body "..."
+#   lattice agent iterate <slug> [--apply]    # emit @claude prompt summarizing feedback
+# ---------------------------------------------------------------------------
+cmd_agent() {
+  local action="${1:-list}"; shift || true
+  case "${action}" in
+    new)       _agent_new "$@" ;;
+    list|ls)   _agent_list "$@" ;;
+    show)      _agent_show "$@" ;;
+    feedback)  _agent_feedback "$@" ;;
+    iterate)   _agent_iterate "$@" ;;
+    --help|-h|help)
+      cat <<'AGENTHELP'
+lattice agent — registry + iteration loop for Claude Code subagents (v2.2 slice F)
+
+  new <slug> --kind <kind> --description "..."   register an agent spec
+  list                                            list registered agents
+  show <slug>                                     show one agent (config + feedback count)
+  feedback <slug> --type <bug|enhancement|win|miss> --body "..."
+                                                  append observation to feedback log
+  iterate <slug> [--apply]                        emit a @claude prompt summarizing
+                                                  accumulated feedback (and optionally
+                                                  open a GH issue to dispatch the iteration)
+
+Agents live in .lattice/agents/<slug>.yml; feedback at .lattice/agents/<slug>.feedback.jsonl.
+AGENTHELP
+      ;;
+    *) die "agent: unknown action: ${action} (try: new | list | show | feedback | iterate)" ;;
+  esac
+}
+
+_agent_dir() {
+  mkdir -p .lattice/agents 2>/dev/null
+  printf '.lattice/agents'
+}
+
+_agent_new() {
+  local slug="" kind="" description=""
+  [ "$#" -ge 1 ] || die "agent new: usage: lattice agent new <slug> --kind <kind> --description \"...\""
+  slug="$1"; shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --kind)        kind="$2"; shift 2 ;;
+      --description) description="$2"; shift 2 ;;
+      *) die "agent new: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${kind}" ] || die "agent new: --kind required"
+  [ -n "${description}" ] || die "agent new: --description required"
+  local d; d="$(_agent_dir)"
+  local dest="${d}/${slug}.yml"
+  [ -f "${dest}" ] && die "agent new: already exists: ${dest}"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  {
+    printf 'slug: %s\n' "${slug}"
+    printf 'kind: %s\n' "${kind}"
+    printf 'description: "%s"\n' "${description//\"/\\\"}"
+    printf 'version: 1\n'
+    printf 'created_at: %s\n' "${now}"
+    printf 'iterations: 0\n'
+  } > "${dest}"
+  echo "[${PROG}] agent: registered ${dest}"
+  echo "[${PROG}] next: capture friction via \`lattice agent feedback ${slug} --type miss --body \"...\"\`"
+}
+
+_agent_list() {
+  local d; d="$(_agent_dir)"
+  shopt -s nullglob
+  local files=("${d}"/*.yml)
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo "[${PROG}] agent: no agents registered. Try: lattice agent new <slug> --kind <kind> --description \"...\""
+    return 0
+  fi
+  printf "%-30s %-18s %-9s %s\n" "SLUG" "KIND" "VERSION" "FEEDBACK"
+  local f slug kind version fblog count
+  for f in "${files[@]}"; do
+    slug="$(yaml_field "${f}" "slug" 2>/dev/null || basename "${f}" .yml)"
+    kind="$(yaml_field "${f}" "kind" 2>/dev/null || echo '?')"
+    version="$(yaml_field "${f}" "version" 2>/dev/null || echo '?')"
+    fblog="${d}/${slug}.feedback.jsonl"
+    count=0
+    [ -f "${fblog}" ] && count="$(wc -l < "${fblog}" | tr -d '[:space:]')"
+    printf "%-30s %-18s v%-8s %s\n" "${slug}" "${kind}" "${version}" "${count}"
+  done
+}
+
+_agent_show() {
+  [ "$#" -ge 1 ] || die "agent show: usage: lattice agent show <slug>"
+  local slug="$1"
+  local d; d="$(_agent_dir)"
+  local f="${d}/${slug}.yml"
+  [ -f "${f}" ] || die "agent show: not found: ${f}"
+  cat "${f}"
+  local fblog="${d}/${slug}.feedback.jsonl"
+  if [ -f "${fblog}" ]; then
+    local n; n="$(wc -l < "${fblog}" | tr -d '[:space:]')"
+    echo "---"
+    echo "feedback entries: ${n}"
+    echo "tail:"
+    tail -3 "${fblog}" | sed 's/^/  /'
+  fi
+}
+
+_agent_feedback() {
+  [ "$#" -ge 1 ] || die "agent feedback: usage: lattice agent feedback <slug> --type <bug|enhancement|win|miss> --body \"...\""
+  local slug="$1"; shift
+  local type="" body=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --type) type="$2"; shift 2 ;;
+      --body) body="$2"; shift 2 ;;
+      *) die "agent feedback: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${type}" ] || die "agent feedback: --type required"
+  [ -n "${body}" ] || die "agent feedback: --body required"
+  case "${type}" in bug|enhancement|win|miss) ;; *) die "agent feedback: --type must be bug|enhancement|win|miss" ;; esac
+  local d; d="$(_agent_dir)"
+  local f="${d}/${slug}.yml"
+  [ -f "${f}" ] || die "agent feedback: agent not registered: ${slug} (try lattice agent new)"
+  local fblog="${d}/${slug}.feedback.jsonl"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # JSON-escape body
+  local esc; esc="$(json_escape "${body}")"
+  printf '{"ts":"%s","type":"%s","body":"%s"}\n' "${now}" "${type}" "${esc}" >> "${fblog}"
+  echo "[${PROG}] agent feedback: ${slug} <- ${type} (${fblog})"
+}
+
+_agent_iterate() {
+  [ "$#" -ge 1 ] || die "agent iterate: usage: lattice agent iterate <slug> [--apply]"
+  local slug="$1"; shift
+  local apply=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1; shift ;;
+      *) die "agent iterate: unknown flag: $1" ;;
+    esac
+  done
+  local d; d="$(_agent_dir)"
+  local f="${d}/${slug}.yml"
+  [ -f "${f}" ] || die "agent iterate: agent not registered: ${slug}"
+  local fblog="${d}/${slug}.feedback.jsonl"
+  if [ ! -s "${fblog}" ]; then
+    echo "[${PROG}] agent iterate: no feedback yet for ${slug} — nothing to dispatch"
+    echo "[${PROG}] capture observations first: lattice agent feedback ${slug} --type miss --body \"...\""
+    return 0
+  fi
+  local kind description
+  kind="$(yaml_field "${f}" "kind")"
+  description="$(yaml_field "${f}" "description")"
+  local n; n="$(wc -l < "${fblog}" | tr -d '[:space:]')"
+
+  # Build the @claude prompt
+  local prompt; prompt="$(cat <<EOF
+@claude iterate agent \`${slug}\` (kind=${kind}, ${n} feedback entries).
+
+**Current description:** ${description}
+
+**Accumulated feedback:**
+\`\`\`
+$(cat "${fblog}")
+\`\`\`
+
+**Ask:** read this project's existing agent definition (commonly \`agents/${slug}.md\` or
+\`.claude/agents/${slug}.md\`), study the feedback above, and open a PR proposing the
+minimum changes that address the patterns you see. Bump the \`version\` field in
+\`.lattice/agents/${slug}.yml\` after applying. If the feedback is contradictory or
+unclear, post a comment listing the conflicts and stop.
+EOF
+)"
+  if [ "${apply}" -eq 1 ]; then
+    if ! command -v gh >/dev/null 2>&1; then
+      die "agent iterate --apply: gh CLI required to file the iteration issue"
+    fi
+    local title="@claude iterate agent ${slug} (${n} feedback entries)"
+    echo "[${PROG}] agent iterate: filing iteration issue via gh ..."
+    if gh issue create -t "${title}" -b "${prompt}" -l lattice-agent-iterate 2>&1; then
+      echo "[${PROG}] agent iterate: dispatched. @claude will read feedback and open a PR."
+    else
+      die "agent iterate: gh issue create failed"
+    fi
+  else
+    echo "${prompt}"
+    echo ""
+    echo "[${PROG}] agent iterate: above is the @claude prompt. To dispatch as a GH issue, re-run with --apply."
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # v2.2 (#78, #79) — `lattice file --from <multidoc.yml>` — batch finding creation.
 #
 # Reads a YAML file containing one or more findings separated by `---` (YAML
@@ -3758,7 +3964,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -8192,6 +8398,7 @@ case "${sub}" in
   uninstall)          cmd_uninstall "$@" ;;
   setup)              cmd_setup "$@" ;;
   onboard)            cmd_onboard "$@" ;;
+  agent)              cmd_agent "$@" ;;
   ci-check-dead)      cmd_ci_check_dead "$@" ;;
   release-notes)      cmd_release_notes "$@" ;;
   normalize)          cmd_normalize "$@" ;;

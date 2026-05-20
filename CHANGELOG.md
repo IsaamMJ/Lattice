@@ -2,6 +2,21 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-05-20
+
+**Slice F shipped — agent platform (minimal).** Closes the v2.2 design doc's last open slice in the same session as v2.2.0.
+
+### Added
+- **`lattice agent`** subsystem — registry + per-agent feedback log + iteration dispatch:
+  - `lattice agent new <slug> --kind <kind> --description "..."` — register an agent spec at `.lattice/agents/<slug>.yml`.
+  - `lattice agent list` — table of slug / kind / version / feedback count.
+  - `lattice agent show <slug>` — print agent yaml + tail of feedback log.
+  - `lattice agent feedback <slug> --type <bug|enhancement|win|miss> --body "..."` — append observation to `.lattice/agents/<slug>.feedback.jsonl`.
+  - `lattice agent iterate <slug> [--apply]` — emit a `@claude` prompt summarizing accumulated feedback. `--apply` opens a GH issue (label: `lattice-agent-iterate`) so the @claude GitHub App reads the feedback and opens an iteration PR.
+
+### Scope (deliberately narrow)
+- Out of scope for v2.2.1 (defer to v2.3+): cross-project telemetry pipeline, automatic friction clustering across agents, A/B harness. v2.2.1 ships the registry + manual-feedback loop only — the mechanism that turns Claude Code subagents from static-config-forever into something that iterates against real friction.
+
 ## [2.2.0] — 2026-05-20
 
 **Autonomous loop closure + multi-project setup collapse.** v2.1 made measurement autonomous (cron → Telegram digest). v2.2 closes the loop on action (close / rollback) and collapses per-project setup from ~3h to ~30s.
