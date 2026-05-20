@@ -3381,28 +3381,40 @@ cmd_install_hooks() {
   local hooks_dir="${git_dir}/hooks"
   mkdir -p "${hooks_dir}"
 
-  # Find source: project-local sibling first, then global install.
-  local src=""
-  for candidate in \
-      "${SELF_DIR}/post-commit-resolve-pending.sh" \
-      "${HOME}/.claude/lattice/scripts/post-commit-resolve-pending.sh"; do
-    if [ -f "${candidate}" ]; then src="${candidate}"; break; fi
-  done
-  [ -z "${src}" ] && die "install-hooks: could not find post-commit-resolve-pending.sh (tried ${SELF_DIR}/ and ~/.claude/lattice/scripts/)"
-
-  local dest="${hooks_dir}/post-commit"
-  if [ -f "${dest}" ] && [ "${force}" -ne 1 ]; then
-    if grep -q 'post-commit-resolve-pending\|lattice resolve-pending' "${dest}" 2>/dev/null; then
-      echo "[${PROG}] install-hooks: post-commit already installed (matches Lattice hook). nothing to do."
+  # Helper: install one hook by source basename + dest hook name + match-pattern
+  _install_one_hook() {
+    local src_name="$1" dest_name="$2" match_pat="$3"
+    local src=""
+    for candidate in \
+        "${SELF_DIR}/${src_name}" \
+        "${HOME}/.claude/lattice/scripts/${src_name}"; do
+      if [ -f "${candidate}" ]; then src="${candidate}"; break; fi
+    done
+    if [ -z "${src}" ]; then
+      echo "[${PROG}] install-hooks: ${src_name} not found — skipping ${dest_name}"
       return 0
     fi
-    die "install-hooks: ${dest} exists and is not the Lattice hook (use --force to overwrite)"
-  fi
+    local dest="${hooks_dir}/${dest_name}"
+    if [ -f "${dest}" ] && [ "${force}" -ne 1 ]; then
+      if grep -q "${match_pat}" "${dest}" 2>/dev/null; then
+        echo "[${PROG}] install-hooks: ${dest_name} already Lattice-managed — nothing to do"
+        return 0
+      fi
+      echo "[${PROG}] install-hooks: ${dest} exists and is not the Lattice hook (use --force to overwrite) — skipping"
+      return 0
+    fi
+    cp "${src}" "${dest}"
+    chmod +x "${dest}" 2>/dev/null || true
+    echo "[${PROG}] install-hooks: installed ${dest}"
+  }
 
-  cp "${src}" "${dest}"
-  chmod +x "${dest}" 2>/dev/null || true
-  echo "[${PROG}] install-hooks: installed ${dest}"
-  echo "[${PROG}] uninstall: rm ${dest}"
+  # post-commit (existing — resolve-pending)
+  _install_one_hook "post-commit-resolve-pending.sh" "post-commit" 'post-commit-resolve-pending\|lattice resolve-pending'
+
+  # v2.2 (#84): prepare-commit-msg — verify-on-commit hint
+  _install_one_hook "prepare-commit-msg-lattice.sh" "prepare-commit-msg" 'prepare-commit-msg-lattice\|Lattice prepare-commit-msg'
+
+  echo "[${PROG}] install-hooks: uninstall manually with: rm ${hooks_dir}/post-commit ${hooks_dir}/prepare-commit-msg"
 }
 
 # ---------------------------------------------------------------------------
