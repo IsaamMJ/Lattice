@@ -250,6 +250,16 @@ function createServer() {
           .optional()
           .describe("One-line rationale for the close (recommended for false-positive/wont-fix)."),
         pr: z.string().optional().describe("PR number if the close is tied to a PR."),
+        // v2.2.5 (#96): programmatic confirmation. The destructiveHint
+        // annotation is advisory — hosts may surface it or not. This makes
+        // confirmation a precondition the LLM has to actively pass through
+        // (it must be `true`), giving the user a chance to intervene if
+        // their host auto-runs destructive tools.
+        confirm: z
+          .literal(true)
+          .describe(
+            "MUST be true. Programmatic confirmation gate — the assistant must explicitly attest the user authorized this close. Hosts that auto-run destructive tools without surfacing the destructiveHint annotation will be blocked here."
+          ),
       },
       annotations: {
         readOnlyHint: false,
@@ -258,7 +268,12 @@ function createServer() {
         idempotentHint: false,
       },
     },
-    async ({ id, reason, commit, pending, rationale, pr }) => {
+    async ({ id, reason, commit, pending, rationale, pr, confirm }) => {
+      if (confirm !== true) {
+        return asError(
+          "close_finding: refused. Pass confirm: true after explicit user authorization."
+        );
+      }
       const args = ["close", id, "--reason", reason];
       if (reason === "fixed") {
         if (pending) {

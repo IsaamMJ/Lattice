@@ -212,9 +212,21 @@ if [ "${PARTIAL_MODE}" -eq 1 ]; then
     new_list="${COMMIT}"
   fi
 
-  # Strip status / partial_commits / remaining lines, then re-emit canonical block
-  tmp="$(mktemp)"
-  grep -v -E '^(status|partial_commits|remaining)[[:space:]]*:|^# Triage \(set by lattice-close\.sh --partial\)$' "${SRC}" > "${tmp}" || true
+  # v2.2.5 (#88): strip status / partial_commits / remaining (incl. block
+  # scalar continuations) via the same awk state machine the full-close path
+  # uses. Previous grep -v left the indented body of `remaining: |` orphaned
+  # in the YAML, corrupting structure on every subsequent partial-close.
+  tmp="$(mktemp 2>/dev/null || echo "${SRC}.tmp.$$")"
+  awk '
+    BEGIN { skip_block=0 }
+    /^(status|partial_commits|remaining)[[:space:]]*:[[:space:]]*[|>]/ { skip_block=1; next }
+    skip_block && /^[[:space:]]/ { next }
+    skip_block && /^$/ { next }
+    skip_block { skip_block=0 }
+    /^(status|partial_commits|remaining)[[:space:]]*:/ { next }
+    /^# Triage \(set by lattice-close\.sh --partial\)$/ { next }
+    { print }
+  ' "${SRC}" > "${tmp}" || true
   mv "${tmp}" "${SRC}"
 
   {

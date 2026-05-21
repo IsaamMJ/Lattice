@@ -580,9 +580,18 @@ if (checkMode) {
   }
 }
 
+// v2.2.5 (#93): atomic write via temp + rename + signal cleanup, so Ctrl-C
+// during the write doesn't leave CLAUDE.md truncated.
+const _claudeTmp = claudeMdPath + '.tmp.' + process.pid;
+const _cleanupTmp = () => { try { fs.unlinkSync(_claudeTmp); } catch {} };
+process.on('SIGINT',  () => { _cleanupTmp(); process.exit(130); });
+process.on('SIGTERM', () => { _cleanupTmp(); process.exit(143); });
+process.on('SIGHUP',  () => { _cleanupTmp(); process.exit(129); });
 try {
-  fs.writeFileSync(claudeMdPath, newClaude);
+  fs.writeFileSync(_claudeTmp, newClaude);
+  fs.renameSync(_claudeTmp, claudeMdPath);
 } catch (e) {
+  _cleanupTmp();
   if (e.code === 'EACCES' || e.code === 'EPERM') {
     console.error(`[lattice-regenerate] error: ${claudeMdPath} is not writable (${e.code}). Check file permissions.`);
   } else {

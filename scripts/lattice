@@ -45,6 +45,10 @@ _resolve_helper() {
 HELPER_CLOSE="$(_resolve_helper lattice-close.sh)"
 HELPER_REOPEN="$(_resolve_helper lattice-reopen.sh)"
 HELPER_REGEN="$(_resolve_helper lattice-regenerate.sh)"
+# v2.2.5 (#98): Node-backed yaml_field fast-path. Path resolved here so the
+# yaml_field hot loop doesn't re-resolve on every call.
+_YAML_HELPER="$(_resolve_helper lattice-yaml.mjs)"
+[ -f "${_YAML_HELPER}" ] || _YAML_HELPER=""
 
 PROG="lattice"
 
@@ -789,11 +793,17 @@ yaml_field() {
   case "${key}" in
     *[!A-Za-z0-9_]*|"") echo "[yaml_field] refusing invalid key: ${key}" >&2; return 1 ;;
   esac
+  # v2.2.5 (#98): Node fast-path — one fork/exec for the whole call, no
+  # grep|sed pipeline. On Windows + Git Bash this is ~10× faster per call
+  # and reduces 1000-fork lattice list invocations to ~100. Fall back to
+  # the legacy shell pipeline only if Node or the helper isn't available.
+  if [ -z "${LATTICE_YAML_FORCE_LEGACY:-}" ] && [ -n "${_YAML_HELPER:-}" ] && command -v node >/dev/null 2>&1; then
+    node "${_YAML_HELPER}" "${file}" "${key}" 2>/dev/null
+    return 0
+  fi
   local line
   line=$(grep -E "^${key}[[:space:]]*:" "${file}" 2>/dev/null | head -n1 || true)
   [ -z "${line}" ] && return 0
-  # Strip trailing \r so CRLF-encoded YAML (Windows editors) doesn't poison
-  # string comparisons everywhere. Then strip quote pair if it wraps the value.
   line="${line%$'\r'}"
   printf '%s' "${line}" | sed -E "s/^${key}[[:space:]]*:[[:space:]]*//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/" | tr -d '\r'
 }
@@ -2245,6 +2255,10 @@ cmd_verify() {
     echo "[${PROG}] hint: pass --run to execute these steps"
   else
     echo "Running verification steps:"
+    # v2.2.5 (#95): replace `eval` (parent shell) with `bash -c` in a fresh
+    # subshell. Steps can't mutate the verify session's variables, cd, or
+    # backdoor later commands. Still allows YAML-driven shell — that's by
+    # design — but contains blast radius.
     local i=0 failed=0
     while IFS= read -r step; do
       [ -z "${step}" ] && continue
@@ -2253,7 +2267,7 @@ cmd_verify() {
       echo "  [${i}] \$ ${step}"
       step="${step#\"}"; step="${step%\"}"
       step="${step#\'}"; step="${step%\'}"
-      if ! eval "${step}"; then
+      if ! ( bash -c "${step}" ); then
         echo "  [FAIL] step ${i} exited non-zero"
         failed=$((failed + 1))
       fi
@@ -4606,6 +4620,17 @@ _lattice_md_apply() {
 
   local new_block
   new_block="$(_lattice_md_block)"
+
+  # v2.2.5 (#97): refuse if target is a symlink (or a dangling symlink).
+  # Shell `>` redirection follows symlinks, so a dangling
+  # ~/.claude/CLAUDE.md -> ~/.ssh/authorized_keys would have us writing the
+  # onboarding block into authorized_keys. Loud bail.
+  if [ -L "${target}" ]; then
+    local link_dest; link_dest="$(readlink "${target}" 2>/dev/null || echo '?')"
+    echo "[${PROG}] refusing: ${target} is a symlink -> ${link_dest}" >&2
+    echo "[${PROG}] resolve manually before re-running claude-md-tune" >&2
+    return 1
+  fi
 
   if [ ! -f "${target}" ]; then
     # New file — block at top + trailing newline for user content
@@ -7911,28 +7936,37 @@ for (const file of walk(root)) {
   console.log([status, file, expectedPath, currentId || "(missing)", correctId].join("|"));
 
   if (apply) {
-    // Rewrite id in YAML (replace or insert)
-    let next;
-    if (/^id:\s*/m.test(text)) {
-      next = text.replace(/^id:\s*.*$/m, `id: ${correctId}`);
+    // v2.2.5 (#94): on collision, do NOT rewrite the id of the source file.
+    // Previous behavior orphaned the file under a non-canonical name with a
+    // freshly-rewritten id — silent corruption. Now: skip both writes and
+    // emit the collision so the operator sees it.
+    if (nameMismatch && fs.existsSync(expectedPath) && expectedPath !== file) {
+      console.log(["skip-rename-collision", file, expectedPath, "", ""].join("|"));
+      console.error(`[normalize] COLLISION: ${file} should rename to ${expectedPath} (already exists). Skipping BOTH id-rewrite and rename — resolve manually.`);
+      collisionCount = (typeof collisionCount === "undefined" ? 1 : collisionCount + 1);
     } else {
-      // Insert id: as first key if missing
-      next = `id: ${correctId}\n${text.replace(/^﻿/, "")}`;
-    }
-    // Atomic write to current path, then rename
-    fs.writeFileSync(file, next, "utf8");
-    if (nameMismatch) {
-      // Don't clobber a different existing file at expectedPath
-      if (!fs.existsSync(expectedPath)) {
-        fs.renameSync(file, expectedPath);
+      // Rewrite id in YAML (replace or insert)
+      let next;
+      if (/^id:\s*/m.test(text)) {
+        next = text.replace(/^id:\s*.*$/m, `id: ${correctId}`);
       } else {
-        console.log(["skip-rename-collision", file, expectedPath, "", ""].join("|"));
+        next = `id: ${correctId}\n${text.replace(/^﻿/, "")}`;
+      }
+      fs.writeFileSync(file, next, "utf8");
+      if (nameMismatch) {
+        fs.renameSync(file, expectedPath);
       }
     }
   }
 }
 
 console.log(`# total changes: ${changes}`);
+// v2.2.5 (#94): non-zero exit when any collision was skipped, so callers
+// (CI, scripts) don't think normalize ran cleanly.
+if (typeof collisionCount !== "undefined" && collisionCount > 0) {
+  console.error(`[normalize] ${collisionCount} unresolved collision(s) — exiting 3`);
+  process.exit(3);
+}
 NODEJS
 )"
 

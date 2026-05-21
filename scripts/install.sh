@@ -7,7 +7,7 @@ set -euo pipefail
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
 COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close")
-SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh" "prepare-commit-msg-lattice.sh" "post-commit-resolve-pending.sh" "lattice-statusline.mjs" "lattice-session-start.mjs" "lattice-stop.mjs" "lattice-grow-telegram.mjs")
+SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh" "prepare-commit-msg-lattice.sh" "post-commit-resolve-pending.sh" "lattice-statusline.mjs" "lattice-session-start.mjs" "lattice-stop.mjs" "lattice-grow-telegram.mjs" "lattice-yaml.mjs")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
 DEST="${HOME}/.claude/commands"
@@ -24,6 +24,64 @@ fetch() {
     echo "[lattice] error: need curl or wget" >&2
     exit 1
   fi
+}
+
+# v2.2.5 (#91): supply-chain integrity. After fetching all files, download
+# SHA256SUMS from the same ref and verify every script we just installed.
+# If the manifest is absent (early ref / mirror lag) we WARN but continue —
+# this is opt-in hardening, not a hard block, because the install-time fetch
+# is already over HTTPS. Future v2.3: refuse install without checksums.
+SHA_MANIFEST_URL="${RAW}/SHA256SUMS"
+SHA_MANIFEST="${TMPDIR:-/tmp}/lattice-SHA256SUMS.$$"
+verify_checksums() {
+  if ! fetch "${SHA_MANIFEST_URL}" "${SHA_MANIFEST}" 2>/dev/null; then
+    echo "[lattice] WARN: SHA256SUMS not reachable — install proceeded WITHOUT integrity verification."
+    echo "[lattice]       Source: ${RAW}/SHA256SUMS"
+    return 0
+  fi
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    echo "[lattice] WARN: sha256sum/shasum not available — skipping integrity verification."
+    return 0
+  fi
+  local bad=0
+  while IFS= read -r line; do
+    [ -z "${line}" ] && continue
+    case "${line}" in '#'*) continue ;; esac
+    # Line shapes (sha256sum output): "<hex>  path" (text mode) or
+    # "<hex> *path" (binary mode). Parse both.
+    local expected_hash="${line%% *}"
+    local rest="${line#* }"
+    local relpath="${rest# }"           # strip extra spaces
+    relpath="${relpath#\*}"             # strip leading * if binary mode
+    # Map relpath → installed path
+    local installed=""
+    case "${relpath}" in
+      scripts/*) installed="${SCRIPT_DEST}/${relpath#scripts/}" ;;
+      commands/*) installed="${DEST}/${relpath#commands/}" ;;
+      docs/*)    installed="${DOC_DEST}/${relpath#docs/}" ;;
+      *)         continue ;;
+    esac
+    [ -f "${installed}" ] || continue
+    local actual_hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual_hash="$(sha256sum "${installed}" | awk '{print $1}')"
+    else
+      actual_hash="$(shasum -a 256 "${installed}" | awk '{print $1}')"
+    fi
+    if [ "${actual_hash}" != "${expected_hash}" ]; then
+      echo "[lattice] !!! integrity check FAILED for ${relpath}"
+      echo "[lattice]     expected: ${expected_hash}"
+      echo "[lattice]     got:      ${actual_hash}"
+      bad=$((bad + 1))
+    fi
+  done <"${SHA_MANIFEST}"
+  rm -f "${SHA_MANIFEST}"
+  if [ "${bad}" -gt 0 ]; then
+    echo "[lattice] !!! ${bad} file(s) failed checksum verification — REMOVING install."
+    rm -rf "${DEST}/audit.md" "${DEST}/audit-sweep.md" "${SCRIPT_DEST}"
+    exit 2
+  fi
+  echo "[lattice] integrity: all files verified against SHA256SUMS"
 }
 
 mkdir -p "${DEST}" "${SCRIPT_DEST}" "${DOC_DEST}"
@@ -50,6 +108,9 @@ for d in "${DOCS[@]}"; do
     echo "[lattice]   docs/${d} (skipped — not present in repo yet)"
   fi
 done
+
+# v2.2.5 (#91): integrity verification after all files are on disk.
+verify_checksums
 
 # Version sentinel — lets `lattice --version` (and update.sh) report what's installed
 mkdir -p "${HOME}/.claude/lattice"

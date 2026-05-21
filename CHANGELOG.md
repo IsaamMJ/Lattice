@@ -2,6 +2,30 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.5] — 2026-05-21
+
+**Closes 10 bugs from external review pass. 4 HIGH (incl. 2 security + 1 corruption + 1 perf), 5 MED, 1 LOW.**
+
+### Fixed (HIGH)
+- **#88 — `close.sh --partial` orphaned block-scalar lines, corrupting YAML.** Strip pass now uses the same awk state-machine the full-close path uses (handles `remaining: |` continuation lines).
+- **#90 — Worker has no rate limiting → DoS spam 100k GH issues.** IP-based KV-backed limiter: 30 req/hour/IP global, 5 manual_report/day/IP. Hits 429 with `Retry-After`. No new infra.
+- **#91 — `curl | bash` install has no integrity verification → supply-chain RCE.** New `SHA256SUMS` manifest at repo root; install.sh fetches + verifies every installed file. Mismatch wipes the install and exits 2. Backwards-compatible: missing manifest = warning, not block (v2.3 will make it a hard block).
+- **#98 — `yaml_field` fork tax (supersedes #87).** New `scripts/lattice-yaml.mjs` Node helper: single fork/exec per call instead of `grep | sed`. Backward-compatible bash fallback via `LATTICE_YAML_FORCE_LEGACY=1`. On Windows + Git Bash this should drop `lattice list` from ~50s to ~5s on 100-finding projects.
+
+### Fixed (MED)
+- **#92 — `prepare-commit-msg-lattice.sh` regex injection.** Staged paths went straight into `grep -E` — Next.js `[id]/page.tsx` files silently skipped (regex treats `[id]` as charclass), files with `(...)` exited grep with parser error. Now: string-compare normalized `file:` values, no regex.
+- **#93 — `lattice-regenerate.sh` non-atomic write.** Ctrl-C during regen left CLAUDE.md truncated. Now: write to `.tmp.$$`, rename. SIGINT/SIGTERM/SIGHUP handlers clean up the tmp.
+- **#94 — `normalize --apply` silent collision skip.** Used to rewrite ids of orphaned files. Now: refuse the rewrite when destination exists, log clearly, exit 3 if any unresolved collision.
+- **#95 — `verify --run` `eval ${step}` in parent shell.** Steps could mutate verify session state. Now: `bash -c "${step}"` in subshell, contained blast radius.
+- **#96 — MCP `close_finding` no programmatic confirm gate.** Added required `confirm: z.literal(true)` field. Hosts that auto-run destructive tools bypassing `destructiveHint` annotation now get refused at the schema layer.
+
+### Fixed (LOW)
+- **#97 — `_lattice_md_apply` follows symlinks.** Dangling `~/.claude/CLAUDE.md` → arbitrary file could be overwritten on `claude-md-tune --apply`. Now: `[ -L target ]` check refuses with a clear "resolve manually" message.
+
+### Process notes
+- All 10 fixes shipped in one release, no partial-ship — each is independently testable.
+- v2.2 cumulative count: 2 days, 8 releases, 22 issues closed (5 HIGH security/corruption fixed since v2.2.0 ship). The stress-audit + auto-action loop is paying for itself.
+
 ## [2.2.4] — 2026-05-21
 
 **Closes HIGH #86 — header `${VAR}` env-var exfiltration.** Same shape as the v2.2 cmd: RCE: a hypothesis YAML in any PR could include `Authorization: "Bearer ${ANTHROPIC_API_KEY}"` and the next `lattice grow measure` run would exfiltrate the token to whatever URL the YAML chose. Default-deny now.

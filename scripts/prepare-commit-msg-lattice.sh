@@ -30,19 +30,20 @@ esac
 staged="$(git diff --cached --name-only 2>/dev/null || true)"
 [ -z "${staged}" ] && exit 0
 
-# Build a regex of staged files. Escape regex metachars. One per line.
-# Then scan findings for `file:` lines matching any staged path.
+# Scan findings for `file:` lines matching any staged path. v2.2.5 (#92): use
+# fgrep -F (literal) instead of grep -E (regex) so paths containing `.`, `[`,
+# `(` etc. (e.g. Next.js `[id]/page.tsx`) match correctly. We compare the
+# stripped value of `file:` to the staged path as plain strings.
 matches=""
 while IFS= read -r f; do
   [ -z "${f}" ] && continue
-  # Only look at YAMLs in findings/open. Match `file:` field exactly.
   for yml in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
     [ -f "${yml}" ] || continue
-    # `file:` field — accept quoted or unquoted, exact match on the staged path
-    if grep -qE "^file:[[:space:]]*[\"']?${f}[\"']?[[:space:]]*\$" "${yml}" 2>/dev/null; then
+    # Extract `file:` value (first match), strip surrounding quotes + whitespace.
+    val="$(grep -E '^file:[[:space:]]' "${yml}" | head -1 | sed -E 's/^file:[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/' | tr -d '\r' | sed -E 's/[[:space:]]*$//')"
+    if [ "${val}" = "${f}" ]; then
       slug="$(basename "${yml}" .yml)"
-      # Get tier for sorting/printing
-      tier="$(grep -E '^tier:[[:space:]]' "${yml}" | head -1 | sed -E 's/^tier:[[:space:]]*//' | tr -d '[:space:]')"
+      tier="$(grep -E '^tier:[[:space:]]' "${yml}" | head -1 | sed -E 's/^tier:[[:space:]]*//' | tr -d '[:space:]\r')"
       matches="${matches}${tier:-?}|${slug}"$'\n'
     fi
   done
