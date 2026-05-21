@@ -231,6 +231,83 @@ function readDeltas(root) {
   }
 }
 
+// v2.4.0 (#89): fleet-status — count CRITICAL/HIGH findings across ALL
+// registered projects (other than the current one). Lets the SessionStart
+// context surface "CRITICAL open elsewhere" without forcing a context switch.
+function readFleetStatus(currentRoot) {
+  try {
+    // Registry location: env > XDG_CONFIG_HOME > ~/.claude/lattice
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    const xdg = process.env.XDG_CONFIG_HOME || (home + '/.config');
+    const candidates = [
+      process.env.LATTICE_PROJECTS_REGISTRY,
+      xdg + '/lattice/projects.yml',
+      home + '/.claude/lattice/projects.yml',
+    ].filter(Boolean);
+    let registryPath = null;
+    for (const p of candidates) {
+      if (existsSync(p)) { registryPath = p; break; }
+    }
+    if (!registryPath) return null;
+
+    const content = readFileSync(registryPath, 'utf8');
+    // Minimal YAML parse — just enough to extract name+path pairs.
+    const projects = [];
+    let curName = null;
+    for (const raw of content.split('\n')) {
+      const line = raw.replace(/\r$/, '');
+      const m1 = line.match(/^\s*- name:\s*(.+)$/);
+      const m2 = line.match(/^\s+name:\s*(.+)$/);
+      const mp = line.match(/^\s+path:\s*(.+)$/);
+      if (m1) { curName = m1[1].trim().replace(/^["']|["']$/g, ''); continue; }
+      if (m2) { curName = m2[1].trim().replace(/^["']|["']$/g, ''); continue; }
+      if (mp && curName) {
+        const p = mp[1].trim().replace(/^["']|["']$/g, '').replace(/^~/, home);
+        projects.push({ name: curName, path: p });
+        curName = null;
+      }
+    }
+
+    let critElsewhere = 0, highElsewhere = 0;
+    const elsewhereProjects = [];
+    for (const proj of projects) {
+      // Skip the current project — that's already covered above.
+      try {
+        const a = require('node:path').resolve(proj.path);
+        const b = require('node:path').resolve(currentRoot);
+        if (a === b) continue;
+      } catch {}
+      const openDir = proj.path + '/.lattice/findings/open';
+      if (!existsSync(openDir)) continue;
+      let projCrit = 0, projHigh = 0;
+      const walk = (d) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const fp = d + '/' + e.name;
+          if (e.isDirectory()) walk(fp);
+          else if (e.isFile() && e.name.endsWith('.yml')) {
+            try {
+              const c = readFileSync(fp, 'utf8');
+              const m = c.match(/^tier:\s*(\w+)/m);
+              if (!m) continue;
+              if (m[1] === 'CRITICAL' || m[1] === 'BLOCKER') projCrit++;
+              else if (m[1] === 'HIGH') projHigh++;
+            } catch {}
+          }
+        }
+      };
+      try { walk(openDir); } catch {}
+      critElsewhere += projCrit;
+      highElsewhere += projHigh;
+      if (projCrit > 0 || projHigh > 0) {
+        elsewhereProjects.push({ name: proj.name, crit: projCrit, high: projHigh });
+      }
+    }
+    return { critElsewhere, highElsewhere, projects: elsewhereProjects };
+  } catch {
+    return null;
+  }
+}
+
 function countTodaysSessionEvents(root) {
   try {
     const d = new Date();
@@ -251,6 +328,7 @@ const top3 = topFindings(cwd, 3);
 const adrs = countActiveADRs(cwd);
 const events = countTodaysSessionEvents(cwd);
 const deltas = readDeltas(cwd);
+const fleet = readFleetStatus(cwd);
 
 // v1.0.2: OK tier counted separately; not part of "actionable" total
 const okCount = tiers.OK || 0;
@@ -295,6 +373,17 @@ if (adrs.count > 0) {
 // Friction (heuristic — event count above threshold)
 if (events > 10) {
   lines.push('- Session log: ' + events + ' events today (run `lattice review` for friction candidates)');
+}
+
+// v2.4.0 (#89): fleet status — if any OTHER registered project has open
+// CRITICAL/HIGH findings, surface that before the user picks up this
+// project's work. Stops the "context switch to project A while project B
+// has a CRITICAL unattended" scenario.
+if (fleet && (fleet.critElsewhere > 0 || fleet.highElsewhere > 0)) {
+  const parts = [];
+  if (fleet.critElsewhere > 0) parts.push(`${fleet.critElsewhere} CRITICAL`);
+  if (fleet.highElsewhere > 0) parts.push(`${fleet.highElsewhere} HIGH`);
+  lines.push(`- ⚠️ Fleet: ${parts.join(' + ')} open in ${fleet.projects.length} other project(s) — run \`lattice projects findings --tier CRITICAL\` to see them`);
 }
 
 // v2.2 (#82): deltas since last SessionStart fire — surfaces "what changed

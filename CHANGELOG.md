@@ -2,6 +2,40 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — 2026-05-21
+
+**Closes #89 — `lattice projects` cross-project aggregator.** Lattice was per-project. v2.4 makes it fleet-aware. The keystone feature for the stated goal "Lattice must support all my projects."
+
+### Added
+- **Registry at `~/.config/lattice/projects.yml`** (or `~/.claude/lattice/projects.yml` fallback; `LATTICE_PROJECTS_REGISTRY` env override for tests).
+- **`lattice projects add <name> --path <path>`** — register a project. Idempotent (refuses to re-add by same name).
+- **`lattice projects rm <name>`** — deregister.
+- **`lattice projects list`** — table of all registered projects + open / HIGH counts.
+- **`lattice projects findings [--tier T --dimension D]`** — aggregated findings across the fleet, one row per finding, with project/tier/dimension/module-rule/age columns.
+- **`lattice projects next`** — single highest-priority finding across the fleet. Maps cleanly onto `lattice next` semantics but cross-project.
+- **`lattice projects stats`** — heatmap of CRITICAL/HIGH/MEDIUM/LOW/DRIFT/WATCH counts per project. Single screen, all projects.
+- **`lattice projects patterns`** — emits `(dimension, rule)` tuples appearing in 2+ projects. THIS is the highest-leverage view: same env-contract mistake across 4 projects = one architectural fix, not 4 tactical ones.
+
+### Hook integration
+- **SessionStart fleet status line.** When SessionStart fires inside ANY registered project, the injected context block now ends with `- ⚠️ Fleet: N CRITICAL + M HIGH open in K other project(s)`. Stops the "context switch to project A while CRITICAL unattended in project B" pattern.
+
+### Design discipline
+- **No daemon. No cloud. No auth. No dashboard.** Read-only aggregator over local `.lattice/` trees.
+- **No new YAML schema.** Reads existing finding YAMLs as-is.
+- Uses the v2.2.5 `lattice-yaml.mjs` Node helper for per-field reads — keeps aggregation fast on Windows (otherwise the fork tax × N projects would be brutal).
+- Falls back gracefully when projects don't have `.lattice/` set up yet.
+
+### Multi-project workflow now possible
+```
+lattice projects add lattice       --path ~/code/Lattice
+lattice projects add jiive-backend --path ~/code/jiive-backend
+lattice projects add rise-craft    --path ~/code/rise-craft
+
+lattice projects stats             # see the heatmap
+lattice projects next              # work the highest priority across fleet
+lattice projects patterns          # find the architectural fixes
+```
+
 ## [2.3.1] — 2026-05-21
 
 **v2.3.0's new dimensions eat their own dogfood.** Ran `/audit-sweep . abuse cli-tool cross-cutting` against Lattice itself — 3 parallel sub-agents returned **13 findings (4 HIGH, 5 MED, 4 WATCH/LOW)** in under 5 minutes. Most were bypasses to fixes shipped earlier today. The rule libraries earned their place.

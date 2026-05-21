@@ -1701,6 +1701,297 @@ cmd_id_gen() {
 }
 
 # ---------------------------------------------------------------------------
+# v2.4.0 (#89) — `lattice projects` cross-project aggregator.
+#
+# Read-only registry + view over multiple .lattice/ directories. No daemon,
+# no cloud, no auth, no new YAML schema — just a YAML pointing at paths.
+#
+# Registry: ~/.config/lattice/projects.yml (XDG) OR ~/.claude/lattice/projects.yml.
+# Format:
+#   projects:
+#     - name: <slug>
+#       path: <abs-path>
+#
+# Subcommands:
+#   lattice projects add <name> --path <path>
+#   lattice projects rm <name>
+#   lattice projects list
+#   lattice projects findings [--tier X --dimension Y]
+#   lattice projects next
+#   lattice projects stats
+#   lattice projects patterns
+# ---------------------------------------------------------------------------
+cmd_projects() {
+  local action="${1:-list}"; shift || true
+  case "${action}" in
+    add)       _projects_add "$@" ;;
+    rm)        _projects_rm "$@" ;;
+    list|ls)   _projects_list "$@" ;;
+    findings)  _projects_findings "$@" ;;
+    next)      _projects_next "$@" ;;
+    stats)     _projects_stats "$@" ;;
+    patterns)  _projects_patterns "$@" ;;
+    --help|-h|help)
+      cat <<'PROJHELP'
+lattice projects — cross-project aggregator (v2.4.0 #89)
+
+  add <name> --path <path>       register a project (idempotent)
+  rm <name>                      remove from registry
+  list                           show all registered projects + finding counts
+  findings [--tier T --dimension D]
+                                 aggregated findings table, one row per finding
+  next                           single highest-priority finding across fleet
+  stats                          heatmap: CRITICAL/HIGH count per project
+  patterns                       (dimension, rule) tuples appearing in 2+ projects
+
+Registry lives at ~/.config/lattice/projects.yml (or ~/.claude/lattice/projects.yml).
+Read-only — each finding stays in its home project. No daemon, no cloud.
+PROJHELP
+      ;;
+    *) die "projects: unknown action: ${action} (try: add | rm | list | findings | next | stats | patterns)" ;;
+  esac
+}
+
+_projects_registry_path() {
+  if [ -n "${LATTICE_PROJECTS_REGISTRY:-}" ]; then
+    printf '%s' "${LATTICE_PROJECTS_REGISTRY}"
+    return 0
+  fi
+  if [ -d "${XDG_CONFIG_HOME:-${HOME}/.config}/lattice" ] || [ ! -d "${HOME}/.claude/lattice" ]; then
+    printf '%s/lattice/projects.yml' "${XDG_CONFIG_HOME:-${HOME}/.config}"
+  else
+    printf '%s/.claude/lattice/projects.yml' "${HOME}"
+  fi
+}
+
+_projects_load() {
+  # Emit one line per project as "name|path"
+  local reg; reg="$(_projects_registry_path)"
+  [ -f "${reg}" ] || return 0
+  awk '
+    /^projects:/ { in_p=1; next }
+    in_p && /^- name:/ { name=$3; gsub(/[",]/, "", name); next }
+    in_p && /^  - name:/ { name=$3; gsub(/[",]/, "", name); next }
+    in_p && /^\s+name:/ { name=$2; gsub(/[",]/, "", name); next }
+    in_p && /^\s+path:/ {
+      path=$0; sub(/^\s+path:\s*/, "", path); gsub(/^"|"$/, "", path)
+      gsub(/^'\''|'\''$/, "", path)
+      if (name != "" && path != "") print name "|" path
+      name=""
+    }
+  ' "${reg}"
+}
+
+_projects_add() {
+  local name="" path=""
+  [ "$#" -ge 1 ] || die "projects add: usage: lattice projects add <name> --path <path>"
+  name="$1"; shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --path) path="$2"; shift 2 ;;
+      *) die "projects add: unknown flag: $1" ;;
+    esac
+  done
+  [ -n "${path}" ] || die "projects add: --path required"
+  case "${name}" in
+    *[!A-Za-z0-9_-]*|"") die "projects add: name must be [A-Za-z0-9_-]+" ;;
+  esac
+  # Resolve ~ + absolute
+  path="${path/#\~/${HOME}}"
+  [ -d "${path}" ] || die "projects add: path not a directory: ${path}"
+  if [ ! -d "${path}/.lattice" ]; then
+    echo "[${PROG}] projects add: WARN: ${path}/.lattice/ doesn't exist yet (run \`lattice setup\` there first)" >&2
+  fi
+  local reg; reg="$(_projects_registry_path)"
+  mkdir -p "$(dirname "${reg}")" 2>/dev/null
+  if [ ! -f "${reg}" ]; then
+    printf 'projects:\n' > "${reg}"
+  fi
+  # Idempotent: if name already registered, update its path
+  if grep -qE "^\s+name:\s*${name}\s*\$" "${reg}" 2>/dev/null; then
+    echo "[${PROG}] projects add: ${name} already registered — use 'lattice projects rm ${name}' first to re-register" >&2
+    return 1
+  fi
+  printf '  - name: %s\n    path: %s\n' "${name}" "${path}" >> "${reg}"
+  echo "[${PROG}] projects: added ${name} -> ${path}"
+}
+
+_projects_rm() {
+  [ "$#" -ge 1 ] || die "projects rm: usage: lattice projects rm <name>"
+  local name="$1"
+  local reg; reg="$(_projects_registry_path)"
+  [ -f "${reg}" ] || die "projects rm: no registry at ${reg}"
+  # Remove the 2-line block (name + path)
+  local tmp="${reg}.tmp.$$"
+  awk -v name="${name}" '
+    BEGIN { skip=0 }
+    skip > 0 { skip--; next }
+    /^  - name:/ {
+      n=$3; gsub(/[",]/, "", n)
+      if (n == name) { skip=1; next }
+    }
+    { print }
+  ' "${reg}" > "${tmp}" && mv "${tmp}" "${reg}"
+  echo "[${PROG}] projects: removed ${name}"
+}
+
+_projects_list() {
+  local lines; lines="$(_projects_load)"
+  if [ -z "${lines}" ]; then
+    local reg; reg="$(_projects_registry_path)"
+    echo "[${PROG}] projects: no projects registered (registry: ${reg})"
+    echo "[${PROG}] add one: lattice projects add <name> --path <path>"
+    return 0
+  fi
+  printf "%-24s %-50s %-8s %-8s\n" "NAME" "PATH" "OPEN" "HIGH"
+  while IFS='|' read -r name path; do
+    [ -z "${name}" ] && continue
+    local open=0 high=0 fl=""
+    if [ -d "${path}/.lattice/findings/open" ]; then
+      fl="$(find "${path}/.lattice/findings/open" -maxdepth 2 -name '*.yml' 2>/dev/null || true)"
+      open="$(printf '%s\n' "${fl}" | grep -c . || true)"
+      [ -n "${fl}" ] && high="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: HIGH$' 2>/dev/null | grep -c . || true)"
+    fi
+    printf "%-24s %-50s %-8s %-8s\n" "${name}" "${path}" "${open:-0}" "${high:-0}"
+  done <<< "${lines}"
+}
+
+_projects_findings() {
+  local filter_tier="" filter_dim=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tier) filter_tier="$2"; shift 2 ;;
+      --dimension) filter_dim="$2"; shift 2 ;;
+      *) die "projects findings: unknown flag: $1" ;;
+    esac
+  done
+  local lines; lines="$(_projects_load)"
+  [ -z "${lines}" ] && { echo "[${PROG}] projects: no projects registered"; return 0; }
+  printf "%-20s %-9s %-12s %-30s %-6s\n" "PROJECT" "TIER" "DIMENSION" "MODULE/RULE" "AGE"
+  local count=0
+  while IFS='|' read -r name path; do
+    [ -z "${name}" ] && continue
+    [ -d "${path}/.lattice/findings/open" ] || continue
+    shopt -s nullglob
+    for f in "${path}/.lattice/findings/open"/*.yml "${path}/.lattice/findings/open"/*/*.yml; do
+      [ -f "${f}" ] || continue
+      local tier dim module rule first_sweep
+      tier="$(node "${_YAML_HELPER}" "${f}" tier 2>/dev/null)"
+      [ -n "${filter_tier}" ] && [ "${tier}" != "${filter_tier}" ] && continue
+      dim="$(node "${_YAML_HELPER}" "${f}" dimension 2>/dev/null)"
+      [ -n "${filter_dim}" ] && [ "${dim}" != "${filter_dim}" ] && continue
+      module="$(node "${_YAML_HELPER}" "${f}" module 2>/dev/null)"
+      rule="$(node "${_YAML_HELPER}" "${f}" rule 2>/dev/null)"
+      first_sweep="$(node "${_YAML_HELPER}" "${f}" first_seen_sweep 2>/dev/null)"
+      [ -z "${first_sweep}" ] && first_sweep="$(node "${_YAML_HELPER}" "${f}" sweep_date 2>/dev/null)"
+      local age_disp="-"
+      if [[ "${first_sweep}" =~ ^([0-9]{4})-?([0-9]{2})-?([0-9]{2}) ]]; then
+        local sweep_epoch today_epoch age_days
+        sweep_epoch="$(date -d "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}" +%s 2>/dev/null || echo '')"
+        today_epoch="$(date -u +%s)"
+        if [ -n "${sweep_epoch}" ]; then
+          age_days=$(( (today_epoch - sweep_epoch) / 86400 ))
+          if   [ "${age_days}" -lt 14 ]; then age_disp="${age_days}d"
+          elif [ "${age_days}" -lt 60 ]; then age_disp="$((age_days / 7))w"
+          else                                age_disp="$((age_days / 30))m"
+          fi
+        fi
+      fi
+      printf "%-20s %-9s %-12s %-30s %-6s\n" "${name}" "${tier:-?}" "${dim:-?}" "${module}/${rule}" "${age_disp}"
+      count=$((count + 1))
+    done
+  done <<< "${lines}"
+  echo ""
+  echo "[${PROG}] ${count} finding(s) across registered projects"
+}
+
+_projects_next() {
+  local lines; lines="$(_projects_load)"
+  [ -z "${lines}" ] && { echo "[${PROG}] projects: no projects registered"; return 0; }
+  local best_proj="" best_file="" best_pri=999
+  while IFS='|' read -r name path; do
+    [ -z "${name}" ] && continue
+    [ -d "${path}/.lattice/findings/open" ] || continue
+    shopt -s nullglob
+    for f in "${path}/.lattice/findings/open"/*.yml "${path}/.lattice/findings/open"/*/*.yml; do
+      [ -f "${f}" ] || continue
+      local tier; tier="$(node "${_YAML_HELPER}" "${f}" tier 2>/dev/null)"
+      local pri
+      case "${tier}" in
+        CRITICAL) pri=1 ;; BLOCKER) pri=2 ;; HIGH) pri=3 ;; RISK) pri=4 ;;
+        DRIFT)    pri=5 ;; MEDIUM)  pri=6 ;; WATCH) pri=7 ;; LOW) pri=8 ;; *) pri=99 ;;
+      esac
+      if [ "${pri}" -lt "${best_pri}" ]; then
+        best_pri="${pri}"; best_proj="${name}"; best_file="${f}"
+      fi
+    done
+  done <<< "${lines}"
+  if [ -z "${best_file}" ]; then
+    echo "[${PROG}] projects next: no actionable findings across fleet"
+    return 0
+  fi
+  local tier module rule title
+  tier="$(node "${_YAML_HELPER}" "${best_file}" tier 2>/dev/null)"
+  module="$(node "${_YAML_HELPER}" "${best_file}" module 2>/dev/null)"
+  rule="$(node "${_YAML_HELPER}" "${best_file}" rule 2>/dev/null)"
+  title="$(node "${_YAML_HELPER}" "${best_file}" title 2>/dev/null)"
+  echo "[${PROG}] fleet-next: [${tier}] ${best_proj}: ${module}/${rule}"
+  [ -n "${title}" ] && echo "  title: ${title}"
+  echo "  path:  ${best_file}"
+}
+
+_projects_stats() {
+  local lines; lines="$(_projects_load)"
+  [ -z "${lines}" ] && { echo "[${PROG}] projects: no projects registered"; return 0; }
+  printf "%-24s %-10s %-7s %-7s %-7s %-7s %-7s\n" "PROJECT" "CRITICAL" "HIGH" "MEDIUM" "LOW" "DRIFT" "WATCH"
+  while IFS='|' read -r name path; do
+    [ -z "${name}" ] && continue
+    [ -d "${path}/.lattice/findings/open" ] || continue
+    local c=0 h=0 m=0 l=0 d=0 w=0 fl=""
+    fl="$(find "${path}/.lattice/findings/open" -maxdepth 2 -name '*.yml' 2>/dev/null || true)"
+    if [ -n "${fl}" ]; then
+      c="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: CRITICAL$' 2>/dev/null | grep -c . || true)"
+      h="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: HIGH$'     2>/dev/null | grep -c . || true)"
+      m="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: MEDIUM$'   2>/dev/null | grep -c . || true)"
+      l="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: LOW$'      2>/dev/null | grep -c . || true)"
+      d="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: DRIFT$'    2>/dev/null | grep -c . || true)"
+      w="$(printf '%s\n' "${fl}" | xargs grep -l '^tier: WATCH$'    2>/dev/null | grep -c . || true)"
+    fi
+    printf "%-24s %-10s %-7s %-7s %-7s %-7s %-7s\n" "${name}" "${c:-0}" "${h:-0}" "${m:-0}" "${l:-0}" "${d:-0}" "${w:-0}"
+  done <<< "${lines}"
+}
+
+_projects_patterns() {
+  # For each finding across the fleet, emit "(dimension|rule)|project". Count duplicates.
+  local lines; lines="$(_projects_load)"
+  [ -z "${lines}" ] && { echo "[${PROG}] projects: no projects registered"; return 0; }
+  local tmp; tmp="$(mktemp 2>/dev/null || echo "/tmp/lattice-patterns.$$")"
+  while IFS='|' read -r name path; do
+    [ -z "${name}" ] && continue
+    [ -d "${path}/.lattice/findings/open" ] || continue
+    shopt -s nullglob
+    for f in "${path}/.lattice/findings/open"/*.yml "${path}/.lattice/findings/open"/*/*.yml; do
+      [ -f "${f}" ] || continue
+      local dim rule
+      dim="$(node "${_YAML_HELPER}" "${f}" dimension 2>/dev/null)"
+      rule="$(node "${_YAML_HELPER}" "${f}" rule 2>/dev/null)"
+      [ -z "${dim}" ] || [ -z "${rule}" ] && continue
+      printf '%s|%s|%s\n' "${dim}" "${rule}" "${name}" >> "${tmp}"
+    done
+  done <<< "${lines}"
+  echo "Cross-cutting patterns ((dim, rule) tuples in 2+ projects):"
+  awk -F'|' '
+    { key=$1 "|" $2; if (!(key SUBSEP $3 in seen)) { seen[key SUBSEP $3]=1; count[key]++; projs[key]=projs[key] (projs[key] ? "," : "") $3 } }
+    END {
+      n=0
+      for (k in count) if (count[k] >= 2) { printf "  %s/%s — %d projects: %s\n", substr(k,1,index(k,"|")-1), substr(k,index(k,"|")+1), count[k], projs[k]; n++ }
+      if (n == 0) print "  (none — no rule appears in 2+ projects yet)"
+    }
+  ' "${tmp}"
+  rm -f "${tmp}"
+}
+
+# ---------------------------------------------------------------------------
 # v2.2 slice F — agent platform.
 #
 # Maintainer reality: Claude Code agents (subagents in `agents/` of a project)
@@ -4284,7 +4575,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent projects release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -8809,6 +9100,7 @@ case "${sub}" in
   setup)              cmd_setup "$@" ;;
   onboard)            cmd_onboard "$@" ;;
   agent)              cmd_agent "$@" ;;
+  projects)           cmd_projects "$@" ;;
   ci-check-dead)      cmd_ci_check_dead "$@" ;;
   release-notes)      cmd_release_notes "$@" ;;
   normalize)          cmd_normalize "$@" ;;
