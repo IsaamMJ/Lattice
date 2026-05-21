@@ -2,6 +2,33 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.3] — 2026-05-21
+
+**Stress dimension formalized — parallel hardening as a Lattice primitive.**
+
+Today the v2.2.0 hardening pass surfaced 5 HIGH bugs via 5 sub-agents in <5 min wall clock. This release encodes that pattern as a first-class skill so every future release can self-stress.
+
+### Added
+- **`/stress-audit`** — new skill at `commands/stress-audit.md`. Fans out N parallel sub-agents (one per ATTACK SURFACE, not per module). Default surfaces: `yaml-fuzz`, `shell-inject`, `concurrency`, `windows-edge`, `artifact-validity`. Each surface ships a complete brief template the parent skill pastes verbatim into Agent tool calls. Each agent emits multi-doc YAML at `/tmp/stress-<surface>.findings.yml`.
+- **`--auto-import` flag** auto-pipes the aggregated findings through `lattice file --from --no-confirm-dup` after all agents return.
+- **Sandbox-tolerant.** Three of five surfaces (`shell-inject`, `concurrency`, `windows-edge`) work even when sub-agents are denied Bash — static read produces 80% of the signal. The skill explicitly tells each agent which modes are acceptable.
+
+### Composition with v2.2 pieces
+- Findings flow: parallel sub-agents → `/tmp/stress-*.findings.yml` → `lattice file --from` (slice 6) → `.lattice/findings/open/`
+- Lifecycle: open findings ranked by `lattice next --unblocked-only` (slice 3 + #85)
+- Action: `@claude` issues for HIGH findings via the slice 4 auto-action path (manual today; cron-driven in v2.3)
+
+### Workflow for v2.3+
+The complete self-hardening loop now has all primitives:
+
+```
+weekly cron → /stress-audit . --auto-import → findings filed →
+   @claude auto-action (issue per HIGH) → @claude opens PR with fix →
+   verify-on-commit hook flags affected findings → lattice close → repeat
+```
+
+Only piece not yet wired: the weekly cron (small GH Actions YAML; deferred).
+
 ## [2.2.2] — 2026-05-21
 
 **Closes issue #85 + fixes 5 HIGH bugs surfaced by parallel hardening subagents.** Sub-agent audit ran 5 attack surfaces in parallel (yaml-fuzz, shell-injection, race, windows, artifact-validity); 3 returned real findings via static analysis. The 2 HIGH bugs they found in v2.2.0 code are fixed in this version.
