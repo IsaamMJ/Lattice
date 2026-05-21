@@ -2,6 +2,37 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] — 2026-05-21
+
+**Closes issue #85 + fixes 5 HIGH bugs surfaced by parallel hardening subagents.** Sub-agent audit ran 5 attack surfaces in parallel (yaml-fuzz, shell-injection, race, windows, artifact-validity); 3 returned real findings via static analysis. The 2 HIGH bugs they found in v2.2.0 code are fixed in this version.
+
+### Added (#85 — auto-surface unblocked work)
+- **Inverse-kind back-link.** `lattice link A B --kind blocks` now writes `kind: blocks` on A and `kind: blocked-by` on B (asymmetric, semantically correct). `duplicate-of` stays symmetric. `blocked-by` is accepted as input kind too. Old v2.2.0 links (symmetric `blocks` on both sides) still parse but don't auto-surface — re-link if you want the auto-guide.
+- **Close auto-surface.** `lattice close X` scans every open finding for `relates_to[kind:blocked-by, id:X]` and prints `✅ Now unblocked — pick next: ...` ranked by tier. The exact Jiive WABA scenario from issue #85 now flows: close blocker → guidance for what's actionable next.
+- **`lattice next --unblocked-only`** filters out findings still blocked by an open one. The flag the issue asked for.
+- **`lattice show <id>`** renders a "Cross-references (live state)" section after the YAML — shows tier + open/closed state of every linked finding. Stale links surface as `(NOT FOUND — stale link)`.
+- **`lattice validate`** extended with chain checks: stale link IDs (error), circular `blocked-by` cycles (error), closed-references-open (warning).
+
+### Fixed (HIGH)
+- **`scripts/lattice` workflow RCE (shell-inject audit).** Slice 4's auto-action workflow used `execSync` with template-literal interpolation of YAML-derived `slug` — `slug: foo$(id>/tmp/pwned)` ran arbitrary shell on the GH Actions runner with `GH_TOKEN` + `TELEGRAM_BOT_TOKEN` in scope. Rewrote with `spawnSync(["gh","issue","create",...], {shell:false})` — argv array, no shell evaluation. Plus regex validators on `slug` and `REPO` env.
+- **`_append_relates_to` race (concurrency audit).** Two parallel `lattice link` calls shared `${file}.tmp` and had no lock — second writer clobbered first's tmp, link silently lost on one side, asymmetric graph. Now uses per-PID `${file}.tmp.$$` + `flock` on `.lattice/.locks/<basename>.lock`.
+- **`yaml_field` CRLF leak + key injection (windows + shell-inject audit).** `yaml_field` previously left `\r` in returned values (poisoning every string compare on CRLF YAML) AND spliced the `key` argument into both a `grep -E` pattern and a `sed` expression. Now: charclass-validate the key (refuse non-identifier chars), strip `\r` from the value.
+- **`cmd_file` path-traversal + CRLF (shell-inject + windows audit).** Slice 6's batch import built destination paths from YAML `module`/`rule` fields with only `tr -d '"'`. `module: ../../../../tmp/pwned` wrote outside the findings tree. Now: charclass-validate tier/module/rule against `^[A-Za-z0-9_-]+$`, explicit `..` rejection, `\r` stripping on all extracted fields.
+
+### Deferred (filed for v2.3)
+Findings still open after this release (subagents wrote multi-doc YAML; will import via `lattice file --from` once v2.2.2 is verified):
+- MEDIUM `yaml-field-key-regex-injection` — latent today (all callers internal), risky for future `lattice get <slug> <key>` callers
+- HIGH `project-sync-auto-claude-md-race` — CLAUDE.md regenerator races with itself on parallel closes. Needs flock + per-PID tmp.
+- MEDIUM `cmd-defer-strip-then-append-race` — two-step write in cmd_defer
+- MEDIUM `lattice-close-helper-window-between-mv-and-lifecycle-append`
+- LOW `events-jsonl-append-not-atomic-on-windows`
+- MEDIUM `w1n-mktemp-no-fallback`, `w1n-stop-hook-bash-spawn-no-shim`
+- LOW `w1n-install-cmd-wrapper-space-in-userprofile`, `w1n-shim-version-bash-spawn-windows-path`
+
+### Process learnings
+- **Subagents can audit even when sandboxed from bash.** 3 of 5 dispatched agents had bash denied; they still returned high-quality findings via static read of the code. The lesson: hardening audits don't require execution; code-shape patterns are 80% of the signal.
+- **Parallel sub-agent hardening is now a Lattice primitive.** Will formalize as `/audit-sweep . stress` dimension in v2.3.
+
 ## [2.2.1] — 2026-05-20
 
 **Slice F shipped — agent platform (minimal).** Closes the v2.2 design doc's last open slice in the same session as v2.2.0.

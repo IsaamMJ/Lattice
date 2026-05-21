@@ -783,13 +783,19 @@ locate_finding_interactive() {
 # Echo empty if absent. Strips surrounding quotes.
 yaml_field() {
   local file="$1" key="$2"
+  # v2.2.2 (w1n-yaml-field-cr-leak): keys are internal identifiers; refuse
+  # anything that's not a plain YAML key, so a future caller passing a CLI
+  # arg can't inject regex/sed metachars.
+  case "${key}" in
+    *[!A-Za-z0-9_]*|"") echo "[yaml_field] refusing invalid key: ${key}" >&2; return 1 ;;
+  esac
   local line
   line=$(grep -E "^${key}[[:space:]]*:" "${file}" 2>/dev/null | head -n1 || true)
   [ -z "${line}" ] && return 0
-  # Strip quotes only when they wrap the entire value (matched pair). Previous
-  # form stripped a trailing " independently of a leading one, which truncated
-  # titles like: `code points at "lattice help"` to `code points at "lattice help`.
-  printf '%s' "${line}" | sed -E "s/^${key}[[:space:]]*:[[:space:]]*//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
+  # Strip trailing \r so CRLF-encoded YAML (Windows editors) doesn't poison
+  # string comparisons everywhere. Then strip quote pair if it wraps the value.
+  line="${line%$'\r'}"
+  printf '%s' "${line}" | sed -E "s/^${key}[[:space:]]*:[[:space:]]*//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/" | tr -d '\r'
 }
 
 # ---------------------------------------------------------------------------
@@ -877,7 +883,12 @@ cmd_close() {
   # v0.9.11: auto-refresh project CLAUDE.md state block. Quiet, best-effort,
   # respects LATTICE_NO_PROJECT_SYNC=1. Only fires when CLAUDE.md already has
   # a block (no surprise-creation on first close).
-  [ "${rc}" -eq 0 ] && _lattice_project_sync_auto
+  if [ "${rc}" -eq 0 ]; then
+    _lattice_project_sync_auto
+    # v2.2.2 (#85): after a successful close, surface findings that were
+    # blocked by this slug. The whole point of the issue.
+    _close_print_unblocked "${slug}" || true
+  fi
   return "${rc}"
 }
 
@@ -922,14 +933,24 @@ _relates_to_ids() {
 _append_relates_to() {
   local file="$1" rid="$2" kind="$3" reason="${4:-}"
   [ -f "${file}" ] || { echo "[link] target yaml not found: ${file}" >&2; return 1; }
-  # Idempotent: skip if id+kind already present
+  # v2.2.2 (race-finding): per-PID tmp + flock so concurrent `lattice link`
+  # calls can't clobber each other's tmp or lose appended entries.
+  local lockdir=".lattice/.locks"
+  mkdir -p "${lockdir}" 2>/dev/null
+  local lockfile="${lockdir}/$(basename "${file}").lock"
+  exec {_LFD}>>"${lockfile}"
+  if command -v flock >/dev/null 2>&1; then
+    flock "${_LFD}" || true
+  fi
+  # Idempotent: re-check under lock so two parallel callers don't double-write
   if grep -qE "id:[[:space:]]*\"?${rid}\"?.*kind:[[:space:]]*${kind}" "${file}" 2>/dev/null; then
+    eval "exec ${_LFD}>&-"
     return 0
   fi
   local esc_reason="${reason//\"/\\\"}"
   local entry="  - {id: ${rid}, kind: ${kind}, reason: \"${esc_reason}\"}"
+  local tmpf="${file}.tmp.$$"
   if grep -q '^relates_to:' "${file}"; then
-    # Append inside existing block. Find the line range, insert after last item.
     awk -v entry="${entry}" '
       BEGIN { ins=0 }
       { lines[NR]=$0 }
@@ -942,10 +963,11 @@ _append_relates_to() {
           if (i==rend) print entry
         }
       }
-    ' "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
+    ' "${file}" > "${tmpf}" && mv "${tmpf}" "${file}"
   else
     printf 'relates_to:\n%s\n' "${entry}" >> "${file}"
   fi
+  eval "exec ${_LFD}>&-"
 }
 
 # v2.2 cmd_link — `lattice link <id-a> <id-b> --kind <blocks|duplicate-of>
@@ -966,10 +988,10 @@ cmd_link() {
       *) die "link: unknown flag: $1" ;;
     esac
   done
-  [ -n "${kind}" ] || die "link: --kind required (blocks | duplicate-of)"
+  [ -n "${kind}" ] || die "link: --kind required (blocks | blocked-by | duplicate-of)"
   case "${kind}" in
-    blocks|duplicate-of) ;;
-    *) die "link: --kind must be one of: blocks, duplicate-of (v2.2 starts narrow; more kinds in v2.3)" ;;
+    blocks|blocked-by|duplicate-of) ;;
+    *) die "link: --kind must be one of: blocks, blocked-by, duplicate-of" ;;
   esac
   local fa fb
   fa="$(locate_finding "${a}" 2>/dev/null)" || die "link: not found: ${a}"
@@ -979,14 +1001,18 @@ cmd_link() {
   slug_b="$(basename "${fb}" .yml)"
   [ "${slug_a}" = "${slug_b}" ] && die "link: can't link a finding to itself"
 
+  # v2.2.2 (#85): inverse-kind on the back link so semantics are unambiguous.
+  #   `blocks` ↔ `blocked-by`  (asymmetric — closing A unblocks B)
+  #   `duplicate-of` stays symmetric (both sides duplicate-of each other)
+  local inverse_kind="${kind}"
+  case "${kind}" in
+    blocks)        inverse_kind="blocked-by" ;;
+    blocked-by)    inverse_kind="blocks" ;;
+    duplicate-of)  inverse_kind="duplicate-of" ;;
+  esac
   _append_relates_to "${fa}" "${slug_b}" "${kind}" "${reason}"
-  # Reverse kind for the back-link: duplicate-of is symmetric; blocks reverses
-  # to "blocked-by" — but to stay narrow, reuse `blocks` (the kind is "this
-  # finding has a blocks-relationship with that one"; readers can disambiguate
-  # via id ordering or by looking at the other side). Simpler than introducing
-  # blocked-by in v2.2.
-  _append_relates_to "${fb}" "${slug_a}" "${kind}" "${reason}"
-  echo "[${PROG}] link: ${slug_a} <-${kind}-> ${slug_b}"
+  _append_relates_to "${fb}" "${slug_a}" "${inverse_kind}" "${reason}"
+  echo "[${PROG}] link: ${slug_a} -${kind}-> ${slug_b}  (back: ${slug_b} -${inverse_kind}-> ${slug_a})"
 }
 
 # Used by cmd_close before delegating to HELPER_CLOSE — prints related-finding
@@ -1008,6 +1034,77 @@ _close_print_relates_nudge() {
     if [[ "${rfile}" == .lattice/findings/closed/* ]]; then rstate="closed"; else rstate="open"; fi
     echo "  🔗 ${rid} (tier=${rtier}, ${rstate}) — closing this may affect it" >&2
   done <<< "${ids}"
+}
+
+# v2.2.2 (#85): emit pairs "ID|KIND" parsed from a YAML's relates_to block.
+# Same structure as _relates_to_ids but preserves the kind.
+_relates_to_pairs() {
+  local file="$1"
+  [ -f "${file}" ] || return 0
+  awk '
+    /^relates_to:/ { inr=1; next }
+    inr && /^[a-zA-Z_]/ { inr=0 }
+    inr {
+      line=$0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      id=""; kind=""
+      # id capture
+      if (match(line, /id:[[:space:]]*"?[A-Za-z0-9_.-]+/)) {
+        id=substr(line, RSTART, RLENGTH); sub(/^id:[[:space:]]*"?/, "", id)
+      } else if (line ~ /^[A-Z]/) {
+        s=line; gsub(/[" ,}].*$/, "", s); id=s
+      }
+      # kind capture (default blocks for legacy string entries that lack it)
+      if (match(line, /kind:[[:space:]]*[A-Za-z_-]+/)) {
+        kind=substr(line, RSTART, RLENGTH); sub(/^kind:[[:space:]]*/, "", kind)
+      }
+      if (id != "") print id "|" kind
+    }
+  ' "${file}" 2>/dev/null
+}
+
+# v2.2.2 (#85): given a slug being closed, scan every OPEN finding for an
+# inbound `kind: blocked-by` reference to that slug. Print as "Now unblocked".
+# Also: if the closed finding has outbound `kind: blocks` references, surface
+# those (they may have been waiting on this one). This is the auto-guide the
+# operator wanted from issue #85.
+_close_print_unblocked() {
+  local closed_slug="$1"
+  [ -d .lattice/findings/open ] || return 0
+  shopt -s nullglob
+  local f pair pid pkind ftier
+  local hits=()
+  for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml; do
+    [ -f "${f}" ] || continue
+    while IFS= read -r pair; do
+      [ -z "${pair}" ] && continue
+      pid="${pair%%|*}"
+      pkind="${pair##*|}"
+      # Only "blocked-by <closed_slug>" means this finding was blocked by what we just closed
+      if [ "${pid}" = "${closed_slug}" ] && [ "${pkind}" = "blocked-by" ]; then
+        ftier="$(yaml_field "${f}" "tier" 2>/dev/null || echo '?')"
+        hits+=("${ftier}|$(basename "${f}" .yml)")
+      fi
+    done < <(_relates_to_pairs "${f}")
+  done
+  [ "${#hits[@]}" -eq 0 ] && return 0
+  echo "" >&2
+  echo "[${PROG}] ✅ Now unblocked — pick next:" >&2
+  # Rank by tier
+  local h
+  for h in "${hits[@]}"; do
+    local t s
+    t="${h%%|*}"; s="${h##*|}"
+    case "${t}" in
+      CRITICAL) r=1 ;; BLOCKER) r=2 ;; HIGH) r=3 ;; RISK) r=4 ;;
+      DRIFT) r=5 ;; MEDIUM) r=6 ;; WATCH) r=7 ;; LOW) r=8 ;; *) r=9 ;;
+    esac
+    printf '%d|%s|%s\n' "${r}" "${t}" "${s}"
+  done | sort -n | while IFS='|' read -r _ t s; do
+    echo "  ▶ [${t}] ${s}" >&2
+  done
+  echo "" >&2
+  echo "[${PROG}] try: lattice next --unblocked-only   (filters to actionable findings)" >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -1045,7 +1142,86 @@ cmd_validate() {
   require_helper "${HELPER_REGEN}"
   local rc=0
   bash "${HELPER_REGEN}" --validate-only "$@" || rc=$?
+  # v2.2.2 (#85): chain checks over relates_to — stale link IDs + circular blocks.
+  _validate_relates_chains || rc=$?
   return "${rc}"
+}
+
+# v2.2.2 (#85): walk every YAML's relates_to and report:
+#  - stale link: relates_to id doesn't resolve via locate_finding
+#  - circular blocks: A blocked-by B blocked-by ... blocked-by A
+#  - closed-references-open: a closed finding still listed as blocked-by an
+#    open finding (probably stale; print as warning, not error)
+# Exits 1 if any chain error is found.
+_validate_relates_chains() {
+  [ -d .lattice/findings ] || return 0
+  shopt -s nullglob
+  local errors=0 warnings=0
+  declare -A blockedby_map=()  # slug -> "id1 id2 ..."
+  declare -A state_map=()      # slug -> open|closed
+
+  local f slug pair pid pkind
+  for f in .lattice/findings/open/*.yml .lattice/findings/open/*/*.yml \
+           .lattice/findings/closed/*.yml .lattice/findings/closed/*/*.yml; do
+    [ -f "${f}" ] || continue
+    slug="$(basename "${f}" .yml)"
+    if [[ "${f}" == .lattice/findings/closed/* ]]; then
+      state_map["${slug}"]="closed"
+    else
+      state_map["${slug}"]="open"
+    fi
+    while IFS= read -r pair; do
+      [ -z "${pair}" ] && continue
+      pid="${pair%%|*}"; pkind="${pair##*|}"
+      [ "${pkind}" = "blocked-by" ] || continue
+      blockedby_map["${slug}"]="${blockedby_map[${slug}]:-} ${pid}"
+    done < <(_relates_to_pairs "${f}")
+  done
+
+  # Stale link check + closed-references-open warning
+  local sl referenced
+  for slug in "${!blockedby_map[@]}"; do
+    for referenced in ${blockedby_map[${slug}]}; do
+      if [ -z "${state_map[${referenced}]:-}" ]; then
+        echo "[validate] STALE LINK: ${slug} blocked-by ${referenced} (referenced finding not found)" >&2
+        errors=$((errors+1))
+      fi
+      if [ "${state_map[${slug}]:-}" = "closed" ] && [ "${state_map[${referenced}]:-}" = "open" ]; then
+        echo "[validate] WARN: closed finding ${slug} still lists blocked-by ${referenced} (open) — link likely stale" >&2
+        warnings=$((warnings+1))
+      fi
+    done
+  done
+
+  # Circular blocked-by detection (DFS, cycles ≥ 2 nodes)
+  declare -A visiting=() visited=()
+  _walk_chain() {
+    local node="$1" path="$2"
+    [ -n "${visited[${node}]:-}" ] && return 0
+    if [ -n "${visiting[${node}]:-}" ]; then
+      echo "[validate] CIRCULAR blocked-by chain: ${path} -> ${node}" >&2
+      errors=$((errors+1))
+      return 0
+    fi
+    visiting["${node}"]=1
+    for n in ${blockedby_map[${node}]:-}; do
+      _walk_chain "${n}" "${path} -> ${node}"
+    done
+    unset 'visiting['"${node}"']'
+    visited["${node}"]=1
+  }
+  for slug in "${!blockedby_map[@]}"; do
+    _walk_chain "${slug}" ""
+  done
+
+  if [ "${errors}" -gt 0 ]; then
+    echo "[validate] ${errors} chain error(s), ${warnings} warning(s)" >&2
+    return 1
+  fi
+  if [ "${warnings}" -gt 0 ]; then
+    echo "[validate] ${warnings} chain warning(s)" >&2
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1281,6 +1457,28 @@ cmd_show() {
     echo "[${PROG}] ${src} (${where})"
     echo "----------------------------------------------------------------------"
     cat "${src}"
+    # v2.2.2 (#85): render relates_to with live state of each linked finding.
+    local pair pid pkind pfile ptier pstate
+    local has_rels=0
+    while IFS= read -r pair; do
+      [ -z "${pair}" ] && continue
+      if [ "${has_rels}" -eq 0 ]; then
+        echo ""
+        echo "Cross-references (live state):"
+        has_rels=1
+      fi
+      pid="${pair%%|*}"; pkind="${pair##*|}"
+      [ -z "${pkind}" ] && pkind="blocks"
+      pfile="$(locate_finding "${pid}" 2>/dev/null || true)"
+      if [ -z "${pfile}" ]; then
+        printf "  %-12s %s  (NOT FOUND — stale link)\n" "${pkind}:" "${pid}"
+        continue
+      fi
+      ptier="$(yaml_field "${pfile}" "tier" 2>/dev/null || echo '?')"
+      pstate="open"
+      [[ "${pfile}" == .lattice/findings/closed/* ]] && pstate="closed"
+      printf "  %-12s %s  (tier=%s, %s)\n" "${pkind}:" "${pid}" "${ptier}" "${pstate}"
+    done < <(_relates_to_pairs "${src}")
   done
 }
 
@@ -1690,19 +1888,33 @@ FILEHELP
   local doc tier dim mod rule ff line title fix
   for doc in "${tmpdir}"/*.yml; do
     [ -s "${doc}" ] || { rm -f "${doc}"; continue; }
-    tier="$(grep -E '^tier:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^tier:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
-    dim="$(grep -E '^dimension:[[:space:]]'  "${doc}" | head -1 | sed -E 's/^dimension:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
-    mod="$(grep -E '^module:[[:space:]]'     "${doc}" | head -1 | sed -E 's/^module:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
-    rule="$(grep -E '^rule:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^rule:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
-    ff="$(grep -E '^file:[[:space:]]'        "${doc}" | head -1 | sed -E 's/^file:[[:space:]]*//' | tr -d '"' | tr -d "'")"
-    line="$(grep -E '^line:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^line:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
-    title="$(grep -E '^title:[[:space:]]'    "${doc}" | head -1 | sed -E 's/^title:[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')"
+    tier="$(grep -E '^tier:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^tier:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]\r')"
+    dim="$(grep -E '^dimension:[[:space:]]'  "${doc}" | head -1 | sed -E 's/^dimension:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]\r')"
+    mod="$(grep -E '^module:[[:space:]]'     "${doc}" | head -1 | sed -E 's/^module:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]\r')"
+    rule="$(grep -E '^rule:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^rule:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]\r')"
+    ff="$(grep -E '^file:[[:space:]]'        "${doc}" | head -1 | sed -E 's/^file:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '\r')"
+    line="$(grep -E '^line:[[:space:]]'      "${doc}" | head -1 | sed -E 's/^line:[[:space:]]*//' | tr -d '"' | tr -d "'" | tr -d '[:space:]\r')"
+    title="$(grep -E '^title:[[:space:]]'    "${doc}" | head -1 | sed -E 's/^title:[[:space:]]*//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/' | tr -d '\r')"
 
     if [ -z "${tier}" ] || [ -z "${mod}" ] || [ -z "${rule}" ] || [ -z "${title}" ]; then
       echo "[${PROG}] file: skipping doc (missing required fields tier/module/rule/title)" >&2
       skipped=$((skipped+1))
       continue
     fi
+
+    # v2.2.2 (file-ingest-path-traversal-write): refuse path-escape segments
+    # in fields that build the destination filename. Charclass also blocks
+    # spaces, slashes, dots — only safe identifier chars.
+    case "${tier}" in
+      CRITICAL|BLOCKER|HIGH|RISK|DRIFT|MEDIUM|WATCH|LOW|OK|INTENTIONAL|UNVERIFIABLE) ;;
+      *) echo "[${PROG}] file: refusing invalid tier: ${tier}" >&2; skipped=$((skipped+1)); continue ;;
+    esac
+    case "${mod}" in
+      *[!A-Za-z0-9_-]*|*..*|"") echo "[${PROG}] file: refusing invalid module: ${mod}" >&2; skipped=$((skipped+1)); continue ;;
+    esac
+    case "${rule}" in
+      *[!A-Za-z0-9_-]*|*..*|"") echo "[${PROG}] file: refusing invalid rule: ${rule}" >&2; skipped=$((skipped+1)); continue ;;
+    esac
 
     # Dupe detection
     local norm; norm="$(_norm_title "${title}")"
@@ -1839,14 +2051,31 @@ cmd_handoff() {
 # Tier order: CRITICAL > BLOCKER > HIGH > MEDIUM > LOW > WATCH > RISK > DRIFT
 # ---------------------------------------------------------------------------
 cmd_next() {
-  local filter_module=""
+  local filter_module="" unblocked_only=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --module) [ -z "${2:-}" ] && die "next: --module requires a value"
                 filter_module="$2"; shift 2 ;;
+      --unblocked-only) unblocked_only=1; shift ;;  # v2.2.2 #85
       *) die "next: unknown arg: $1" ;;
     esac
   done
+
+  # v2.2.2 (#85): "is this finding currently blocked?" — true iff its
+  # relates_to has any `kind: blocked-by, id: X` where X is still open.
+  _next_is_blocked() {
+    local file="$1" pair pid pkind
+    while IFS= read -r pair; do
+      [ -z "${pair}" ] && continue
+      pid="${pair%%|*}"; pkind="${pair##*|}"
+      [ "${pkind}" = "blocked-by" ] || continue
+      # Resolve pid — only blocked if the blocker is still OPEN
+      local pfile; pfile="$(locate_finding "${pid}" 2>/dev/null || true)"
+      [ -z "${pfile}" ] && continue
+      [[ "${pfile}" == .lattice/findings/open/* ]] && return 0
+    done < <(_relates_to_pairs "${file}")
+    return 1
+  }
 
   [ -d ".lattice/findings/open" ] || { echo "[${PROG}] next: no open findings directory"; return 0; }
 
@@ -1870,6 +2099,10 @@ cmd_next() {
     [ "${status}" = "wont_fix" ]  && continue
     if [ -n "${filter_module}" ]; then
       [[ "${module,,}" == *"${filter_module,,}"* ]] || continue
+    fi
+    # v2.2.2 (#85): skip blocked findings when --unblocked-only is set
+    if [ "${unblocked_only}" -eq 1 ] && _next_is_blocked "${f}"; then
+      continue
     fi
     local pri; pri="$(_tier_pri "${tier}")"
     if [ "${pri}" -lt "${best_pri}" ]; then
@@ -6975,39 +7208,56 @@ WORKFLOW
           fi
           node - <<'NODE'
           const fs = require("fs");
-          const { execSync } = require("child_process");
+          const { spawnSync } = require("child_process");
+          // v2.2.2: argv array + shell:false — no string interpolation reaches bash.
+          // Previously used execSync with template-literal interpolation of slug
+          // (YAML-controlled), which permitted RCE via slug containing $(...)`.
+          // Identifier safety net: still validate slug looks like a slug.
+          const SAFE_SLUG = /^[A-Za-z0-9_.-]+$/;
+          const SAFE_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+          const repo = process.env.REPO || "";
+          if (!SAFE_REPO.test(repo)) {
+            console.error("[auto-action] refusing: REPO env not a valid owner/name:", repo);
+            process.exit(0);
+          }
           let payload;
           try { payload = JSON.parse(fs.readFileSync("/tmp/grow-check.json","utf8")); }
           catch (e) { console.error("[auto-action] grow-check.json parse:", e.message); process.exit(0); }
-          const rows = Array.isArray(payload?.results) ? payload.results : [];
+          const rows = Array.isArray(payload && payload.results) ? payload.results : [];
           let dispatched = 0;
           for (const r of rows) {
             const slug = r.slug || r.id || "(unknown)";
+            if (!SAFE_SLUG.test(slug)) {
+              console.error("[auto-action] refusing slug with metachars:", slug);
+              continue;
+            }
             const verdict = r.verdict || "?";
             if (verdict !== "succeeded" && verdict !== "failed") continue;
-            const observed = r.combined_value ?? r.observed_value ?? "";
+            const observed = String(r.combined_value != null ? r.combined_value : (r.observed_value != null ? r.observed_value : ""));
             let title, body;
             if (verdict === "succeeded") {
-              title = `@claude grow close ${slug} (won)`;
-              body  = `Hypothesis ${slug} succeeded with observed=${observed}.\n\n` +
-                      `@claude please run:\n\n` +
-                      `\`\`\`\nlattice grow close ${slug} --result won --observed-value ${observed} --rationale "auto-closed: grow check verdict=succeeded"\n\`\`\`\n\n` +
-                      `Commit + push to main directly — this is a low-risk YAML rename.`;
+              title = "@claude grow close " + slug + " (won)";
+              body  = "Hypothesis " + slug + " succeeded with observed=" + observed + ".\n\n" +
+                      "@claude please run:\n\n" +
+                      "```\nlattice grow close " + slug + " --result won --observed-value " + observed + " --rationale \"auto-closed: grow check verdict=succeeded\"\n```\n\n" +
+                      "Commit + push to main directly — this is a low-risk YAML rename.";
             } else {
-              title = `@claude grow auto-rollback ${slug} (failed)`;
-              body  = `Hypothesis ${slug} failed with observed=${observed}.\n\n` +
-                      `@claude please open a PR (NOT direct push) running:\n\n` +
-                      `\`\`\`\nlattice grow auto-rollback ${slug} --execute --yes\n\`\`\`\n\n` +
-                      `This will git-revert the run commit. Human approval required on the PR.`;
+              title = "@claude grow auto-rollback " + slug + " (failed)";
+              body  = "Hypothesis " + slug + " failed with observed=" + observed + ".\n\n" +
+                      "@claude please open a PR (NOT direct push) running:\n\n" +
+                      "```\nlattice grow auto-rollback " + slug + " --execute --yes\n```\n\n" +
+                      "This will git-revert the run commit. Human approval required on the PR.";
             }
-            try {
-              execSync(`gh issue create -R "${process.env.REPO}" -t ${JSON.stringify(title)} -b ${JSON.stringify(body)} -l lattice-auto-action`, { stdio: "inherit" });
+            const res = spawnSync("gh",
+              ["issue","create","-R",repo,"-t",title,"-b",body,"-l","lattice-auto-action"],
+              { stdio: "inherit", shell: false });
+            if (res.status === 0) {
               dispatched++;
-            } catch (e) {
-              console.error(`[auto-action] gh issue create failed for ${slug}:`, e.message);
+            } else {
+              console.error("[auto-action] gh issue create failed for " + slug + " (exit " + res.status + ")");
             }
           }
-          console.log(`[auto-action] dispatched ${dispatched} @claude issue(s)`);
+          console.log("[auto-action] dispatched " + dispatched + " @claude issue(s)");
           NODE
 AUTOWORKFLOW
   fi
