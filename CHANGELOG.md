@@ -2,6 +2,16 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.4] — 2026-05-21
+
+**Closes HIGH #86 — header `${VAR}` env-var exfiltration.** Same shape as the v2.2 cmd: RCE: a hypothesis YAML in any PR could include `Authorization: "Bearer ${ANTHROPIC_API_KEY}"` and the next `lattice grow measure` run would exfiltrate the token to whatever URL the YAML chose. Default-deny now.
+
+### Fixed (HIGH)
+- `_grow_fetch_metric` header interpolation is **default-deny**. Only env vars matching `LATTICE_HEADER_*` interpolate. Opt-out: `LATTICE_ALLOW_HEADER_INTERPOLATION=1` OR `security.allow_header_interpolation: true` in `.lattice/config.yml` (parity with `allow_cmd_sources`).
+- Refused interpolations print a clear `[fetch] refusing header interpolation of ${X}` notice on stderr — loud failure, not silent leak.
+
+Closes #86. Reported by external review against v2.2.1; verified in `/tmp/h86` with `SUPER_SECRET_TOKEN` blocked + `LATTICE_HEADER_FOO` allowed.
+
 ## [2.2.3] — 2026-05-21
 
 **Stress dimension formalized — parallel hardening as a Lattice primitive.**

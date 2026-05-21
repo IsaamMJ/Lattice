@@ -6552,11 +6552,34 @@ _grow_fetch_metric() {
           k="${h%%:*}"; v="${h#*:}"
           # Strip one leading space after colon
           v="${v# }"
-          # ${VAR} interpolation via envsubst-like loop
+          # v2.2.4 (#86): default-deny env interpolation. Only var names
+          # matching LATTICE_HEADER_<NAME> are eligible. A YAML containing
+          # `Authorization: "Bearer ${ANTHROPIC_API_KEY}"` previously would
+          # exfiltrate the key to whatever URL the YAML chose. Now the same
+          # header refuses to interpolate and curl receives the literal
+          # placeholder (which the remote will reject — loud failure, not
+          # silent leak). Opt-in via the LATTICE_HEADER_ prefix OR via
+          # security.allow_header_interpolation: true in .lattice/config.yml
+          # for parity with the cmd: source allow-list pattern.
+          local _hdr_unrestricted=0
+          if [ "${LATTICE_ALLOW_HEADER_INTERPOLATION:-0}" = "1" ]; then
+            _hdr_unrestricted=1
+          elif [ -f .lattice/config.yml ] && awk '
+            /^security:/ { ins=1; next }
+            ins && /^[a-zA-Z_]/ { ins=0 }
+            ins && /^[[:space:]]+allow_header_interpolation:[[:space:]]*true[[:space:]]*$/ { print "y"; exit }
+          ' .lattice/config.yml | grep -q y; then
+            _hdr_unrestricted=1
+          fi
           interp="${v}"
           while [[ "${interp}" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
             local var_name="${BASH_REMATCH[1]}"
-            local var_value="${!var_name:-}"
+            local var_value=""
+            if [ "${_hdr_unrestricted}" -eq 1 ] || [[ "${var_name}" == LATTICE_HEADER_* ]]; then
+              var_value="${!var_name:-}"
+            else
+              echo "[fetch] refusing header interpolation of \${${var_name}} (default-deny). Use LATTICE_HEADER_${var_name#LATTICE_HEADER_} or set security.allow_header_interpolation: true" >&2
+            fi
             interp="${interp//\$\{${var_name}\}/${var_value}}"
           done
           curl_args+=(-H "${k}: ${interp}")
