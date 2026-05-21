@@ -34,13 +34,29 @@ fetch() {
 SHA_MANIFEST_URL="${RAW}/SHA256SUMS"
 SHA_MANIFEST="${TMPDIR:-/tmp}/lattice-SHA256SUMS.$$"
 verify_checksums() {
+  # v2.3.1 (abuse-audit + cross-cutting): hard-fail when manifest or hasher
+  # is absent UNLESS the operator explicitly opts out with
+  # LATTICE_SKIP_INTEGRITY=1. v2.2.5 soft-failed here, which defeated the
+  # point of the check: an attacker who can poison the script CDN can
+  # equally serve a 404 on /SHA256SUMS. Fail-closed by default.
   if ! fetch "${SHA_MANIFEST_URL}" "${SHA_MANIFEST}" 2>/dev/null; then
-    echo "[lattice] WARN: SHA256SUMS not reachable — install proceeded WITHOUT integrity verification."
-    echo "[lattice]       Source: ${RAW}/SHA256SUMS"
+    echo "[lattice] !!! SHA256SUMS not reachable at ${SHA_MANIFEST_URL}"
+    if [ "${LATTICE_SKIP_INTEGRITY:-0}" != "1" ]; then
+      echo "[lattice] !!! refusing install. Override with LATTICE_SKIP_INTEGRITY=1 if you know what you're doing."
+      rm -rf "${DEST}"/audit.md "${DEST}"/audit-sweep.md "${SCRIPT_DEST}" 2>/dev/null
+      exit 4
+    fi
+    echo "[lattice] WARN: LATTICE_SKIP_INTEGRITY=1 — proceeding WITHOUT verification (you've been warned)."
     return 0
   fi
   if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-    echo "[lattice] WARN: sha256sum/shasum not available — skipping integrity verification."
+    echo "[lattice] !!! no sha256sum/shasum on PATH — cannot verify integrity"
+    if [ "${LATTICE_SKIP_INTEGRITY:-0}" != "1" ]; then
+      echo "[lattice] !!! refusing install. Install GNU coreutils (or shasum), or override with LATTICE_SKIP_INTEGRITY=1."
+      rm -rf "${DEST}"/audit.md "${DEST}"/audit-sweep.md "${SCRIPT_DEST}" 2>/dev/null
+      exit 4
+    fi
+    echo "[lattice] WARN: LATTICE_SKIP_INTEGRITY=1 — proceeding WITHOUT verification."
     return 0
   fi
   local bad=0

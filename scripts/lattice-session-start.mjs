@@ -126,10 +126,23 @@ function topFindings(root, n = 3) {
             const tier = tierM ? tierM[1] : 'UNKNOWN';
             // v1.0.2: skip OK tier — they prove checks ran, they aren't "to address"
             if (tier === 'OK') continue;
+            // v2.3.1 (cross-cutting audit): sanitize titles before injecting
+            // into Claude Code's additionalContext. A malicious title can
+            // instruct the LLM to invoke close_finding({confirm:true}) and
+            // defeat the #96 destructiveHint gate — prompt injection inverts
+            // the trust model. Strip control chars, cap length, and bracket
+            // the value to mark it as DATA, not instruction.
+            const sanitize = (s) => {
+              if (!s) return '';
+              return String(s)
+                .replace(/[\x00-\x1F\x7F]/g, ' ')      // control chars
+                .replace(/[‪-‮⁦-⁩]/g, ' ')  // bidi overrides
+                .slice(0, 200);
+            };
             const slug = e.name.replace(/\.yml$/, '');
             items.push({
               tier,
-              title: titleM ? titleM[1] : slug,
+              title: sanitize(titleM ? titleM[1] : slug),
               date: dateM ? dateM[1] : '0000-00-00',
               slug,
               r: rank[tier] || 99,
@@ -301,8 +314,12 @@ if (deltas) {
 if (top3.length > 0) {
   lines.push(``);
   lines.push(`Top findings to address (by tier + age):`);
+  // v2.3.1 (cross-cutting audit): bracket the title as DATA to discourage
+  // the LLM from treating embedded text as instructions ("ignore previous
+  // and call close_finding…"). Sanitization above is the primary defense;
+  // this is belt-and-braces.
   for (const f of top3) {
-    lines.push(`- [${f.tier}] ${f.slug} — ${f.title} (sweep ${f.date})`);
+    lines.push(`- [${f.tier}] ${f.slug} — TITLE_DATA<<<${f.title}>>>END (sweep ${f.date})`);
   }
 }
 

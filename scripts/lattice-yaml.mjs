@@ -54,21 +54,40 @@ function stripValue(line, key) {
 }
 
 function readField(text, key) {
-  // First occurrence of `^key:` (at column 0 — block scalar items / nested fields
-  // start with whitespace and are ignored)
+  // v2.3.1 (cli-tool-audit): handle block scalars (`key: |` / `key: >`) by
+  // reading continuation lines (indented) and joining them. Previously
+  // returned bare `|` which is the same bug class as #88 (close.sh strip).
   const lines = text.split(/\n/);
-  const prefix = key + ':';
+  const keyRe = new RegExp('^' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:');
   for (let i = 0; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.startsWith(prefix) || l.startsWith(prefix + ' ') || l.startsWith(prefix + '\t')) {
-      return stripValue(l, key);
+    const l = lines[i].replace(/\r$/, '');
+    if (!keyRe.test(l)) continue;
+    // Extract everything after `key:` and surrounding whitespace
+    let inline = l.replace(new RegExp('^' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*'), '');
+    // Block scalar indicator? `|`, `|-`, `|+`, `>`, `>-`, `>+`
+    const blockMatch = inline.match(/^([|>])([+\-]?)\s*$/);
+    if (blockMatch) {
+      const folded = blockMatch[1] === '>';
+      // Read indented continuation lines until first non-indented non-empty.
+      const buf = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const c = lines[j].replace(/\r$/, '');
+        if (c === '') { buf.push(''); continue; }
+        if (/^\s/.test(c)) {
+          // Strip the common indent (use first indented line's indent)
+          buf.push(c.replace(/^\s{2}/, '').replace(/^\s+/, ''));
+        } else {
+          break;
+        }
+      }
+      // Trim trailing empties for default chomp behaviour
+      while (buf.length && buf[buf.length - 1] === '') buf.pop();
+      return folded ? buf.join(' ') : buf.join('\n');
     }
-    // Tolerate the rare `key :` with whitespace before colon, matching the
-    // legacy grep -E '^key[[:space:]]*:'
-    const m = l.match(new RegExp('^' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:'));
-    if (m) {
-      return stripValue(l, key);
-    }
+    // Inline scalar — strip matched-pair quotes
+    if (inline.startsWith('"') && inline.endsWith('"') && inline.length >= 2) inline = inline.slice(1, -1);
+    else if (inline.startsWith("'") && inline.endsWith("'") && inline.length >= 2) inline = inline.slice(1, -1);
+    return inline;
   }
   return '';
 }

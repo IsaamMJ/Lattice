@@ -2,6 +2,34 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] — 2026-05-21
+
+**v2.3.0's new dimensions eat their own dogfood.** Ran `/audit-sweep . abuse cli-tool cross-cutting` against Lattice itself — 3 parallel sub-agents returned **13 findings (4 HIGH, 5 MED, 4 WATCH/LOW)** in under 5 minutes. Most were bypasses to fixes shipped earlier today. The rule libraries earned their place.
+
+### Fixed (HIGH — most are bypasses to v2.2.5 / v2.2.4 fixes)
+- **Worker rate limiter bypass (abuse-audit).** v2.2.5 #90 added the limiter but: (a) `X-Real-IP` header was attacker-spoofable (Cloudflare authoritatively sets only `CF-Connecting-IP`); (b) empty IP returned `allowed=true`. Now: `CF-Connecting-IP` only, fail-CLOSED on empty IP or missing KV.
+- **SHA256SUMS verifier soft-failed (abuse-audit + cross-cutting).** v2.2.5 #91 added the manifest but warned-and-continued when manifest 404'd OR sha256sum was absent — defeating the point (an attacker who can poison scripts can equally serve a 404 on `/SHA256SUMS`). Now: fail-CLOSED, refuse install, exit 4. Override only via explicit `LATTICE_SKIP_INTEGRITY=1` env.
+- **`observed_value` second-order injection (abuse-audit).** v2.2.2 fixed argv/`shell:false` for the @claude dispatch slug, but `observed_value` (YAML-derived) was still interpolated into a markdown code fence that @claude is INSTRUCTED to execute. `combined_value: "1; lattice grow close other-slug --result won"` would have run the second command. Now: coerce to `Number`, refuse non-finite, splice the coerced string.
+- **`lattice-yaml.mjs` ignores block scalars (cli-tool-audit).** v2.2.5 #98's Node helper returned `|` literally instead of the multi-line value — same bug class as #88 (close.sh strip), reintroduced on the read side. Now: handles `|`, `|-`, `|+`, `>`, `>-`, `>+` block scalars with proper indent-strip + chomp.
+
+### Fixed (MED)
+- **Worker `/health` skipped rate limit (cross-cutting).** Asymmetric-cost DoS + victim-quota burning. Now: `/health` runs through the same limiter when an IP is present.
+- **Lock-file accumulation (cli-tool-audit).** `_append_relates_to` left `.lattice/.locks/*.lock` files behind, not gitignored. Now: moved to `.lattice/cache/locks/`. `lattice setup` emits a `.lattice/.gitignore` that excludes `cache/`, `.locks/`, `sessions/`, `usage/`.
+- **SessionStart title prompt-injection (cross-cutting).** Finding titles were injected verbatim into Claude Code's `additionalContext`. A malicious title could instruct the LLM to invoke `close_finding({confirm: true})` — bypassing the v2.2.5 #96 destructiveHint gate, since the LLM itself was being deceived. Now: control-char strip + bidi-override strip + 200-char cap + `TITLE_DATA<<<…>>>END` data brackets.
+
+### Fixed (LOW polish)
+- **#81: age column + `--sort=age` in `lattice list`.** `Age` column shows `Nd` / `Nw` / `Nm` with `⚠` for >30 days. Defaults to `--sort=tier`; `--sort=age` oldest-first. Header row added so the columns are labeled.
+
+### Deferred (filed but not fixed in v2.3.1)
+- WATCH `_close_print_unblocked` fork-per-finding (cli-tool, would benefit from the lattice-yaml.mjs bulk mode — separate ship)
+- WATCH `_validate_relates_chains` bash recursion depth bound (cli-tool, edge case)
+- MED `_grow_fetch_metric` header allow-list still YAML-controlled URL (abuse, hard-deny would over-restrict legitimate use)
+
+### Process learnings
+- **Sub-agents work for self-audit even when bash-sandboxed.** 3 agents, all static analysis, 13 real findings in 5 minutes.
+- **The new dimensions actually catch the right bugs.** 7 of 13 findings were bypasses to fixes shipped earlier the same day — the kind a re-run of the OLD per-module per-dimension sweep would have missed.
+- **The self-improvement loop now demonstrably works:** dispatch → find → fix → re-dispatch. We just did one full lap.
+
 ## [2.3.0] — 2026-05-21
 
 **Closes #99 — `abuse` + `cli-tool` audit dimensions + `cross-cutting` dispatch mode.** The self-audit gap formalized: prior `/audit-sweep` runs on Lattice itself missed the 10 bugs an external reviewer found in 30 minutes, because the rule libraries were calibrated for web apps. v2.3 ships the rule libraries that match Lattice's actual shape.

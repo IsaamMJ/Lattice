@@ -945,16 +945,24 @@ _append_relates_to() {
   [ -f "${file}" ] || { echo "[link] target yaml not found: ${file}" >&2; return 1; }
   # v2.2.2 (race-finding): per-PID tmp + flock so concurrent `lattice link`
   # calls can't clobber each other's tmp or lose appended entries.
-  local lockdir=".lattice/.locks"
-  mkdir -p "${lockdir}" 2>/dev/null
-  local lockfile="${lockdir}/$(basename "${file}").lock"
-  exec {_LFD}>>"${lockfile}"
-  if command -v flock >/dev/null 2>&1; then
-    flock "${_LFD}" || true
+  # v2.3.1: locks live under .lattice/cache/locks (already gitignored via
+  # cache/ convention), not .lattice/.locks/ (which leaked into commits).
+  local lockdir=".lattice/cache/locks"
+  if ! mkdir -p "${lockdir}" 2>/dev/null; then
+    echo "[link] WARN: could not create lockdir ${lockdir} — proceeding without lock (race possible)" >&2
+    lockdir=""
+  fi
+  local lockfile=""
+  [ -n "${lockdir}" ] && lockfile="${lockdir}/$(basename "${file}").lock"
+  if [ -n "${lockfile}" ]; then
+    exec {_LFD}>>"${lockfile}"
+    if command -v flock >/dev/null 2>&1; then
+      flock "${_LFD}" || true
+    fi
   fi
   # Idempotent: re-check under lock so two parallel callers don't double-write
   if grep -qE "id:[[:space:]]*\"?${rid}\"?.*kind:[[:space:]]*${kind}" "${file}" 2>/dev/null; then
-    eval "exec ${_LFD}>&-"
+    [ -n "${lockfile}" ] && eval "exec ${_LFD}>&-"
     return 0
   fi
   local esc_reason="${reason//\"/\\\"}"
@@ -977,7 +985,7 @@ _append_relates_to() {
   else
     printf 'relates_to:\n%s\n' "${entry}" >> "${file}"
   fi
-  eval "exec ${_LFD}>&-"
+  [ -n "${lockfile}" ] && eval "exec ${_LFD}>&-"
 }
 
 # v2.2 cmd_link — `lattice link <id-a> <id-b> --kind <blocks|duplicate-of>
@@ -1303,11 +1311,10 @@ cmd_list() {
   local filter_module="" filter_tier="" filter_status="" filter_dim=""
   local filter_milestone="" filter_exposure=""
   local due_for_review=0
-  local blocked_filter=""   # "" = no filter, "blocked" = only blocked, "unblocked" = only unblocked
-  local show_effective=0    # --effective-tier: render tier post-demotion
-  # v1.3.1 (#16): OK-tier findings hidden by default. They're audit-passed
-  # markers, not actionable work. --include-ok or --tier OK shows them.
+  local blocked_filter=""
+  local show_effective=0
   local include_ok=0
+  local sort_mode="tier"   # v2.3.1 (#81): tier (default) | age (oldest first)
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --module)    filter_module="$2"; shift 2 ;;
@@ -1321,9 +1328,15 @@ cmd_list() {
       --unblocked) blocked_filter="unblocked"; shift ;;
       --blocked)   blocked_filter="blocked"; shift ;;
       --include-ok|--all) include_ok=1; shift ;;
+      --sort)      sort_mode="$2"; shift 2 ;;
+      --sort=*)    sort_mode="${1#--sort=}"; shift ;;
       *) die "list: unknown arg: $1" ;;
     esac
   done
+  case "${sort_mode}" in
+    tier|age) ;;
+    *) die "list: --sort must be 'tier' or 'age' (got: ${sort_mode})" ;;
+  esac
   # If user explicitly filters --tier OK, they want OK — let it through.
   [ "${filter_tier^^}" = "OK" ] && include_ok=1
   # Normalize "partial" alias → "in_progress" (B2)
@@ -1336,6 +1349,7 @@ cmd_list() {
 
   shopt -s nullglob
   local count=0
+  local -a _LIST_ROWS=()
   for f in .lattice/findings/open/*/*.yml .lattice/findings/open/*.yml; do
     [ -f "${f}" ] || continue
 
@@ -1424,16 +1438,75 @@ cmd_list() {
       fi
     fi
 
-    # v1.1.2 (#50): hide the "—  :" tail when both file and line are empty,
-    # which happens for finding YAMLs that lack file:/line: fields (e.g. some
-    # audit-sweep emissions). Renders cleanly as just `module/rule` then extra.
-    if [ -z "${file_field}" ] && [ -z "${line_field}" ]; then
-      printf "%-9s %-12s %s/%s%s\n" "${display_tier}" "${dimension}" "${module}" "${rule}" "${extra}"
-    else
-      printf "%-9s %-12s %s/%s — %s:%s%s\n" "${display_tier}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}"
+    # v2.3.1 (#81): compute age. Prefer first_seen_sweep (audit-sweep stamp),
+    # fall back to sweep_date, fall back to file mtime. Display as Nd / Nw / Nm.
+    local first_sweep age_days="" age_disp="-"
+    first_sweep="$(yaml_field "${f}" "first_seen_sweep" 2>/dev/null)"
+    [ -z "${first_sweep}" ] && first_sweep="$(yaml_field "${f}" "sweep_date" 2>/dev/null)"
+    if [[ "${first_sweep}" =~ ^([0-9]{4})-?([0-9]{2})-?([0-9]{2}) ]]; then
+      local sy="${BASH_REMATCH[1]}" sm="${BASH_REMATCH[2]}" sd="${BASH_REMATCH[3]}"
+      # Use Python-free Julian-ish day math via date. Fall back silently.
+      if command -v date >/dev/null 2>&1; then
+        local sweep_epoch today_epoch
+        sweep_epoch="$(date -d "${sy}-${sm}-${sd}" +%s 2>/dev/null || true)"
+        today_epoch="$(date -u +%s 2>/dev/null || true)"
+        if [ -n "${sweep_epoch}" ] && [ -n "${today_epoch}" ]; then
+          age_days=$(( (today_epoch - sweep_epoch) / 86400 ))
+        fi
+      fi
     fi
+    if [ -z "${age_days}" ] || [ "${age_days}" -lt 0 ] 2>/dev/null; then
+      local mtime; mtime="$(stat -c %Y "${f}" 2>/dev/null || stat -f %m "${f}" 2>/dev/null || echo '')"
+      if [ -n "${mtime}" ]; then
+        local now; now="$(date -u +%s)"
+        age_days=$(( (now - mtime) / 86400 ))
+      fi
+    fi
+    # Format: Nd, Nw, Nm. Add ⚠ marker for >30d.
+    if [ -n "${age_days}" ] && [ "${age_days}" -ge 0 ] 2>/dev/null; then
+      if [ "${age_days}" -lt 14 ]; then
+        age_disp="${age_days}d"
+      elif [ "${age_days}" -lt 60 ]; then
+        age_disp="$((age_days / 7))w"
+      else
+        age_disp="$((age_days / 30))m"
+      fi
+      [ "${age_days}" -ge 30 ] && age_disp="${age_disp}⚠"
+    fi
+
+    # v2.3.1 (#81): collect-then-sort instead of streaming print.
+    # Format per row: <sort-key>|<display-line>
+    local sort_key=""
+    if [ "${sort_mode}" = "age" ]; then
+      # Oldest first → larger age_days = lower sort key (so they print first).
+      # Use 99999 - age_days as numeric key (padded to 5 chars).
+      local inv=99999
+      [ -n "${age_days}" ] && [ "${age_days}" -ge 0 ] && inv=$((99999 - age_days))
+      sort_key="$(printf '%05d' "${inv}")"
+    else
+      # tier sort — reuse tier priority
+      case "${display_tier}" in
+        CRITICAL) sort_key="1" ;; BLOCKER) sort_key="2" ;; HIGH) sort_key="3" ;;
+        RISK)     sort_key="4" ;; DRIFT)   sort_key="5" ;; MEDIUM) sort_key="6" ;;
+        WATCH)    sort_key="7" ;; LOW)     sort_key="8" ;; *)       sort_key="9" ;;
+      esac
+    fi
+
+    local row
+    if [ -z "${file_field}" ] && [ -z "${line_field}" ]; then
+      row="$(printf "%-9s %-8s %-12s %s/%s%s" "${display_tier}" "${age_disp}" "${dimension}" "${module}" "${rule}" "${extra}")"
+    else
+      row="$(printf "%-9s %-8s %-12s %s/%s — %s:%s%s" "${display_tier}" "${age_disp}" "${dimension}" "${module}" "${rule}" "${file_field}" "${line_field}" "${extra}")"
+    fi
+    _LIST_ROWS+=("${sort_key}|${row}")
     count=$((count + 1))
   done
+
+  # v2.3.1 (#81): sort + emit.
+  if [ "${count}" -gt 0 ]; then
+    printf "%-9s %-8s %-12s %s\n" "TIER" "AGE" "DIMENSION" "MODULE/RULE — FILE:LINE"
+    printf '%s\n' "${_LIST_ROWS[@]}" | sort -t'|' -k1,1 | sed 's/^[^|]*|//'
+  fi
 
   echo ""
   if [ "${count}" -eq 0 ] && [ "${due_for_review}" -eq 1 ]; then
@@ -7281,7 +7354,18 @@ WORKFLOW
             }
             const verdict = r.verdict || "?";
             if (verdict !== "succeeded" && verdict !== "failed") continue;
-            const observed = String(r.combined_value != null ? r.combined_value : (r.observed_value != null ? r.observed_value : ""));
+            // v2.3.1 (abuse-audit): observed_value flows into a markdown code
+            // fence that @claude is INSTRUCTED to execute. Coerce to numeric
+            // and refuse non-numeric values. Without this, a hypothesis with
+            // `combined_value: "1; lattice grow close other-slug --result won"`
+            // gets the second command auto-run by @claude.
+            const observedRaw = r.combined_value != null ? r.combined_value : (r.observed_value != null ? r.observed_value : "");
+            const observedNum = Number(observedRaw);
+            if (!Number.isFinite(observedNum)) {
+              console.error("[auto-action] refusing non-numeric observed value for", slug, ":", observedRaw);
+              continue;
+            }
+            const observed = String(observedNum);
             let title, body;
             if (verdict === "succeeded") {
               title = "@claude grow close " + slug + " (won)";
@@ -8046,6 +8130,25 @@ GITATTR
     echo "  [ok] .lattice/.gitattributes (LF pin for Windows CRLF safety)"
   else
     echo "  [ok] .lattice/.gitattributes already present (preserved)"
+  fi
+
+  # v2.3.1: gitignore for the cache + locks dirs. Without this, projects
+  # using lattice end up committing lock files and statusline cache.
+  if [ ! -f .lattice/.gitignore ]; then
+    cat > .lattice/.gitignore <<'LATTICEGITIGNORE'
+# Runtime cache + per-process locks — never commit.
+cache/
+.locks/
+
+# Per-session jsonl traces — local-only, large, churn.
+sessions/
+
+# Author-local usage log (may also live globally under ~/.claude/).
+usage/
+LATTICEGITIGNORE
+    echo "  [ok] .lattice/.gitignore (cache/ + .locks/ excluded)"
+  else
+    echo "  [ok] .lattice/.gitignore already present (preserved)"
   fi
 
   # 2. Config (only if missing — never overwrite existing)
