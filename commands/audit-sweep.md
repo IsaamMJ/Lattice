@@ -1,6 +1,6 @@
 ---
 description: Run audit + scale + security + env-contract (default) across every module via one dispatch per module, aggregate into a master findings manifest with cross-cutting pattern detection. Use when the user wants a full project audit, asks "audit this codebase", invokes `/audit-sweep`, or mentions multi-module sweep / cross-cutting review.
-argument-hint: <project-root> [audit|scale|security|env-contract|flow|coverage] [auto] [<module-paths...>]
+argument-hint: <project-root> [audit|scale|security|env-contract|flow|coverage|abuse|cli-tool] [cross-cutting] [auto] [<module-paths...>]
 allowed-tools: Read Grep Glob Bash Task
 ---
 
@@ -26,6 +26,9 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 | `env-contract` | run only the env-contract dimension (default-on; see Step 0) |
 | `flow` | run only the flow dimension (opt-in only) |
 | `coverage` | run only the coverage dimension (opt-in only) |
+| `abuse` | (v2.3, #99) run the abuse dimension — see references/audit-abuse-rules.md |
+| `cli-tool` | (v2.3, #99) run the cli-tool dimension — see references/audit-cli-tool-rules.md |
+| `cross-cutting` | (v2.3, #99) DISPATCH MODE: one whole-repo dispatch instead of per-module. See Step 2b below. |
 | `auto` | auto-apply drafted checklist entries to CLAUDE.md and commit at end |
 | Path starting with `src/modules/` or absolute path | explicit module to audit (overrides auto-discovery) |
 | `.` or any other path | project root (defaults to `.` if none given) |
@@ -36,9 +39,14 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 | Token state | Run |
 |---|---|
 | No dimension token | audit + scale + security + env-contract (default) |
-| Any of audit/scale/security/env-contract/flow/coverage present | ONLY those |
+| Any of audit/scale/security/env-contract/flow/coverage/abuse/cli-tool present | ONLY those |
 
-`flow` and `coverage` are opt-in — explicitly include when wanted (`/audit-sweep . flow` or `/audit-sweep . security flow`).
+`flow`, `coverage`, `abuse`, `cli-tool` are opt-in — explicitly include when wanted (`/audit-sweep . abuse cli-tool`).
+
+**When to add `abuse` / `cli-tool`:**
+- Auditing CLI tools, install scripts, MCP servers, git-hook scripts, Cloudflare Workers — `cli-tool` is essential, `abuse` if there's any public endpoint or fetch-and-exec path.
+- Auditing typical web-app codebases — usually NOT needed; `security` already covers OWASP-shaped patterns. Add only if the codebase has install/update scripts of its own.
+- Self-audit (Lattice on Lattice, claude-code-setup on itself, similar) — ALWAYS include both. See #99 for rationale: the default web-app rule library misses bugs unique to developer tools.
 
 **Module filtering**: If one or more `src/modules/X` paths given, audit ONLY those. Else auto-discover via `Glob src/modules/*/`.
 
@@ -116,6 +124,25 @@ If any echo line is missing or out of order → drift. Stop, report, ask user ho
 **No parallel batches** unless user explicitly typed `parallel` as a token. Reason: parallel breaks the stop-condition gate, corrupts cross-cutting detection, and makes token usage unpredictable.
 
 **Dispatch prompt template + per-module methodology:** load [references/audit-sweep-module-dispatch.md](references/audit-sweep-module-dispatch.md). Keep the methodology block byte-identical across all dispatches so Anthropic prompt caching hits the cache after the first module.
+
+### Step 2b — Cross-cutting dispatch (v2.3, #99)
+
+When the user passes `cross-cutting` as a token, **skip Step 2 entirely** and dispatch ONE whole-repo sub-agent instead. Use this mode when:
+
+- The codebase is a developer tool / CLI / Worker / MCP server whose bugs span trust boundaries between modules.
+- The maintainer is doing self-audit (auditing the audit tool).
+- A prior per-module sweep missed clearly-real bugs found by external review.
+
+**Procedure:**
+
+1. Do NOT enumerate modules. The whole-repo dispatch sees everything.
+2. Dispatch a single Sonnet sub-agent. Methodology block must include:
+   - The dimension rule libraries selected (load `references/audit-abuse-rules.md` and `references/audit-cli-tool-rules.md` content into the brief verbatim if `abuse` / `cli-tool` are in scope)
+   - Instruction: "Reason about TRUST BOUNDARIES that span files. Where does data flow from one half of the codebase to another? Where does the install/update path hand control to runtime? Where does a YAML field reach across module lines into shell?"
+   - The standard finding schema + output discipline.
+3. Output: same `.lattice/findings/open/<TIER-MODULE-RULE>.yml` files. `module:` field is derived from the file the bug LIVES IN, even if the bug spans modules.
+
+**Tradeoff:** Higher per-invocation token cost (the dispatch reads more code), but catches the seam-bugs per-module sweeps miss. Use sparingly — pair with abuse + cli-tool dimensions.
 
 ### Step 3 — Aggregate into the sweep manifest
 

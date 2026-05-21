@@ -2,6 +2,23 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-05-21
+
+**Closes #99 — `abuse` + `cli-tool` audit dimensions + `cross-cutting` dispatch mode.** The self-audit gap formalized: prior `/audit-sweep` runs on Lattice itself missed the 10 bugs an external reviewer found in 30 minutes, because the rule libraries were calibrated for web apps. v2.3 ships the rule libraries that match Lattice's actual shape.
+
+### Added
+- **`abuse` dimension** — rule library at `commands/references/audit-abuse-rules.md`. Hostile-input thinking for tools with public endpoints, fetch-and-exec install paths, or shell out to operator-supplied strings. 6 rule slugs: `unauthenticated-public-endpoint`, `unverified-fetch-and-exec`, `eval-of-untrusted-string`, `indirect-env-expansion`, `command-substitution-of-user-input`, `unescaped-shell-interpolation`. Each with code-shape detector + repro shape + tier defaults.
+- **`cli-tool` dimension** — rule library at `commands/references/audit-cli-tool-rules.md`. Tool-shaped correctness — atomicity, signal handling, fork tax, MCP gates, regex-vs-string-compare. 8 rule slugs: `non-atomic-write-no-signal-handler`, `symlink-write-through`, `unescaped-regex-interpolation`, `silent-collision-skip`, `mcp-destructive-no-confirm`, `block-scalar-strip-without-state-machine`, `fork-per-field-in-loop`, `unbounded-jsonl-read`.
+- **`cross-cutting` dispatch mode** — `/audit-sweep . cross-cutting` skips per-module enumeration, dispatches ONE whole-repo sub-agent that reasons about trust boundaries spanning modules. Higher token cost; catches the seam-bugs per-module sweeps miss. Pair with `abuse cli-tool` for self-audits.
+
+### Recommended usage
+- **Self-audit of dev tools / CLIs / Workers:** `/audit-sweep . abuse cli-tool cross-cutting`
+- **Standard module sweep on a web app:** unchanged — `/audit-sweep .` still runs audit + scale + security + env-contract per module
+- **Quick fork-tax check on a perf-sensitive script:** `/audit-sweep . cli-tool` (just the cli-tool dimension)
+
+### Why this matters
+Lattice's stated long-term goal is self-improvement. That requires audit-sweep to find Lattice's own bugs before they ship. Empirically: 10 bugs fixed in v2.2.5 came from external review, not self-sweep. v2.3 closes the rule-library gap so future self-sweeps catch the same classes.
+
 ## [2.2.5] — 2026-05-21
 
 **Closes 10 bugs from external review pass. 4 HIGH (incl. 2 security + 1 corruption + 1 perf), 5 MED, 1 LOW.**
