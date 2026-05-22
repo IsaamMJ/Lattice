@@ -1796,8 +1796,21 @@ _projects_add() {
   case "${name}" in
     *[!A-Za-z0-9_-]*|"") die "projects add: name must be [A-Za-z0-9_-]+" ;;
   esac
-  # Resolve ~ + absolute
+  # v2.4.1 (abuse-audit): canonicalize path, reject .. segments, reject
+  # symlinks, reject /dev/*. Stops registered paths from amplifying any
+  # prior local foothold across every SessionStart fire.
   path="${path/#\~/${HOME}}"
+  case "${path}" in
+    *..*) die "projects add: refusing path with '..' segments: ${path}" ;;
+    /dev/*|/proc/*|/sys/*) die "projects add: refusing special-fs path: ${path}" ;;
+  esac
+  if command -v realpath >/dev/null 2>&1; then
+    local canon; canon="$(realpath -e "${path}" 2>/dev/null)" || die "projects add: path not resolvable: ${path}"
+    path="${canon}"
+  fi
+  if [ -L "${path}" ]; then
+    die "projects add: refusing symlink (resolve manually first): ${path}"
+  fi
   [ -d "${path}" ] || die "projects add: path not a directory: ${path}"
   if [ ! -d "${path}/.lattice" ]; then
     echo "[${PROG}] projects add: WARN: ${path}/.lattice/ doesn't exist yet (run \`lattice setup\` there first)" >&2
@@ -1962,7 +1975,10 @@ _projects_stats() {
 }
 
 _projects_patterns() {
-  # For each finding across the fleet, emit "(dimension|rule)|project". Count duplicates.
+  # v2.4.1 (abuse-audit): cluster on (dim, rule, tier) so MEDIUM-x and HIGH-x
+  # don't silently merge. Previous version dropped tier — let a project
+  # tier-launder by giving a slug the same name as another's higher-tier
+  # finding. Patterns view now distinguishes the two.
   local lines; lines="$(_projects_load)"
   [ -z "${lines}" ] && { echo "[${PROG}] projects: no projects registered"; return 0; }
   local tmp; tmp="$(mktemp 2>/dev/null || echo "/tmp/lattice-patterns.$$")"
@@ -1972,19 +1988,24 @@ _projects_patterns() {
     shopt -s nullglob
     for f in "${path}/.lattice/findings/open"/*.yml "${path}/.lattice/findings/open"/*/*.yml; do
       [ -f "${f}" ] || continue
-      local dim rule
+      local dim rule tier
       dim="$(node "${_YAML_HELPER}" "${f}" dimension 2>/dev/null)"
       rule="$(node "${_YAML_HELPER}" "${f}" rule 2>/dev/null)"
+      tier="$(node "${_YAML_HELPER}" "${f}" tier 2>/dev/null)"
       [ -z "${dim}" ] || [ -z "${rule}" ] && continue
-      printf '%s|%s|%s\n' "${dim}" "${rule}" "${name}" >> "${tmp}"
+      printf '%s|%s|%s|%s\n' "${tier:-?}" "${dim}" "${rule}" "${name}" >> "${tmp}"
     done
   done <<< "${lines}"
-  echo "Cross-cutting patterns ((dim, rule) tuples in 2+ projects):"
+  echo "Cross-cutting patterns ((tier, dim, rule) tuples in 2+ projects):"
   awk -F'|' '
-    { key=$1 "|" $2; if (!(key SUBSEP $3 in seen)) { seen[key SUBSEP $3]=1; count[key]++; projs[key]=projs[key] (projs[key] ? "," : "") $3 } }
+    { key=$1 "|" $2 "|" $3; if (!(key SUBSEP $4 in seen)) { seen[key SUBSEP $4]=1; count[key]++; projs[key]=projs[key] (projs[key] ? "," : "") $4 } }
     END {
       n=0
-      for (k in count) if (count[k] >= 2) { printf "  %s/%s — %d projects: %s\n", substr(k,1,index(k,"|")-1), substr(k,index(k,"|")+1), count[k], projs[k]; n++ }
+      for (k in count) if (count[k] >= 2) {
+        split(k, parts, "|")
+        printf "  [%s] %s/%s — %d projects: %s\n", parts[1], parts[2], parts[3], count[k], projs[k]
+        n++
+      }
       if (n == 0) print "  (none — no rule appears in 2+ projects yet)"
     }
   ' "${tmp}"

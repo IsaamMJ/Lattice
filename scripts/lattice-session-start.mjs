@@ -251,7 +251,21 @@ function readFleetStatus(currentRoot) {
     if (!registryPath) return null;
 
     const content = readFileSync(registryPath, 'utf8');
-    // Minimal YAML parse — just enough to extract name+path pairs.
+    // v2.4.1 (abuse-audit dual-parser-drift): match the bash _projects_load
+    // awk semantics exactly — strip leading/trailing whitespace, strip a
+    // matched-pair of quotes, strip commas (bash awk gsub(/[",]/, "")). Same
+    // input → same output across both parsers.
+    const stripValue = (s) => {
+      let v = s.trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      // Strip stray commas to match the bash parser, which gsub's [",] across
+      // the whole captured value. (If a real path contains a comma you have
+      // bigger problems than this parser.)
+      v = v.replace(/,/g, '');
+      return v;
+    };
     const projects = [];
     let curName = null;
     for (const raw of content.split('\n')) {
@@ -259,10 +273,11 @@ function readFleetStatus(currentRoot) {
       const m1 = line.match(/^\s*- name:\s*(.+)$/);
       const m2 = line.match(/^\s+name:\s*(.+)$/);
       const mp = line.match(/^\s+path:\s*(.+)$/);
-      if (m1) { curName = m1[1].trim().replace(/^["']|["']$/g, ''); continue; }
-      if (m2) { curName = m2[1].trim().replace(/^["']|["']$/g, ''); continue; }
+      if (m1) { curName = stripValue(m1[1]); continue; }
+      if (m2) { curName = stripValue(m2[1]); continue; }
       if (mp && curName) {
-        const p = mp[1].trim().replace(/^["']|["']$/g, '').replace(/^~/, home);
+        let p = stripValue(mp[1]);
+        if (p.startsWith('~')) p = home + p.slice(1);
         projects.push({ name: curName, path: p });
         curName = null;
       }

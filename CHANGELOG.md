@@ -2,6 +2,26 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] — 2026-05-21
+
+**Second self-audit lap closes 3 MEDs in v2.4.0.** Same loop as v2.3.1 → ran the dimension audit against the v2.4.0 aggregator, fixed what came back. No HIGH this round — proving the v2.3.1 fixes held.
+
+### Fixed (MEDIUM)
+- **`projects add` no path canonicalization (abuse-audit).** v2.4.0 accepted any directory path that existed. Now: refuses `..` segments, refuses `/dev/*` / `/proc/*` / `/sys/*`, calls `realpath -e` when available, refuses symlinks. Registered paths are replayed on every SessionStart fire — they need to be vetted at add-time.
+- **`projects patterns` dropped tier (abuse-audit).** Clustering keyed on `(dim, rule)` only — `MEDIUM-x` and `HIGH-x` (same rule slug, different tier) silently merged. Enabled tier-laundering. Now clusters on `(tier, dim, rule)`. Output format gains a `[TIER]` prefix.
+- **Dual-parser drift between bash + Node (cross-cutting).** The registry file was parsed by `_projects_load` (bash awk) and `readFleetStatus` (Node) independently. Bash stripped commas from paths via `gsub(/[",]/, "")`, Node didn't. SessionStart could silently disagree with `lattice projects list`. Node parser now matches bash semantics exactly (trim + strip matched-pair quotes + strip commas + tilde-expand).
+
+### Deferred (WATCH)
+- `_projects_findings` forks N node helpers per finding × N projects → ~150s on Windows for a 5-project × 100-finding fleet. Same fork-tax pattern that motivated `lattice-yaml.mjs` in v2.2.5. Fix: implement the `--bulk` mode that lattice-yaml.mjs's docstring already plans. Separate ship.
+
+### Today's process loop, demonstrated
+1. v2.3.0 shipped the `abuse` + `cli-tool` + `cross-cutting` dimensions (designed to catch dev-tool bugs)
+2. v2.3.1 ran the dimensions on Lattice itself → 7 fixes (4 HIGH, 3 MED)
+3. v2.4.0 shipped the `lattice projects` aggregator
+4. v2.4.1 ran the dimensions AGAIN on v2.4.0 → 3 MED, 0 HIGH
+
+**Pattern:** every new surface gets audited by the same primitives that defined it. The loop is real and the trend (4 HIGH → 0 HIGH between laps) is what self-improvement looks like in practice.
+
 ## [2.4.0] — 2026-05-21
 
 **Closes #89 — `lattice projects` cross-project aggregator.** Lattice was per-project. v2.4 makes it fleet-aware. The keystone feature for the stated goal "Lattice must support all my projects."
