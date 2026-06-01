@@ -193,6 +193,21 @@ require_helper() {
   [ -x "${h}" ] || [ -f "${h}" ] || die "missing helper: ${h}"
 }
 
+# Match a finding's tier against a --tier filter that may be a single tier
+# ("HIGH") or a comma-separated list ("CRITICAL,HIGH,MEDIUM"). Empty filter
+# matches everything. Before this, both cmd_list and the projects aggregator
+# did an exact string compare, so any comma list silently matched nothing —
+# which made `lattice projects findings --tier CRITICAL,HIGH,MEDIUM` report 0
+# even with findings on disk, despite CLAUDE.md advertising comma lists (#116).
+_tier_matches() {
+  local t="$1" filt="$2"
+  [ -z "${filt}" ] && return 0
+  case ",${filt}," in
+    *",${t},"*) return 0 ;;
+  esac
+  return 1
+}
+
 current_version() {
   local plugin="${SELF_DIR}/../.claude-plugin/plugin.json"
   local v=""
@@ -1371,7 +1386,7 @@ cmd_list() {
       local fil_lower="${filter_module,,}"
       [[ "${mod_lower}" == *"${fil_lower}"* ]] || continue
     fi
-    [ -n "${filter_tier}" ]   && [ "${tier}"   != "${filter_tier}" ]   && continue
+    _tier_matches "${tier}" "${filter_tier}" || continue
     [ -n "${filter_status}" ] && [ "${status}" != "${filter_status}" ] && continue
     [ -n "${filter_dim}" ]    && [ "${dimension}" != "${filter_dim}" ] && continue
     # v1.3.1 (#16): hide OK by default
@@ -1725,6 +1740,7 @@ cmd_projects() {
   local action="${1:-list}"; shift || true
   case "${action}" in
     add)       _projects_add "$@" ;;
+    scan)      _projects_scan "$@" ;;
     rm)        _projects_rm "$@" ;;
     list|ls)   _projects_list "$@" ;;
     findings)  _projects_findings "$@" ;;
@@ -1736,6 +1752,7 @@ cmd_projects() {
 lattice projects — cross-project aggregator (v2.4.0 #89)
 
   add <name> --path <path>       register a project (idempotent)
+  scan <root>                    discover + register every .lattice/ under <root> (depth<=3)
   rm <name>                      remove from registry
   list                           show all registered projects + finding counts
   findings [--tier T --dimension D]
@@ -1820,13 +1837,49 @@ _projects_add() {
   if [ ! -f "${reg}" ]; then
     printf 'projects:\n' > "${reg}"
   fi
-  # Idempotent: if name already registered, update its path
-  if grep -qE "^\s+name:\s*${name}\s*\$" "${reg}" 2>/dev/null; then
+  # Idempotent: if name already registered, refuse (the entry format is
+  # "  - name: X", so the clash check must allow the "- " list-item prefix —
+  # the old "^\s+name:" pattern never matched it, so duplicate names slipped
+  # through and corrupted the registry, #116).
+  if grep -qE "^\s*-\s*name:\s*${name}\s*\$" "${reg}" 2>/dev/null; then
     echo "[${PROG}] projects add: ${name} already registered — use 'lattice projects rm ${name}' first to re-register" >&2
     return 1
   fi
   printf '  - name: %s\n    path: %s\n' "${name}" "${path}" >> "${reg}"
   echo "[${PROG}] projects: added ${name} -> ${path}"
+}
+
+_projects_scan() {
+  # #116: auto-discover .lattice/ projects under a root so the fleet registry
+  # isn't hand-maintained (it drifted to 2-of-6 on the author's machine).
+  # Idempotent: paths already registered are skipped; name derived from the
+  # project dir basename (sanitized to [A-Za-z0-9_-]).
+  local root="${1:-.}"
+  root="${root/#\~/${HOME}}"
+  [ -d "${root}" ] || die "projects scan: not a directory: ${root}"
+  if command -v realpath >/dev/null 2>&1; then
+    root="$(realpath -e "${root}" 2>/dev/null || printf '%s' "${root}")"
+  fi
+  echo "[${PROG}] projects scan: discovering .lattice/ under ${root} (depth<=3)..." >&2
+  local reg; reg="$(_projects_registry_path)"
+  local found=0 added=0 skipped=0 d proj name
+  while IFS= read -r d; do
+    [ -z "${d}" ] && continue
+    proj="$(dirname "${d}")"
+    found=$((found + 1))
+    if [ -f "${reg}" ] && grep -qF "path: ${proj}" "${reg}" 2>/dev/null; then
+      skipped=$((skipped + 1)); echo "[${PROG}]   = $(basename "${proj}") (already registered)" >&2; continue
+    fi
+    name="$(basename "${proj}" | tr -cs 'A-Za-z0-9_-' '-' | sed 's/^-*//; s/-*$//')"
+    [ -z "${name}" ] && name="proj-${found}"
+    if _projects_add "${name}" --path "${proj}" >/dev/null 2>&1; then
+      added=$((added + 1)); echo "[${PROG}]   + ${name} -> ${proj}" >&2
+    else
+      skipped=$((skipped + 1)); echo "[${PROG}]   ! ${name} (skipped — name clash; add manually with a unique name)" >&2
+    fi
+  done < <(find "${root}" -maxdepth 3 -type d -name .lattice \
+             -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null)
+  echo "[${PROG}] projects scan: ${found} found, ${added} added, ${skipped} skipped"
 }
 
 _projects_rm() {
@@ -1890,7 +1943,7 @@ _projects_findings() {
       [ -f "${f}" ] || continue
       local tier dim module rule first_sweep
       tier="$(node "${_YAML_HELPER}" "${f}" tier 2>/dev/null)"
-      [ -n "${filter_tier}" ] && [ "${tier}" != "${filter_tier}" ] && continue
+      _tier_matches "${tier}" "${filter_tier}" || continue
       dim="$(node "${_YAML_HELPER}" "${f}" dimension 2>/dev/null)"
       [ -n "${filter_dim}" ] && [ "${dim}" != "${filter_dim}" ] && continue
       module="$(node "${_YAML_HELPER}" "${f}" module 2>/dev/null)"
