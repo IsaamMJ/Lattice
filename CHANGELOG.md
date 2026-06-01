@@ -2,6 +2,19 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.4] — 2026-06-01
+
+**Wave 5 self-hygiene — MCP enum/description drift + skill frontmatter.** Triaged the in-repo DRIFT findings; 2 of 5 were already stale (fixed in an earlier version, finding never closed — same pattern as the manual-report backlog).
+
+### Fixed
+- **MCP `dimension` enum lagged the CLI (`dimension-enum-incomplete`).** Added `abuse`, `cli-tool`, `observability` to match `VALID_DIMENSIONS` (synced with the v2.4.2 #102 fix).
+- **`get_context` MCP tool over-promised (`tool-description-overpromises`).** Description claimed "top-3 most urgent" + "recent session-event count" which `lattice context` doesn't emit. Reworded to match actual output (mode, telemetry, tier counts, ADRs/invariants in substrate mode).
+- **`lattice-fix` skill missing `allowed-tools` (`skill-frontmatter-missing-allowed-tools`).** Added `allowed-tools: Bash Read Edit Task`.
+
+### Closed as already-fixed (stale findings)
+- `tier-enum-incomplete` — the MCP tier enum already carries RISK/WATCH/INTENTIONAL/UNVERIFIABLE/OK.
+- `status-enum-incomplete` — `in_progress` already present alongside `partial`.
+
 ## [2.4.3] — 2026-06-01
 
 **Fleet aggregator actually works now (#116).** First piece of the cross-project pattern-mining epic (#115): the aggregator that `lattice projects findings` is built on reported "0 findings" across the fleet despite hundreds on disk.
