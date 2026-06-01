@@ -5999,6 +5999,71 @@ YML
     fi
   fi
 
+  # --- NEXT_PUBLIC manifest cross-check (#113 / #108) ---------------------
+  # NEXT_PUBLIC_* vars are inlined into the client bundle at BUILD time, so a
+  # NEXT_PUBLIC var READ in code but not DECLARED in any env manifest is a
+  # silent prod footgun: the canonical #108 case is code reading
+  # NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY while the manifest declares
+  # ..._ANON_KEY — `undefined` at runtime, no error, blank client. Scoped
+  # strictly to NEXT_PUBLIC_ keys (build-time client vars) to stay high-signal;
+  # server-only vars are intentionally often absent from .env.example and are
+  # NOT flagged here. Runs whenever any real manifest exists (not just
+  # docs/env.contract.md), since Next/Netlify projects declare in .env*/toml.
+  local manifest_files="" mf
+  for mf in .env.example .env.local .env .env.production .env.production.local netlify.toml; do
+    [ -f "${target_path}/${mf}" ] && manifest_files="${manifest_files} ${target_path}/${mf}"
+  done
+  if [ -n "${manifest_files}" ]; then
+    local declared_public used_public
+    # shellcheck disable=SC2086  # intentional word-split over manifest paths
+    declared_public="$(grep -hoE 'NEXT_PUBLIC_[A-Z0-9_]+' ${manifest_files} 2>/dev/null | sort -u)"
+    used_public="$(grep -REho 'process\.env\.NEXT_PUBLIC_[A-Z0-9_]+' \
+                 --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' \
+                 --include='*.mjs' --include='*.cjs' \
+                 --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.next \
+                 --exclude-dir=dist --exclude-dir=build --exclude-dir=coverage \
+                 --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=.netlify \
+                 "${target_path}" 2>/dev/null | sed 's/.*process\.env\.//' | sort -u)"
+    if [ -n "${used_public}" ]; then
+      local pk
+      while IFS= read -r pk; do
+        pk="$(printf '%s' "${pk}" | tr -cd 'A-Z0-9_' | head -c 60)"
+        [ -z "${pk}" ] && continue
+        if ! printf '%s\n' "${declared_public}" | grep -qFx "${pk}"; then
+          if [ "${write}" -eq 1 ]; then
+            ensure_project_dirs
+            mkdir -p .lattice/findings/open
+            local pub_slug="DRIFT-env-public-undeclared-${pk}"
+            local pub_dest=".lattice/findings/open/${pub_slug}.yml"
+            local today; today="$(date -u +%Y-%m-%d)"
+            local sweep_id="${LATTICE_SWEEP_ID:-$(date -u +%Y%m%d)$(printf '%06x' "$$" | tail -c6)}"
+            cat > "${pub_dest}" <<YML
+id: ${pub_slug}-id
+rule: env-public-var-undeclared
+dimension: env-contract
+tier: DRIFT
+module: env
+file: .env.example
+line: 1
+title: "client var ${pk} read in code but not declared in any env manifest (.env*/netlify.toml)"
+fix: "NEXT_PUBLIC_ vars are inlined at build time — add ${pk} to .env.example AND the deploy env (Netlify/Vercel), or fix the var name to match what is declared. Undeclared => undefined in the client bundle with no error (#108)."
+env_key: "${pk}"
+sweep_date: ${today}
+sweep_id: ${sweep_id}
+auditor: lattice/audit-env-contract@2.4.2
+status: open
+exposure: build-time-client
+YML
+            echo "[${PROG}] emitted: ${pub_dest} (DRIFT — env-public-var-undeclared)" >&2
+          else
+            printf '%-7s %-30s %-15s %s\n' "DRIFT" "${pk}" "[undeclared]" "(NEXT_PUBLIC not in .env*/netlify.toml)"
+          fi
+          found=$((found + 1))
+        fi
+      done <<< "${used_public}"
+    fi
+  fi
+
   if [ "${write}" -eq 1 ]; then
     echo "[${PROG}] audit-env-contract: ${found} finding(s) written to .lattice/findings/open/"
   else
