@@ -21,15 +21,28 @@ if [ ! -d "${DEST}" ]; then
 fi
 
 fetch() {
-  local url="$1" out="$2"
+  local url="$1" out="$2" tmp="$2.part.$$"
+  # #114: download to a temp file then atomic-rename. A network drop mid-fetch
+  # (common on Windows/git-bash) previously truncated the destination in place —
+  # a half-written lattice script throws "syntax error near ';;'" and bricks the
+  # CLI. With temp+rename, an interrupted download leaves the live file untouched.
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${url}" -o "${out}"
+    curl -fsSL "${url}" -o "${tmp}" || { rm -f "${tmp}"; echo "[lattice] download failed: ${url}" >&2; exit 1; }
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "${out}" "${url}"
+    wget -qO "${tmp}" "${url}" || { rm -f "${tmp}"; echo "[lattice] download failed: ${url}" >&2; exit 1; }
   else
     echo "[lattice] error: need curl or wget" >&2
     exit 1
   fi
+  # For the main executable, refuse to swap in a script that doesn't even parse.
+  if [ "$(basename "${out}")" = "lattice" ] && command -v bash >/dev/null 2>&1; then
+    if ! bash -n "${tmp}" 2>/dev/null; then
+      rm -f "${tmp}"
+      echo "[lattice] downloaded script failed syntax check — keeping current version (#114)" >&2
+      exit 1
+    fi
+  fi
+  mv -f "${tmp}" "${out}"
 }
 
 mkdir -p "${SCRIPT_DEST}" "${DOC_DEST}"

@@ -4108,6 +4108,13 @@ cmd_context() {
     echo "telemetry: ON — failures auto-file at github.com/IsaamMJ/Lattice/issues?q=label%3Atelemetry"
   else
     echo "telemetry: OFF — enable: lattice config telemetry on  (or: export LATTICE_OWNER_MODE=1)"
+    # #112: a project-level '.lattice/config.yml: telemetry: off' VETOES a
+    # global 'on'. If you enabled it globally but still see OFF here, you are
+    # either in a repo with a project-level off, or you ran `config telemetry
+    # on` (no --global) inside a different repo. Check: lattice config --show
+    if [ -f .lattice/config.yml ] && grep -qiE '^[[:space:]]*telemetry:[[:space:]]*(off|false|0)' .lattice/config.yml 2>/dev/null; then
+      echo "  ↳ this repo's .lattice/config.yml sets telemetry: off (overrides global on)"
+    fi
   fi
   echo ""
 
@@ -4180,7 +4187,13 @@ cmd_context() {
         local n=${by_tier["${t}"]:-0}
         [ ${n} -gt 0 ] && printf '  %s: %d\n' "${t}" "${n}"
       done
-      printf '  total: %d\n' "${total}"
+      # #109: headline total must match `lattice list` (which hides tier:OK
+      # acknowledged findings by default). Count actionable separately so the
+      # two surfaces never disagree; show acknowledged as an explicit addendum.
+      local _ok=${by_tier["OK"]:-0}
+      printf '  total: %d actionable' "$(( total - _ok ))"
+      [ "${_ok}" -gt 0 ] && printf ' (+%d acknowledged)' "${_ok}"
+      printf '\n'
     fi
     echo ""
   fi
@@ -5872,7 +5885,7 @@ cmd_audit_env_contract() {
             --include='*.mjs' --include='*.cjs' \
             --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
             --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage \
-            --exclude-dir=vendor --exclude-dir=.lattice \
+            --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=.netlify \
             "${target_path}" 2>/dev/null)
 
   # --- Pattern 3: const { X = 'lit' } = process.env -----------------------
@@ -5896,7 +5909,7 @@ cmd_audit_env_contract() {
             --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' \
             --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
             --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage \
-            --exclude-dir=vendor --exclude-dir=.lattice \
+            --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=.netlify \
             "${target_path}" 2>/dev/null)
 
   # --- Pattern 5: os.environ.get('X', 'lit') ------------------------------
@@ -5910,7 +5923,7 @@ cmd_audit_env_contract() {
             --include='*.py' \
             --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
             --exclude-dir=build --exclude-dir=__pycache__ --exclude-dir=.venv \
-            --exclude-dir=venv --exclude-dir=vendor --exclude-dir=.lattice \
+            --exclude-dir=venv --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=.netlify \
             "${target_path}" 2>/dev/null)
 
   # --- Pattern 6: String.fromEnvironment('X', defaultValue: 'lit') -------
@@ -5923,7 +5936,7 @@ cmd_audit_env_contract() {
   done < <(grep -REn "String\.fromEnvironment\([[:space:]]*['\"][A-Z][A-Z0-9_]*['\"].*defaultValue" \
             --include='*.dart' \
             --exclude-dir=.dart_tool --exclude-dir=build --exclude-dir=.git \
-            --exclude-dir=vendor --exclude-dir=.lattice \
+            --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=.netlify \
             "${target_path}" 2>/dev/null)
 
   # --- Contract-file cross-check (optional, only if docs/env.contract.md
@@ -5938,7 +5951,7 @@ cmd_audit_env_contract() {
                  --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
                  --exclude-dir=build --exclude-dir=.next --exclude-dir=coverage \
                  --exclude-dir=vendor --exclude-dir=.lattice --exclude-dir=__pycache__ \
-                 --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.dart_tool \
+                 --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.dart_tool --exclude-dir=.netlify \
                  '\bprocess\.env\.[A-Z][A-Z0-9_]+|os\.environ\.get\(['\''"][A-Z][A-Z0-9_]+|String\.fromEnvironment\(['\''"][A-Z][A-Z0-9_]+' \
                  --include='*.js' --include='*.ts' --include='*.tsx' --include='*.jsx' --include='*.py' --include='*.dart' \
                  "${target_path}" 2>/dev/null \
