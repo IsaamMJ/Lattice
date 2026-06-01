@@ -2,6 +2,17 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.3] — 2026-06-01
+
+**Fleet aggregator actually works now (#116).** First piece of the cross-project pattern-mining epic (#115): the aggregator that `lattice projects findings` is built on reported "0 findings" across the fleet despite hundreds on disk.
+
+### Fixed
+- **Comma-separated `--tier` matched nothing (#116).** Both `cmd_list` and the projects aggregator did an exact string compare, so `--tier CRITICAL,HIGH,MEDIUM` (advertised in CLAUDE.md + the session-start hint) silently matched zero findings. Added a shared `_tier_matches` helper that handles single tiers and comma lists; wired into both call sites.
+- **Registry clash-check never fired (#116).** `_projects_add`'s idempotency grep used `^\s+name:` but entries are written as `  - name: X` — so the `- ` prefix meant duplicate names were never detected, corrupting the registry (two same-named entries pointing at different paths). Fixed the pattern.
+
+### Added
+- **`lattice projects scan <root>` (#116).** Walks a root (depth ≤ 3, skips node_modules/.git) and registers every `.lattice/` project found — idempotent, paths already registered are skipped. Ends the hand-maintained registry that had drifted to 2-of-6 projects.
+
 ## [2.4.2] — 2026-06-01
 
 **Dogfood-backlog clearance.** Triage-verified all 12 open manual-report bugs (#100–114) against HEAD, then fixed the ones still real across PRs #125–128. All correctness/removal — no new env vars, stores, or surface area.
