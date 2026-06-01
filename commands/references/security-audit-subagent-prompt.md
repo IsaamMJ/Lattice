@@ -36,6 +36,7 @@ Patterns (with grep regex):
 | Prompt injection | user input concatenated into systemPrompt\|messages without escaping |
 | Tokens in URL | req\.query\.(token\|key\|jwt\|session) |
 | Stack traces in errors | throw err\|res.status.*err\.stack\|exception.*message exposed in response |
+| Server action no try/catch | files with `'use server'` (or under `app/**/actions/`) — exported `async function`/`export async` whose body `await`s without a top-level `try {`. An unhandled throw in a Server Action serializes to the client (leaking internals) or 500s the request with no graceful path. Flag each exported action lacking try/catch around its awaits. |
 
 Mark false_positive=true for:
 - Test files (*.spec.ts, *.test.ts)
