@@ -2,6 +2,23 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.2] — 2026-06-01
+
+**Dogfood-backlog clearance.** Triage-verified all 12 open manual-report bugs (#100–114) against HEAD, then fixed the ones still real across PRs #125–128. All correctness/removal — no new env vars, stores, or surface area.
+
+### Fixed
+- **`lattice context` count diverged from `lattice list` (#109).** Context counted `tier:OK` in its headline; list hides acknowledged OK by default. Context now reports `N actionable (+M acknowledged)`.
+- **Sync validator rejected `abuse`/`cli-tool`/`observability` dimensions (#102).** Shipped in the audit skills (v2.3.0) but missing from `VALID_DIMENSIONS`, so real abuse/observability findings were silently dropped during CLAUDE.md regen.
+- **Self-update could truncate the live script (#114).** `update.sh fetch()` wrote downloads directly to the destination; an interrupted fetch left a half-written `lattice` (`syntax error near ';;'`). Now downloads to `.part`, `bash -n`-verifies the main script, then atomic `mv`.
+- **env-contract scanned top-level `.netlify/` (#107).** Added `--exclude-dir=.netlify` to all env-var grep passes.
+- **Telemetry showed OFF after a global enable (#112).** Project-level `telemetry: off` vetoes global on; the OFF message now names that gotcha and flags this repo's config when set.
+- **`normalize` left semantic duplicates on disk silently (#103).** Two findings differing only in `module:`/`tier:` derive the same canonical id (sha1 excludes both) but renamed to different stems, so neither tripped the path-collision guard. New pre-pass groups by canonical id, surfaces the group, skips normalizing the extras, exits 3 on `--apply`. Never auto-deletes.
+- **security-audit missed server actions without try/catch (#111).** Added a detector row — an unhandled throw in a Next.js Server Action serializes internals to the client or 500s with no graceful path.
+- **Installer never vendored `commands/references/` (#100, #101).** Skills reference `references/<file>.md`, but install.sh/update.sh only copied top-level command files. Added a `REFERENCES` array (13/13 verified) + fetch loop into `~/.claude/commands/references/` in both installers.
+
+### Added
+- **env-contract NEXT_PUBLIC manifest cross-check (#113, #108).** Reads declared `NEXT_PUBLIC_` keys from `.env.example`/`.env.local`/`.env`/`.env.production*`/`netlify.toml` and flags any `NEXT_PUBLIC_` var read in code but declared nowhere — the exact `PUBLISHABLE_KEY`-vs-`ANON_KEY` footgun (#108). Build-time client vars only, to stay high-signal. Verified zero false positives on real Next.js repos.
+
 ## [2.4.1] — 2026-05-21
 
 **Second self-audit lap closes 3 MEDs in v2.4.0.** Same loop as v2.3.1 → ran the dimension audit against the v2.4.0 aggregator, fixed what came back. No HIGH this round — proving the v2.3.1 fixes held.
