@@ -7,10 +7,14 @@ set -euo pipefail
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
 COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close")
+# #100/#101: skills reference `references/<file>.md` (relative to command dir);
+# keep in sync with commands/references/*.md.
+REFERENCES=("audit-abuse-rules" "audit-cli-tool-rules" "audit-contract-format" "audit-finding-schema" "audit-sweep-manifest" "audit-sweep-module-dispatch" "audit-verify-subagent-prompt" "flow-audit-finding-schema" "flow-audit-subagent-prompt" "scale-audit-finding-schema" "scale-audit-subagent-prompt" "security-audit-finding-schema" "security-audit-subagent-prompt")
 SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh" "prepare-commit-msg-lattice.sh" "post-commit-resolve-pending.sh" "lattice-statusline.mjs" "lattice-session-start.mjs" "lattice-stop.mjs" "lattice-grow-telegram.mjs" "lattice-yaml.mjs")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
 DEST="${HOME}/.claude/commands"
+REF_DEST="${HOME}/.claude/commands/references"
 SCRIPT_DEST="${HOME}/.claude/lattice/scripts"
 DOC_DEST="${HOME}/.claude/lattice/docs"
 
@@ -100,12 +104,19 @@ verify_checksums() {
   echo "[lattice] integrity: all files verified against SHA256SUMS"
 }
 
-mkdir -p "${DEST}" "${SCRIPT_DEST}" "${DOC_DEST}"
+mkdir -p "${DEST}" "${SCRIPT_DEST}" "${DOC_DEST}" "${REF_DEST}"
 
 echo "[lattice] installing commands to ${DEST}"
 for cmd in "${COMMANDS[@]}"; do
   echo "[lattice]   commands/${cmd}.md"
   fetch "${RAW}/commands/${cmd}.md" "${DEST}/${cmd}.md"
+done
+
+# #100/#101: vendor the reference files the skills depend on.
+echo "[lattice] installing command references to ${REF_DEST}"
+for ref in "${REFERENCES[@]}"; do
+  echo "[lattice]   commands/references/${ref}.md"
+  fetch "${RAW}/commands/references/${ref}.md" "${REF_DEST}/${ref}.md"
 done
 
 echo "[lattice] installing helper scripts to ${SCRIPT_DEST}"

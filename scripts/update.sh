@@ -8,10 +8,16 @@ set -euo pipefail
 
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
 COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close")
+# #100/#101: the skill markdown points at `references/<file>.md` (relative to
+# the command dir), but the installer never vendored them — so installed skills
+# referenced files that didn't exist on disk (abuse rules, subagent prompts,
+# finding schemas). Keep this list in sync with commands/references/*.md.
+REFERENCES=("audit-abuse-rules" "audit-cli-tool-rules" "audit-contract-format" "audit-finding-schema" "audit-sweep-manifest" "audit-sweep-module-dispatch" "audit-verify-subagent-prompt" "flow-audit-finding-schema" "flow-audit-subagent-prompt" "scale-audit-finding-schema" "scale-audit-subagent-prompt" "security-audit-finding-schema" "security-audit-subagent-prompt")
 SCRIPTS=("lattice" "lattice-close.sh" "lattice-regenerate.sh" "lattice-reopen.sh" "lattice-write-manifest.sh" "migrate.sh" "migrate-status.sh" "migrate-v0.7.sh" "lattice-completion.bash" "lattice-completion.zsh" "prepare-commit-msg.sh" "prepare-commit-msg-lattice.sh" "post-commit-resolve-pending.sh" "lattice-statusline.mjs" "lattice-session-start.mjs" "lattice-stop.mjs" "lattice-grow-telegram.mjs" "lattice-yaml.mjs")
 DOCS=("finding-schema.md" "methodology.md" "contract-format.md")
 
 DEST="${HOME}/.claude/commands"
+REF_DEST="${HOME}/.claude/commands/references"
 SCRIPT_DEST="${HOME}/.claude/lattice/scripts"
 DOC_DEST="${HOME}/.claude/lattice/docs"
 
@@ -45,7 +51,7 @@ fetch() {
   mv -f "${tmp}" "${out}"
 }
 
-mkdir -p "${SCRIPT_DEST}" "${DOC_DEST}"
+mkdir -p "${SCRIPT_DEST}" "${DOC_DEST}" "${REF_DEST}"
 
 PREV="$(cat "${HOME}/.claude/lattice/VERSION" 2>/dev/null || echo "unknown")"
 echo "[lattice] previously installed: ${PREV}"
@@ -54,6 +60,13 @@ echo "[lattice] updating commands"
 for cmd in "${COMMANDS[@]}"; do
   echo "[lattice]   commands/${cmd}.md"
   fetch "${RAW}/commands/${cmd}.md" "${DEST}/${cmd}.md"
+done
+
+# #100/#101: vendor the reference files the skills depend on.
+echo "[lattice] updating command references"
+for ref in "${REFERENCES[@]}"; do
+  echo "[lattice]   commands/references/${ref}.md"
+  fetch "${RAW}/commands/references/${ref}.md" "${REF_DEST}/${ref}.md"
 done
 
 echo "[lattice] updating helper scripts"
@@ -142,7 +155,7 @@ VERSION="$(curl -fsSL "${RAW}/.claude-plugin/plugin.json" 2>/dev/null | grep -oE
 printf "%s\n" "${VERSION}" > "${HOME}/.claude/lattice/VERSION"
 
 echo ""
-echo "[lattice] updated ${#COMMANDS[@]} commands + ${#SCRIPTS[@]} scripts + ${#DOCS[@]} docs."
+echo "[lattice] updated ${#COMMANDS[@]} commands + ${#REFERENCES[@]} references + ${#SCRIPTS[@]} scripts + ${#DOCS[@]} docs."
 echo "[lattice] canonical install: ${PREV} -> ${VERSION}"
 
 # v2.1.3 (#71): version-based drift detection. Invoke the shim and ask its
