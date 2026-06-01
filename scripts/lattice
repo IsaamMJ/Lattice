@@ -8306,8 +8306,42 @@ function walk(dir) {
   return out;
 }
 
+const allFiles = walk(root);
+
+// #103: semantic-duplicate pre-pass. The canonical id is sha1(dimension:rule:
+// file:context) — it deliberately excludes `module:` and `tier:`. So two
+// findings that differ ONLY in module/tier derive the SAME id, yet normalize
+// renamed each to a different stem (module differs) so neither tripped the
+// path-collision guard — leaving two files with identical ids on disk,
+// silently. Detect the group, skip normalizing the extras, and surface them
+// (exit 3 on --apply). Never auto-delete: the copies may carry different
+// fix/rationale/impact text, so the operator must pick the keeper.
+const _byCanonId = new Map();
+for (const file of allFiles) {
+  let t; try { t = fs.readFileSync(file, "utf8"); } catch { continue; }
+  const f = readTop(t);
+  const cc = f.code_context || `${f.file || ""}:${f.line || ""}`;
+  const cid = deriveId(f.dimension || "", f.rule || "", f.file || "", cc);
+  if (!_byCanonId.has(cid)) _byCanonId.set(cid, []);
+  _byCanonId.get(cid).push(file);
+}
+const _dupExtras = new Set();
+let dupGroups = 0;
+for (const [cid, group] of _byCanonId) {
+  if (group.length < 2) continue;
+  dupGroups++;
+  const sorted = group.slice().sort();
+  const keep = sorted[0];
+  for (const file of sorted) {
+    console.log([file === keep ? "dup-keep" : "dup-extra", file, keep, cid, cid].join("|"));
+    if (file !== keep) _dupExtras.add(file);
+  }
+  console.error(`[normalize] DUPLICATE: ${group.length} findings share canonical id ${cid} (same dimension:rule:file:context) — keep ${keep}; resolve: ${sorted.slice(1).join(", ")}. Not auto-removed.`);
+}
+
 let changes = 0;
-for (const file of walk(root)) {
+for (const file of allFiles) {
+  if (_dupExtras.has(file)) continue; // #103: leave flagged duplicates untouched for manual resolution
   let text;
   try { text = fs.readFileSync(file, "utf8"); } catch { continue; }
   const fields = readTop(text);
@@ -8374,6 +8408,12 @@ console.log(`# total changes: ${changes}`);
 // (CI, scripts) don't think normalize ran cleanly.
 if (typeof collisionCount !== "undefined" && collisionCount > 0) {
   console.error(`[normalize] ${collisionCount} unresolved collision(s) — exiting 3`);
+  process.exit(3);
+}
+// #103: on --apply, fail loudly if duplicate-id groups remain so callers don't
+// treat the run as clean. Dry-run still exits 0 (the dup-* lines are advisory).
+if (apply && dupGroups > 0) {
+  console.error(`[normalize] ${dupGroups} duplicate-id group(s) left unresolved — exiting 3`);
   process.exit(3);
 }
 NODEJS
