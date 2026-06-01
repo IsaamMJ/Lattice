@@ -198,6 +198,11 @@ const VALID_DIMENSIONS = new Set([
   // v0.9.9 (#31): env-contract dimension — env-var silent-fallback detection
   // + optional contract-file cross-check. Default-on inside /audit-sweep.
   'env-contract',
+  // v2.3.0 (#99) / fix #102: abuse + cli-tool dimensions and the observability
+  // tier shipped in the audit skills but were never added here, so sync
+  // silently rejected real abuse/observability findings during CLAUDE.md
+  // regen. Free-form like audit/coverage (no required-field enforcement).
+  'abuse', 'cli-tool', 'observability',
 ]);
 
 // v0.8.2 (#19): suggest the closest valid value when a schema enum is rejected.
