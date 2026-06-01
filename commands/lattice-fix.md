@@ -1,6 +1,7 @@
 ---
 description: Auto-fix one low-risk Lattice finding by dispatching a Haiku subagent with the lattice handoff brief, verifying, and closing — or logging the failure for brief refinement.
 argument-hint: <finding-id>
+allowed-tools: Bash Read Edit Task
 ---
 
 # lattice-fix

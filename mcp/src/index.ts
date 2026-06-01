@@ -86,7 +86,7 @@ function createServer() {
     {
       title: "Get Lattice Context",
       description:
-        "Return the same compact summary the SessionStart hook injects: mode, telemetry status, open findings by tier, top-3 most urgent, active ADRs, and recent session-event count. Use this at the start of work in a Lattice-enabled project.",
+        "Return the compact summary `lattice context` emits: mode, telemetry status, open findings counts by tier (actionable + acknowledged), and — in substrate/hybrid mode — active decisions (ADRs) + invariants summary. Use this at the start of work in a Lattice-enabled project.",
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -150,6 +150,11 @@ function createServer() {
             "quality",
             "product",
             "infra",
+            // sync with scripts/lattice-regenerate.sh VALID_DIMENSIONS (#102):
+            // shipped in the audit skills (v2.3.0) but the MCP enum lagged.
+            "abuse",
+            "cli-tool",
+            "observability",
           ])
           .optional()
           .describe("Filter by audit dimension"),
