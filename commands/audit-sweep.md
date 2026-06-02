@@ -78,6 +78,18 @@ Detects env-var silent-fallback patterns (`process.env.X || 'literal'`, `??`, de
 
 **Why project-wide, not per-module:** env vars are global. Run once at top, not duplicated in every module dispatch.
 
+### Step 0b — Deterministic core/* rule-pack pass
+
+ALWAYS run once at sweep start, BEFORE per-module dispatch (it is deterministic — no model judgement needed, so it never competes with the LLM dimensions):
+
+```bash
+bash scripts/lattice audit-core --write --path <project-root>
+# OR if installed globally:
+~/.claude/lattice/scripts/lattice audit-core --write --path <project-root>
+```
+
+Runs the canonical `core/*` scanners (secret-in-logs, unbounded-external-call, missing-rate-limit, in-mem-state-no-cluster, missing-tenant-filter, silent-fallback) and emits findings carrying `canonical_rule:` so the same class groups across the fleet. These classes recur in every codebase (mined from 388 findings / 6 repos) — running the precondition pass first means the per-module LLM dispatch can focus on judgement-heavy issues instead of re-deriving the mechanical ones. See `docs/rule-taxonomy.md`. On a large repo, run `audit-core` (dry-run, no `--write`) first to eyeball volume before writing.
+
 ### Step 1 — Enumerate modules + generate sweep_id
 
 **Framework-aware module discovery (v1.2.0, #51).** Detect the project layout BEFORE globbing `src/modules/`. Try in order:

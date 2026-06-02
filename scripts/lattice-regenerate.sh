@@ -203,6 +203,8 @@ const VALID_DIMENSIONS = new Set([
   // silently rejected real abuse/observability findings during CLAUDE.md
   // regen. Free-form like audit/coverage (no required-field enforcement).
   'abuse', 'cli-tool', 'observability',
+  // v2.6.0 (#123): resilience dimension — silent-failure / swallowed-error class.
+  'resilience',
 ]);
 
 // v0.8.2 (#19): suggest the closest valid value when a schema enum is rejected.

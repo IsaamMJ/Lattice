@@ -95,6 +95,17 @@ function* walk(dir) {
 // bypasses the path-based skip so a fixture under test/fixtures/ can be checked
 // directly without weakening directory-scan precision.
 function scanTargets(target) {
+  // Diff-scoped mode: LATTICE_SCAN_FILES (newline-separated) overrides the walk
+  // so the pre-commit hook / session-start can scan only changed files. These
+  // go through the normal per-file SKIP_FILE_RE (explicitFile=false).
+  const env = process.env.LATTICE_SCAN_FILES;
+  if (env && env.trim()) {
+    const files = env.split(/\r?\n/).map((s) => s.trim()).filter((t) => {
+      if (!t || !EXTS.has(path.extname(t))) return false;
+      try { return fs.statSync(t).isFile(); } catch { return false; }
+    });
+    return { files, explicitFile: false };
+  }
   let isFile = false;
   try { isFile = fs.statSync(target).isFile(); } catch { /* missing path */ }
   return { files: isFile ? [target] : [...walk(target)], explicitFile: isFile };

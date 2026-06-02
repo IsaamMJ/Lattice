@@ -76,8 +76,21 @@ function* walk(dir) {
   }
 }
 
+// Diff-scoped mode: LATTICE_SCAN_FILES (newline-separated) → scan only those.
+function* targets(r) {
+  const env = process.env.LATTICE_SCAN_FILES;
+  if (env && env.trim()) {
+    for (const raw of env.split(/\r?\n/)) {
+      const t = raw.trim();
+      if (t && EXTS.has(path.extname(t))) { try { if (fs.statSync(t).isFile()) yield t; } catch {} }
+    }
+    return;
+  }
+  yield* walk(r);
+}
+
 let count = 0;
-for (const file of walk(root)) {
+for (const file of targets(root)) {
   const norm = file.replace(/\\/g, "/");
   if (TEST_RE.test(norm) && !FIXTURE_RE.test(norm)) continue;
   let text;

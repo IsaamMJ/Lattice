@@ -2003,6 +2003,24 @@ else
   fail "audit-core leaked ${ac_leak} fixture hit(s) into a repo scan"
 fi
 
+note "Test 142: core/silent-fallback scanner — fixture oracle (#123, v2.6.0)"
+rf_hits="$(node "${REPO_ROOT}/scripts/lattice-resilience-scan.mjs" "${REPO_ROOT}/test/fixtures/silent-fallback" 2>/dev/null | grep -c '|' || true)"
+if [ "${rf_hits}" -eq 5 ]; then
+  ok "silent-fallback scanner: exactly 5 fixture hits (bad flagged, good silent)"
+else
+  fail "silent-fallback scanner: ${rf_hits} hits (want 5)"
+fi
+
+note "Test 143: audit-core --changed scopes to git-changed files only (#123, v2.6.0)"
+new_fixture t143
+printf 'console.log(`leak=%s`);\n' '${apiKey}' > src/new-leak.ts
+ac_chg="$("${LATTICE}" audit-core --changed --quiet 2>/dev/null || true)"
+if printf '%s' "${ac_chg}" | grep -q 'new-leak.ts' && ! printf '%s' "${ac_chg}" | grep -q '/x.ts'; then
+  ok "audit-core --changed flags changed file, skips unchanged committed files"
+else
+  fail "audit-core --changed scope wrong: ${ac_chg}"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"
