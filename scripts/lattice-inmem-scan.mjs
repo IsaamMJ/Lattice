@@ -93,7 +93,19 @@ const emit = (file, i, tier, key, line) => {
   count++;
 };
 
-for (const file of walk(root)) {
+function* targets(r) {
+  const env = process.env.LATTICE_SCAN_FILES;
+  if (env && env.trim()) {
+    for (const raw of env.split(/\r?\n/)) {
+      const t = raw.trim();
+      if (t && EXTS.has(path.extname(t))) { try { if (fs.statSync(t).isFile()) yield t; } catch {} }
+    }
+    return;
+  }
+  yield* walk(r);
+}
+
+for (const file of targets(root)) {
   const norm = file.replace(/\\/g, "/");
   if (TEST_RE.test(norm) && !/\/fixtures?\/.*\/(bad|good)\./.test(norm)) continue;
   let text;

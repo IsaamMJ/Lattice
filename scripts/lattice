@@ -4450,7 +4450,11 @@ cmd_install_hooks() {
   # v2.2 (#84): prepare-commit-msg — verify-on-commit hint
   _install_one_hook "prepare-commit-msg-lattice.sh" "prepare-commit-msg" 'prepare-commit-msg-lattice\|Lattice prepare-commit-msg'
 
-  echo "[${PROG}] install-hooks: uninstall manually with: rm ${hooks_dir}/post-commit ${hooks_dir}/prepare-commit-msg"
+  # v2.6.0 (#123): pre-commit — deterministic core/* rule-pack scan on changed
+  # files (non-blocking warn; LATTICE_PRECOMMIT_BLOCK=1 to enforce).
+  _install_one_hook "pre-commit-audit-core.sh" "pre-commit" 'pre-commit-audit-core\|audit-core --changed'
+
+  echo "[${PROG}] install-hooks: uninstall manually with: rm ${hooks_dir}/post-commit ${hooks_dir}/prepare-commit-msg ${hooks_dir}/pre-commit"
 }
 
 # ---------------------------------------------------------------------------
@@ -6136,27 +6140,60 @@ YML
 # Usage: lattice audit-core [--path P] [--rule NAME] [--write]
 # ---------------------------------------------------------------------------
 cmd_audit_core() {
-  local target_path="." write=0 only_rule=""
+  local target_path="." write=0 only_rule="" changed=0 since_ref="" quiet=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --path)  target_path="$2"; shift 2 ;;
-      --rule)  only_rule="$2"; shift 2 ;;
-      --write) write=1; shift ;;
-      -*)      die "audit-core: unknown flag: $1" ;;
-      *)       die "audit-core: extra arg: $1" ;;
+      --path)    target_path="$2"; shift 2 ;;
+      --rule)    only_rule="$2"; shift 2 ;;
+      --write)   write=1; shift ;;
+      --changed) changed=1; shift ;;          # only scan git-changed files (fast, for hooks/sessions)
+      --since)   changed=1; since_ref="$2"; shift 2 ;;
+      --quiet)   quiet=1; shift ;;            # suppress the "0 findings" footer (for hooks)
+      -*)        die "audit-core: unknown flag: $1" ;;
+      *)         die "audit-core: extra arg: $1" ;;
     esac
   done
   [ -d "${target_path}" ] || die "audit-core: path not found: ${target_path}"
   command -v node >/dev/null 2>&1 || die "audit-core: node required"
+
+  # --changed / --since: scan only the git-changed source files (diff-scoped).
+  # Exports LATTICE_SCAN_FILES, which every scanner honors. Cheap enough to run
+  # automatically from a pre-commit hook or at session start.
+  if [ "${changed}" -eq 1 ]; then
+    command -v git >/dev/null 2>&1 || die "audit-core --changed: git required"
+    local _gitroot; _gitroot="$(git -C "${target_path}" rev-parse --show-toplevel 2>/dev/null)" \
+      || die "audit-core --changed: not a git repo: ${target_path}"
+    local _list
+    if [ -n "${since_ref}" ]; then
+      _list="$(git -C "${_gitroot}" diff --name-only "${since_ref}" -- 2>/dev/null)"
+    else
+      # staged + unstaged + untracked, vs HEAD
+      _list="$( { git -C "${_gitroot}" diff --name-only HEAD -- 2>/dev/null; \
+                  git -C "${_gitroot}" ls-files --others --exclude-standard 2>/dev/null; } | sort -u )"
+    fi
+    local _abs=""
+    local _f
+    while IFS= read -r _f; do
+      [ -z "${_f}" ] && continue
+      case "${_f}" in *.js|*.ts|*.tsx|*.jsx|*.mjs|*.cjs|*.dart|*.py) ;; *) continue ;; esac
+      [ -f "${_gitroot}/${_f}" ] && _abs="${_abs}${_gitroot}/${_f}"$'\n'
+    done <<< "${_list}"
+    if [ -z "${_abs}" ]; then
+      [ "${quiet}" -eq 1 ] || echo "[${PROG}] audit-core: no changed source files to scan"
+      return 0
+    fi
+    export LATTICE_SCAN_FILES="${_abs}"
+  fi
 
   # rule-name | scanner-script | dimension
   local CORE_RULES="secret-in-logs|lattice-secret-scan.mjs|security
 unbounded-external-call|lattice-timeout-scan.mjs|scale
 missing-rate-limit|lattice-ratelimit-scan.mjs|scale
 in-mem-state-no-cluster|lattice-inmem-scan.mjs|scale
-missing-tenant-filter|lattice-tenant-scan.mjs|security"
+missing-tenant-filter|lattice-tenant-scan.mjs|security
+silent-fallback|lattice-resilience-scan.mjs|resilience"
 
-  [ "${write}" -ne 1 ] && printf '%-7s %-26s %-22s %s\n' "TIER" "RULE" "KEY" "LOCATION"
+  [ "${write}" -ne 1 ] && [ "${quiet}" -ne 1 ] && printf '%-7s %-26s %-22s %s\n' "TIER" "RULE" "KEY" "LOCATION"
   local found=0 ran=0
   declare -A seq_by_slug=()
   local rule scanner dim
@@ -6220,9 +6257,12 @@ YML
   fi
   if [ "${write}" -eq 1 ]; then
     echo "[${PROG}] audit-core: ${found} finding(s) written to .lattice/findings/open/ (${ran} rule(s) ran)"
-  else
+  elif [ "${quiet}" -ne 1 ]; then
     [ "${found}" -eq 0 ] && echo "[${PROG}] audit-core: 0 findings (${ran} rule(s) ran)"
   fi
+  # Non-zero exit when changed-mode finds anything, so a pre-commit hook can
+  # warn (it does not block — the hook decides). 0 otherwise.
+  [ "${changed}" -eq 1 ] && [ "${found}" -gt 0 ] && return 7
   return 0
 }
 

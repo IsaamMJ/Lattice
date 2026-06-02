@@ -2,6 +2,24 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-06-02
+
+**Make the rule pack run itself.** v2.5.0 shipped 5 deterministic detectors but they had to be triggered manually — and a detector nobody runs is dead. This release adds the 6th rule, a diff-scoped mode, and auto-invocation at four touchpoints so the pack fires without anyone remembering.
+
+### Added
+- **`core/silent-fallback`** (#123, dimension `resilience`) — the biggest fleet family (25 findings / 4 repos). Flags empty catches (`catch {}`, `.catch(()=>{})`), catch blocks that swallow + return a benign value with no log/throw, and fail-open `catch` in `guard`/`auth`/`middleware` files. (Fire-and-forget + degradation-fallback sub-rules were built but dropped — too FP-prone without type info.) New `resilience` dimension registered in the validator + MCP enum.
+- **`lattice audit-core --changed` / `--since <ref>`** — diff-scoped scan of only git-changed source files (via a `LATTICE_SCAN_FILES` contract all scanners honor). Fast enough to run on every commit. Exits 7 when changed-mode finds hits (for hooks); `--quiet` for hook output.
+- **Pre-commit hook** (`pre-commit-audit-core.sh`, installed by `lattice install-hooks`) — runs `audit-core --changed` on every commit. Non-blocking warn by default; `LATTICE_PRECOMMIT_BLOCK=1` makes a hit abort the commit; `git commit --no-verify` skips once.
+
+### Auto-invocation (the point of this release)
+The pack now fires from four places so it never goes unused:
+1. **Pre-commit hook** — system-level, every commit, diff-scoped.
+2. **`/audit-sweep` Step 0b** — every full audit runs `audit-core --write` before per-module dispatch.
+3. **Global CLAUDE.md guidance** — Claude runs `audit-core --changed` after editing code, before committing.
+4. **`docs/rule-taxonomy.md`** — documents the canonical pack + the run-it workflow.
+
+Suite gains Tests 142–143 (resilience oracle + `--changed` scoping). Scanners + hook vendored by install.sh / update.sh.
+
 ## [2.5.0] — 2026-06-02
 
 **The deterministic rule pack — epic #115 payoff.** Mining 388 findings across 6 repos showed Lattice kept rediscovering the same bug classes by hand, inventing a fresh slug each time. This ships the first 5 of those classes as **deterministic precondition scanners** that fire every run (like `audit-env-contract`), so detection stops depending on a model re-noticing them.

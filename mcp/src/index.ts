@@ -155,6 +155,7 @@ function createServer() {
             "abuse",
             "cli-tool",
             "observability",
+            "resilience",
           ])
           .optional()
           .describe("Filter by audit dimension"),
