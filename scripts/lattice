@@ -112,6 +112,7 @@ Usage:
   lattice diff <sweep-a> <sweep-b> | diff --latest
   lattice write-manifest --sweep-id ... --sweep-date ... ...
   lattice audit-infra [--path .] [--write]
+  lattice audit-core [--path .] [--rule <name>] [--write]   deterministic core/* rule-pack scan
   lattice release-notes [--since <tag-or-date>] [--version <v>]
   lattice setup [--global]
   lattice uninstall [--global] [--purge] [--yes]
@@ -4662,7 +4663,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent projects release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent projects release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract audit-core claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -6121,6 +6122,106 @@ YML
     echo "[${PROG}] audit-env-contract: ${found} finding(s) written to .lattice/findings/open/"
   else
     [ "${found}" -eq 0 ] && echo "[${PROG}] audit-env-contract: 0 findings (no env-var fallback patterns matched)"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# audit-core — deterministic "rule pack" runner (epic #115 / #117-122).
+# Each canonical core/* rule is a Node scanner at scripts/lattice-<x>-scan.mjs
+# with a uniform stdout contract: `file|line|tier|key|snippet`. These run as a
+# precondition pass (no LLM) like audit-env-contract, so recurring bug classes
+# fire deterministically instead of relying on a model re-noticing them.
+# New rule = drop a scanner + add one row to CORE_RULES below.
+# Usage: lattice audit-core [--path P] [--rule NAME] [--write]
+# ---------------------------------------------------------------------------
+cmd_audit_core() {
+  local target_path="." write=0 only_rule=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --path)  target_path="$2"; shift 2 ;;
+      --rule)  only_rule="$2"; shift 2 ;;
+      --write) write=1; shift ;;
+      -*)      die "audit-core: unknown flag: $1" ;;
+      *)       die "audit-core: extra arg: $1" ;;
+    esac
+  done
+  [ -d "${target_path}" ] || die "audit-core: path not found: ${target_path}"
+  command -v node >/dev/null 2>&1 || die "audit-core: node required"
+
+  # rule-name | scanner-script | dimension
+  local CORE_RULES="secret-in-logs|lattice-secret-scan.mjs|security
+unbounded-external-call|lattice-timeout-scan.mjs|scale
+missing-rate-limit|lattice-ratelimit-scan.mjs|scale
+in-mem-state-no-cluster|lattice-inmem-scan.mjs|scale
+missing-tenant-filter|lattice-tenant-scan.mjs|security"
+
+  [ "${write}" -ne 1 ] && printf '%-7s %-26s %-22s %s\n' "TIER" "RULE" "KEY" "LOCATION"
+  local found=0 ran=0
+  declare -A seq_by_slug=()
+  local rule scanner dim
+  while IFS='|' read -r rule scanner dim; do
+    [ -z "${rule}" ] && continue
+    [ -n "${only_rule}" ] && [ "${rule}" != "${only_rule}" ] && continue
+    local scanner_path="${SELF_DIR}/${scanner}"
+    if [ ! -f "${scanner_path}" ]; then
+      [ -n "${only_rule}" ] && die "audit-core: scanner not installed for ${rule}: ${scanner_path}"
+      continue
+    fi
+    ran=$((ran + 1))
+    local file line tier key snippet
+    while IFS='|' read -r file line tier key snippet; do
+      [ -z "${file}" ] && continue
+      file="${file//\\//}"   # normalize Windows backslashes (invalid YAML escape in titles)
+      # Never report scanner self-fixtures or a project's own test code as real
+      # findings — they contain intentionally-bad sample lines.
+      case "${file}" in
+        */test/*|*/tests/*|*/fixtures/*|test/*|tests/*|fixtures/*|*/__tests__/*) continue ;;
+      esac
+      if [ "${write}" -eq 1 ]; then
+        ensure_project_dirs; mkdir -p .lattice/findings/open
+        local cm; cm="$(printf '%s' "${file}" | sed -E 's#^\./##; s#/#-#g; s/[^A-Za-z0-9_.-]/-/g' | head -c 70)"
+        local sk="${tier}-${rule}-${cm}"
+        local seq="${seq_by_slug[${sk}]:-0}"
+        local suffix=""; [ "${seq}" -gt 0 ] && suffix="-${seq}"
+        local slug="${tier}-core-${rule}-${cm}${suffix}"
+        local dest=".lattice/findings/open/${slug}.yml"
+        local mod; mod="$(dirname "${file}" | sed 's#^\./##')"
+        local today; today="$(date -u +%Y-%m-%d)"
+        local sweep_id="${LATTICE_SWEEP_ID:-$(date -u +%Y%m%d)$(printf '%06x' "$$" | tail -c6)}"
+        local esc_snip; esc_snip="$(printf '%s' "${snippet}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        cat > "${dest}" <<YML
+id: ${slug}-id
+rule: ${rule}
+canonical_rule: core/${rule}
+dimension: ${dim}
+tier: ${tier}
+module: ${mod}
+file: ${file}
+line: ${line}
+title: "core/${rule}: ${key} reaches a sink at ${file}:${line}"
+fix: "Deterministic core/${rule} hit. Review and remediate: ${esc_snip}"
+sweep_date: ${today}
+sweep_id: ${sweep_id}
+auditor: lattice/audit-core@2.5.0
+status: open
+YML
+        seq_by_slug["${sk}"]=$((seq + 1))
+        echo "[${PROG}] emitted: ${dest}" >&2
+      else
+        printf '%-7s %-26s %-22s %s\n' "${tier}" "${rule}" "${key}" "${file}:${line}"
+      fi
+      found=$((found + 1))
+    done < <(node "${scanner_path}" "${target_path}" 2>/dev/null)
+  done <<< "${CORE_RULES}"
+
+  if [ "${ran}" -eq 0 ] && [ -n "${only_rule}" ]; then
+    die "audit-core: unknown or uninstalled rule: ${only_rule}"
+  fi
+  if [ "${write}" -eq 1 ]; then
+    echo "[${PROG}] audit-core: ${found} finding(s) written to .lattice/findings/open/ (${ran} rule(s) ran)"
+  else
+    [ "${found}" -eq 0 ] && echo "[${PROG}] audit-core: 0 findings (${ran} rule(s) ran)"
   fi
   return 0
 }
@@ -9325,6 +9426,7 @@ case "${sub}" in
   sessions)           cmd_sessions "$@" ;;
   review)             cmd_review "$@" ;;
   audit-env-contract) cmd_audit_env_contract "$@" ;;
+  audit-core)         cmd_audit_core "$@" ;;
   claude-md-tune)     cmd_claude_md_tune "$@" ;;
   claude-md-restore)  cmd_claude_md_restore "$@" ;;
   project-init)       cmd_project_init "$@" ;;
