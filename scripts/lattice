@@ -112,7 +112,8 @@ Usage:
   lattice diff <sweep-a> <sweep-b> | diff --latest
   lattice write-manifest --sweep-id ... --sweep-date ... ...
   lattice audit-infra [--path .] [--write]
-  lattice audit-core [--path .] [--rule <name>] [--write]   deterministic core/* rule-pack scan
+  lattice audit-core [--path .] [--rule <name>] [--write|--changed]   deterministic core/* rule-pack scan
+  lattice rules promote                                     rank fleet finding families; recommend next scanner
   lattice release-notes [--since <tag-or-date>] [--version <v>]
   lattice setup [--global]
   lattice uninstall [--global] [--purge] [--yes]
@@ -4667,7 +4668,7 @@ cmd_sessions() {
 # v0.9.8 will add `--file [--yes]` to feed each candidate into
 # `lattice report` with idempotent dedup via `.lattice/sessions/.filed.jsonl`.
 # ---------------------------------------------------------------------------
-_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent projects release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract audit-core claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
+_KNOWN_SUBS="close link reopen sync regenerate defer list ls show cat bulk-close handoff next verify ci-check ci-check-dead wire-hooks mcp uninstall setup onboard agent projects release-notes normalize diff write-manifest audit-infra profile grow usage update config validate sweeps sweep-id file id-gen doctor export changelog resolve-pending test-fixture install-hooks stats mode decide decisions invariants context report sessions review audit-env-contract audit-core rules claude-md-tune claude-md-restore project-init project-sync project-restore statusline version help"
 
 _review_known_cmd() {
   local needle="$1" w
@@ -6264,6 +6265,36 @@ YML
   # warn (it does not block — the hook decides). 0 otherwise.
   [ "${changed}" -eq 1 ] && [ "${found}" -gt 0 ] && return 7
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# rules — manage / analyze the canonical core/* rule pack. The `promote`
+# subcommand (#124) is the self-tuning loop: it reads every registered
+# project's open+closed findings, clusters them into rule families, and
+# recommends which not-yet-deterministic family has earned a scanner based on
+# how often it recurs across repos and how often it actually gets fixed.
+# Usage: lattice rules promote
+# ---------------------------------------------------------------------------
+cmd_rules() {
+  local action="${1:-promote}"; shift || true
+  case "${action}" in
+    promote)
+      command -v node >/dev/null 2>&1 || die "rules promote: node required"
+      local helper="${SELF_DIR}/lattice-rules-promote.mjs"
+      [ -f "${helper}" ] || die "rules promote: helper not installed: ${helper}"
+      node "${helper}" "$@"
+      ;;
+    --help|-h|help)
+      cat <<'RULESHELP'
+lattice rules — canonical core/* rule-pack tools
+
+  promote    rank finding families across the fleet (open+closed) and
+             recommend which not-yet-deterministic class has earned a scanner
+             (recurs in 3+ repos, mostly fixed). The self-tuning loop (#124).
+RULESHELP
+      ;;
+    *) die "rules: unknown subcommand: ${action} (try: lattice rules promote)" ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -9467,6 +9498,7 @@ case "${sub}" in
   review)             cmd_review "$@" ;;
   audit-env-contract) cmd_audit_env_contract "$@" ;;
   audit-core)         cmd_audit_core "$@" ;;
+  rules)              cmd_rules "$@" ;;
   claude-md-tune)     cmd_claude_md_tune "$@" ;;
   claude-md-restore)  cmd_claude_md_restore "$@" ;;
   project-init)       cmd_project_init "$@" ;;

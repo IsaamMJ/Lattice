@@ -2021,6 +2021,21 @@ else
   fail "audit-core --changed scope wrong: ${ac_chg}"
 fi
 
+note "Test 144: rules promote clusters findings into canonical families (#124, v2.7.0)"
+new_fixture t144
+reg="${ROOT_TMP}/t144-registry.yml"
+# Registries store native paths (projects add uses realpath); on Windows/git-bash
+# that's a C:/-style path the Node helper can read, NOT an MSYS /c/ path.
+proj_path="$(pwd -W 2>/dev/null || pwd)"
+printf 'projects:\n  - name: t144\n    path: %s\n' "${proj_path}" > "${reg}"
+write_yaml .lattice/findings/open/HIGH-x-booking-cancel-no-cas.yml booking-cancel-no-cas HIGH scale
+rp_out="$(LATTICE_PROJECTS_REGISTRY="${reg}" "${LATTICE}" rules promote 2>&1)"
+if printf '%s' "${rp_out}" | grep -q 'no-atomic-state-mutation'; then
+  ok "rules promote clusters a no-cas finding into no-atomic-state-mutation"
+else
+  fail "rules promote did not cluster the no-cas finding: ${rp_out}"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"
