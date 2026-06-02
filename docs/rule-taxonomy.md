@@ -63,10 +63,17 @@ skip comments + test files, suppress dev-guarded lines (`kDebugMode`,
 | `no-atomic-state-mutation` | scale | LLM-assisted (read-then-write across `await` without a lock is hard to ground statically); greppable candidate-flagging proxies planned |
 | `missing-audit-log` | security | heuristic, not yet built |
 
-## Promotion loop (#124, planned)
+## Promotion loop — `lattice rules promote` (#124, shipped v2.7.0)
 
-The 280 closed findings across the fleet are labelled positives. A future
-`lattice rules promote` will rank each canonical rule by occurrence ×
-distinct-repos × fixed-rate and recommend which heuristic rules graduate to
-deterministic precondition checks — closing the loop so Lattice tunes its own
-rule pack from its fix history rather than a one-time analysis.
+The closed findings across the fleet are labelled positives. `lattice rules
+promote` reads every registered project's findings (open + closed), clusters
+them into rule families, and scores each by **distinct repos × occurrence ×
+fixed-rate**. A family that recurs in ≥3 repos, is mostly *fixed* (≥60% of its
+closes), and has no scanner yet is recommended for **promotion** to a
+deterministic `core/*` check — so Lattice tunes its own rule pack from its fix
+history instead of a one-time analysis. Run it after audits accumulate; if it
+says "no new families have earned promotion," the implemented set already covers
+the recurring, high-fix-rate classes. (As of v2.7.0 on the 6-repo dev fleet it
+reports exactly that — the remaining big family, `no-atomic-state-mutation`,
+stays a *watch* because its ~50% fixed-rate reflects how often it's deferred,
+and it's the class least amenable to static detection.)

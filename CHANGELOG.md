@@ -2,6 +2,14 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] — 2026-06-02
+
+**The self-tuning loop — epic #115 complete.** `lattice rules promote` (#124) reads every registered project's findings (open + closed), clusters them into canonical rule families, and scores each by distinct-repos × occurrence × fixed-rate. A family that recurs in ≥3 repos, is mostly *fixed*, and has no scanner yet is recommended for promotion to a deterministic `core/*` check — so Lattice tunes its own rule pack from its fix history, not a one-time guess.
+
+On the 6-repo dev fleet it reports the implemented 7 families as the top-ranked recurring set and recommends no new promotions — `no-atomic-state-mutation` stays a *watch* (biggest family at 31 findings, but ~50% fixed-rate and least amenable to static detection). An honest "the pack is well-chosen" signal rather than a forced suggestion.
+
+This closes epic #115 (cross-project pattern mining → deterministic rule pack): aggregator (#116) → taxonomy (#117) → 6 detectors (#118–123) → self-tuning loop (#124). Suite gains Test 144 → 144 pass / 1 pre-existing. Helper vendored by install.sh / update.sh.
+
 ## [2.6.0] — 2026-06-02
 
 **Make the rule pack run itself.** v2.5.0 shipped 5 deterministic detectors but they had to be triggered manually — and a detector nobody runs is dead. This release adds the 6th rule, a diff-scoped mode, and auto-invocation at four touchpoints so the pack fires without anyone remembering.
