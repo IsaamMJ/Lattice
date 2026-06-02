@@ -2,6 +2,23 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-06-02
+
+**The deterministic rule pack — epic #115 payoff.** Mining 388 findings across 6 repos showed Lattice kept rediscovering the same bug classes by hand, inventing a fresh slug each time. This ships the first 5 of those classes as **deterministic precondition scanners** that fire every run (like `audit-env-contract`), so detection stops depending on a model re-noticing them.
+
+### Added — `lattice audit-core [--path P] [--rule NAME] [--write]`
+A unified runner for the `core/*` rule pack. Each rule is a Node scanner with a uniform `file|line|tier|key|snippet` contract; new rule = drop a scanner + one `CORE_RULES` row. Dry-run prints a table; `--write` emits findings carrying a `canonical_rule: core/<x>` field so `lattice projects findings` can group the same class across the fleet.
+
+| `core/*` rule | dim | fires on |
+|---|---|---|
+| `secret-in-logs` (#118) | security | a sensitive **value** reaching a log sink (interpolation/bare-arg/concat/object-shorthand) — not a sensitive word in a message |
+| `unbounded-external-call` (#119) | scale | `fetch`/`axios`/`openai`/`requests`/`httpx`/`dio` with no timeout/signal/deadline |
+| `missing-rate-limit` (#120) | scale | public webhook/auth/payment handlers with no throttle; LLM paths with no budget; in-memory limiters |
+| `in-mem-state-no-cluster` (#121) | scale | module-level mutable state, in-process caches, module-scope cron |
+| `missing-tenant-filter` (#122) | security | Prisma/ORM writes/reads whose `where` omits the tenant key (configurable via `LATTICE_TENANT_KEYS` / `.lattice/config.yml`) |
+
+Every scanner is precision-tuned (a noisy detector is worse than none): comments + test files skipped, dev-guarded lines suppressed, `test/`/`fixtures/` never reported. Each ships a fixture oracle under `test/fixtures/<rule>/` (bad = must-flag, good = must-be-silent), and the suite gains regression coverage (Tests 140–141). Validated on the live fleet — jiive surfaced the `openai`/`fetch`-without-timeout class systematically (previously found ad hoc). See `docs/rule-taxonomy.md`.
+
 ## [2.4.4] — 2026-06-01
 
 **Wave 5 self-hygiene — MCP enum/description drift + skill frontmatter.** Triaged the in-repo DRIFT findings; 2 of 5 were already stale (fixed in an earlier version, finding never closed — same pattern as the manual-report backlog).

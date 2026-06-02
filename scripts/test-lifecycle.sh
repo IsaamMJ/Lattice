@@ -1987,6 +1987,22 @@ else
   ok "SIGPIPE exit 141 does not trigger telemetry"
 fi
 
+note "Test 140: core/secret-in-logs scanner — fixture oracle (#118, v2.5.0)"
+sl_hits="$(node "${REPO_ROOT}/scripts/lattice-secret-scan.mjs" "${REPO_ROOT}/test/fixtures/secret-in-logs" 2>/dev/null | grep -c '|' || true)"
+if [ "${sl_hits}" -eq 8 ]; then
+  ok "secret-in-logs scanner: exactly 8 fixture hits (bad flagged, good silent)"
+else
+  fail "secret-in-logs scanner: ${sl_hits} hits (want 8 — 6 ts + 2 dart bad, 0 good)"
+fi
+
+note "Test 141: audit-core excludes test/fixtures from a repo scan (#115, v2.5.0)"
+ac_leak="$(cd "${REPO_ROOT}" && "${LATTICE}" audit-core --rule secret-in-logs --path . 2>/dev/null | grep -c 'fixtures/' || true)"
+if [ "${ac_leak}" -eq 0 ]; then
+  ok "audit-core does not report its own fixtures as findings"
+else
+  fail "audit-core leaked ${ac_leak} fixture hit(s) into a repo scan"
+fi
+
 cd "${REPO_ROOT}"
 echo
 echo "[test] passed: ${PASS}"
