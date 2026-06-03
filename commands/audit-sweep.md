@@ -106,6 +106,8 @@ Runs the canonical `core/*` scanners (secret-in-logs, unbounded-external-call, m
 
 **Never invent paths.** Every module enumerated MUST exist on disk. If detection lands on zero modules, ask the user once for a hint instead of fabricating.
 
+**Module cap — ALL layouts (not just flat-repo), v2.7.1 (#12).** After enumeration, if the module count **N exceeds 16**, STOP and prompt once before dispatching: `"Layout produced N modules; cap is 16. Audit which 16 (or pass a subset)?"` — sequential dispatch is one subagent per module, so an unbounded N (a 40-module monorepo) means 40 serial subagent runs with no checkpoint. Wait for the user's selection; do not silently audit all N. The flat-repo fallback's own cap-at-12 still applies within that branch; this 16-cap is the global ceiling across every layout.
+
 | # | Action |
 |---|---|
 | 1 | Run the framework-aware enumeration above. Record which layout signal fired (used as `runtime_warnings` if unusual). |
@@ -174,7 +176,7 @@ For each cross-cutting pattern:
 - Estimate effort (low/med/high)
 - Add as `runtime_warnings` entry in the manifest: `"cross-cutting: <rule> in modules [<list>]"`
 
-User surfaces these via `lattice list --rule <slug>`.
+User surfaces these via `lattice list --dimension <dim>` then grep the rule slug (there is no `lattice list --rule`), or read the manifest's `runtime_warnings`. For the deterministic core/* classes, `lattice audit-core --rule <name>` filters by rule directly.
 
 ### Step 5 — Regenerate CLAUDE.md checklist from YAML truth
 

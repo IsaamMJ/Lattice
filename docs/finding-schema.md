@@ -322,3 +322,124 @@ v0.5 markdown findings (one file per audit) coexist with v0.6 YAML findings. v0.
 ## Why we still don't adopt SARIF
 
 Same reasoning as v0.5: SARIF is too heavyweight for Lattice's audience. If/when integration with GitHub code scanning is needed, ship a SARIF exporter alongside this native schema — don't replace it.
+
+## Hypothesis schema (v1.4.0+ — the `grow` subsystem)
+
+The `grow` subsystem is the forward-looking mirror of findings. Where findings track *defects to fix*, hypotheses track *changes to validate* — growth experiments, refactor proposals, product bets. Same YAML-per-file pattern, separate directory tree (`scripts/lattice` `cmd_grow`, line ~6879). The closed-loop measurement layer (`measure`/`check`/`auto-rollback`) was added in v2.0–v2.2.
+
+### Lifecycle directories
+
+Hypotheses live as one YAML per file under `.lattice/hypotheses/`. State lives **in the directory** (not a path-vs-field split like findings) AND is mirrored in a `state:` field that each transition rewrites:
+
+```
+.lattice/hypotheses/
+├── open/          # proposed, not yet executing
+├── running/       # in-flight — the change has shipped (run_commit linked); metrics are being measured
+├── closed/        # resolved — result is won | lost | inconclusive
+└── rolled-back/   # was running, then reverted due to negative signal (manual or auto)
+```
+
+Create the tree with `lattice grow init`. Transitions move the file between dirs and stamp timestamps + reasons:
+
+- `open → running` — `lattice grow run <slug> --commit <sha>` (stamps `run_at`, `run_commit`)
+- `running → closed` — `lattice grow close <slug> --result won|lost|inconclusive` (stamps `closed_at`, `result`, optional `observed_value`, `rationale`)
+- `running → rolled-back` — `lattice grow rollback <slug> --reason "..."` (manual; stamps `rolled_back_at`, `rollback_reason`) or `lattice grow auto-rollback <slug> --execute` (git-reverts `run_commit`; additionally stamps `revert_commit` + `observed_value`)
+- `open → closed` is also allowed by `grow close` (a hypothesis abandoned before it ever ran).
+
+### Hypothesis YAML fields
+
+```yaml
+# Identity — set at propose time (scripts/lattice _grow_propose)
+# id = sha1("growth:" + slug + ":" + change + ":" + metric)[:12]
+id: <12-char hex>
+slug: <kebab-case, matches filename>
+state: open | running | closed | rolled-back     # rewritten on each transition
+title: "<one-line human summary>"
+change: "<one-line description of the change being made>"
+metric: "<free-text description of what success looks like>"
+
+# Triage metadata (defaults shown)
+cadence: weekly                                   # free-text review cadence; not yet enforced by a scheduler
+effort: MEDIUM
+risk: LOW
+proposed_at: <ISO timestamp>
+proposed_by: lattice-cli
+
+# Structured measurement block (v1.4.2, #59) — drives v2.0 closed-loop measure / auto-rollback.
+# Omitted entirely unless at least one measurement field is supplied at propose time
+# (or retrofitted later via `lattice grow attach-measurement`).
+measurement:
+  name: "<metric display name>"                   # optional
+  source: "<scheme URI>"                           # single-source form (see schemes below)
+  baseline_value: <number>                         # value before the change
+  baseline_source: "<where the baseline came from>"   # optional, free-text
+  expected_delta: <number>                         # documented intent only — NOT read by the verdict engine
+  success_threshold: <number>                      # verdict = succeeded when combined value >= this
+  window_days: <integer>                           # after this many days past run_at, a sub-threshold value -> failed
+  combine: sum | weighted-avg | max | min          # how to fold multi-source values (default: sum)
+  headers:                                          # optional HTTP headers for http(s) sources
+    Accept: "application/json"
+    Authorization: "Bearer ${LATTICE_HEADER_TOKEN}"
+  sources:                                          # multi-source form — replaces single `source:`
+    - name: api-a
+      source: "https://a.example/metric"
+      baseline_value: 100
+      weight: 1                                     # weight applies to weighted-avg combine (default: 1)
+    - name: api-b
+      source: "https://b.example/metric"
+      weight: 2
+
+# Lifecycle stamps (written by run / close / rollback / auto-rollback — not authored by hand)
+run_at: <ISO timestamp>            # set on `grow run`
+run_commit: <sha>                  # set on `grow run`; the commit auto-rollback reverts
+closed_at: <ISO timestamp>         # set on `grow close`
+result: won | lost | inconclusive  # set on `grow close`
+observed_value: <number>           # actual measured outcome at close / auto-rollback time
+rationale: "<one-line close rationale>"   # optional, set on `grow close --rationale`
+rolled_back_at: <ISO timestamp>    # set on rollback / auto-rollback
+rollback_reason: "<why it was reverted>"  # set on rollback / auto-rollback
+revert_commit: <sha>               # auto-rollback only — the `git revert` commit it created
+```
+
+**Field notes (grounded in `scripts/lattice`):**
+
+- `expected_delta` is **written** by `propose`/`attach-measurement` but is **never read** by the verdict engine — `measure`/`auto-rollback` decide `succeeded`/`failed` purely from `success_threshold` + `window_days`. Treat it as documentation of intent, not a behavioral input.
+- `measurement.source` (single) and `measurement.sources` (list) are mutually exclusive in practice: the reader (`_grow_measurement_sources`) prefers the `sources:` list and falls back to the single `source:` only when no list is present.
+- `measurement.name`, `baseline_source`, and per-source `weight` are real parsed fields not called out in the original finding, included here for completeness.
+
+### Measurement source schemes
+
+`measurement.source` (and each `sources[].source`) is a scheme URI fetched by `_grow_fetch_metric`. Three schemes:
+
+- `http://…` / `https://…` — GET via `curl`, expecting JSON; the numeric metric is read from `.value`, `.data.value`, or `.metric`. `measurement.headers` are sent as request headers. **Header `${VAR}` interpolation is default-deny (v2.2.4, #86):** only variable names prefixed `LATTICE_HEADER_` interpolate. Any other name (e.g. `${ANTHROPIC_API_KEY}`) is refused and the literal placeholder is sent — a loud remote failure instead of a silent secret leak. Opt out per-project with `security.allow_header_interpolation: true` in `.lattice/config.yml`, or per-shell with `LATTICE_ALLOW_HEADER_INTERPOLATION=1`.
+- `file:/path` / `file:///path` — read a single number from a local file.
+- `cmd:<shell>` — execute a shell command, parse the last numeric stdout line. **Default-deny / security-gated (v2.2):** refuses to run unless `security.allow_cmd_sources: true` is set in `.lattice/config.yml`, or `LATTICE_ALLOW_CMD_SOURCES=1` is exported. `grow propose` also prints a loud warning when a proposed source starts with `cmd:`.
+
+### Minimal example
+
+```yaml
+id: a1b2c3d4e5f6
+slug: cache-warm-homepage
+state: running
+title: "Pre-warm homepage cache on deploy"
+change: "Add a post-deploy hook that hits / 3x to warm the CDN edge cache"
+metric: "p95 homepage TTFB drops below 200ms"
+cadence: weekly
+effort: LOW
+risk: LOW
+proposed_at: 2026-06-01T09:00:00Z
+proposed_by: lattice-cli
+measurement:
+  name: p95-ttfb-ms
+  source: "https://metrics.example/p95?route=home"
+  baseline_value: 340
+  success_threshold: 200
+  window_days: 7
+  combine: min
+run_at: 2026-06-02T12:00:00Z
+run_commit: 9f3a1c0
+```
+
+### Lifecycle commands
+
+`lattice grow propose | run | measure | check | rollback | close` (plus `init`, `list`, `show`, `status`, `auto-rollback`, `attach-measurement`, `schedule`). Run `lattice grow help` for the full surface.

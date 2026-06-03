@@ -2,6 +2,24 @@
 
 All notable changes to Lattice are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] — 2026-06-03
+
+**In-repo backlog cleanup (self-audit).** Triaged Lattice's own 16 open findings; 6 were already fixed in earlier hardening passes (findings never closed — the recurring stale-finding pattern). Fixed the 8 genuinely-real ones:
+
+### Fixed
+- **MCP `shell:true` injection surface (#16, mcp-spawn-shell-true-windows).** `runLattice` now resolves the bash script directly and spawns with `shell:false`, so nothing parses the argv — a free-text `--rationale` (or any input) can't be interpreted as a shell command. Falls back to a PATH+shell invocation only when no script is resolvable.
+- **`usage --unused` reported phantom subcommands forever (#8).** The audit's hardcoded `known` list contained `cluster`/`timeline`/`pr-body` (never implemented) — now sourced from `_KNOWN_SUBS`, the real dispatcher list, so it reflects actual dead-feature signal.
+- **Unbounded module count across non-flat layouts (#12).** `/audit-sweep` now applies a global 16-module cap with an over-cap prompt to ALL layouts (previously only the flat-repo branch capped).
+- **Docs drift:** fingerprint spec marked shipped (#3); substrate spec build-order annotated shipped/in-progress (#5); `lattice list --rule` reference in audit-sweep corrected to the supported form (#1); `$ARGUMENTS` quoted in close.md (#15).
+
+### Added
+- **Hypothesis (`grow`) schema docs (#4).** `docs/finding-schema.md` gains a code-grounded `## Hypothesis schema` section documenting the `.lattice/hypotheses/{open,running,closed,rolled-back}/` lifecycle, the `measurement:` block, source schemes, and lifecycle fields.
+
+### Closed as already-fixed
+- audit.md `triage` ref (#2), README `triage` ref (#6), usage grow-surface (#7), MCP `close_finding` confirm gate (#9), env-var header leak (#10), eval-yaml simulate (#11).
+
+Deferred (WATCH, perf nets for scale not currently hit, per operator profile): MCP subprocess cache, per-key YAML fork. Suite: 144 pass / 1 pre-existing.
+
 ## [2.7.0] — 2026-06-02
 
 **The self-tuning loop — epic #115 complete.** `lattice rules promote` (#124) reads every registered project's findings (open + closed), clusters them into canonical rule families, and scores each by distinct-repos × occurrence × fixed-rate. A family that recurs in ≥3 repos, is mostly *fixed*, and has no scanner yet is recommended for promotion to a deterministic `core/*` check — so Lattice tunes its own rule pack from its fix history, not a one-time guess.

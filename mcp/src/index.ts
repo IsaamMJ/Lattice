@@ -22,6 +22,7 @@ import { z } from "zod";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 const VERSION = "1.0.0";
 
@@ -39,16 +40,30 @@ function latticeBin(): string {
 
 type RunResult = { ok: boolean; stdout: string; stderr: string; code: number };
 
+// #16: prefer running the bash script directly with shell:false. With no shell,
+// nothing parses the argv, so a free-text `--rationale` (or any input) can never
+// be interpreted as a shell command — closing the injection vector that
+// shell:true opened on Windows. Only the last-resort PATH fallback uses a shell.
+function resolveInvocation(args: string[]): { cmd: string; argv: string[]; shell: boolean } {
+  const bin = process.env.LATTICE_BIN;
+  const scriptCandidates = [bin, join(homedir(), ".claude", "lattice", "scripts", "lattice")]
+    .filter((c): c is string => !!c);
+  for (const c of scriptCandidates) {
+    if (existsSync(c)) return { cmd: "bash", argv: [c, ...args], shell: false };
+  }
+  // Fallback: bare `lattice` on PATH. Real binary on Unix (shell:false fine);
+  // on Windows without a resolvable script the .cmd shim needs a shell.
+  return { cmd: bin || "lattice", argv: args, shell: process.platform === "win32" };
+}
+
 function runLattice(args: string[], opts: { timeoutMs?: number } = {}): RunResult {
   const cwd = projectDir();
-  const bin = latticeBin();
-  // On Windows the lattice script is bash; spawn with shell:true to find it
-  // whether it's a bash script, a symlink, or a .cmd wrapper.
-  const r = spawnSync(bin, args, {
+  const { cmd, argv, shell } = resolveInvocation(args);
+  const r = spawnSync(cmd, argv, {
     cwd,
     encoding: "utf8",
     timeout: opts.timeoutMs ?? 15000,
-    shell: process.platform === "win32",
+    shell,
   });
   return {
     ok: r.status === 0 && !r.error,
