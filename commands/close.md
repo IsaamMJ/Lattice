@@ -40,7 +40,7 @@ Common variants:
 Run:
 
 ```bash
-lattice close $ARGUMENTS
+lattice close "$ARGUMENTS"
 ```
 
 If `$ARGUMENTS` doesn't include `--reason`, prompt the user for the reason BEFORE invoking. Do not guess the reason — the rationale matters for future audit traceability.

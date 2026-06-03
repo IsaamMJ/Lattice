@@ -2825,18 +2825,18 @@ cmd_usage() {
     return 0
   fi
 
-  node --input-type=module - "${events}" "${since_days}" "${unused_days}" "${json}" <<'NODE'
+  node --input-type=module - "${events}" "${since_days}" "${unused_days}" "${json}" "${_KNOWN_SUBS}" <<'NODE'
 import fs from 'node:fs';
 
-const [eventsPath, sinceDaysRaw, unusedDaysRaw, jsonRaw] = process.argv.slice(2);
+const [eventsPath, sinceDaysRaw, unusedDaysRaw, jsonRaw, knownRaw] = process.argv.slice(2);
 const sinceDays = Number(sinceDaysRaw);
 const unusedDays = Number(unusedDaysRaw);
 const jsonMode = jsonRaw === '1';
-const known = [
-  'close','reopen','sync','regenerate','defer','list','ls','show','cat',
-  'cluster','bulk-close','handoff','next','timeline','verify','ci-check','pr-body',
-  'validate','sweeps','sweep-id','id-gen','usage','update','config','version'
-];
+// #8: use the real dispatcher subcommand list (passed from bash _KNOWN_SUBS),
+// not a hardcoded array that drifted to phantom subs (cluster/timeline/pr-body
+// never existed) — those were reported "unused for N days" forever, hiding the
+// real dead-feature signal and falsely accusing the user of not running them.
+const known = (knownRaw || '').trim().split(/\s+/).filter(Boolean);
 const now = Date.now();
 const sinceCutoff = now - sinceDays * 86400_000;
 const unusedCutoff = now - unusedDays * 86400_000;
