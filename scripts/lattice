@@ -5055,6 +5055,18 @@ _lattice_md_backup() {
   local ts backup_path
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   backup_path="${_LATTICE_MD_BACKUP_DIR}/CLAUDE.md.${ts}"
+  # Collision-proof: backups are keyed by second-granularity UTC timestamps.
+  # Two backups in the same second would share a filename, the second silently
+  # overwriting the first. That corrupts `claude-md-restore --latest`, which
+  # safety-backs-up the current file before restoring — on collision it
+  # overwrites the very backup it is about to restore, so the restore reverts
+  # to the wrong content. Wait out the second so every backup is unique and
+  # still chronologically sortable by name.
+  while [ -e "${backup_path}" ]; do
+    sleep 1
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup_path="${_LATTICE_MD_BACKUP_DIR}/CLAUDE.md.${ts}"
+  done
   cp "${target}" "${backup_path}" 2>/dev/null || return 1
   echo "${backup_path}"
 }
@@ -5625,6 +5637,14 @@ _lattice_project_md_backup() {
   local ts backup_path
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   backup_path="${_LATTICE_PROJECT_MD_BACKUP_DIR}/CLAUDE.md.${ts}"
+  # Collision-proof unique timestamp (see _lattice_md_backup): prevents
+  # project-restore --latest from overwriting the backup it is restoring when
+  # two backups land in the same second.
+  while [ -e "${backup_path}" ]; do
+    sleep 1
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup_path="${_LATTICE_PROJECT_MD_BACKUP_DIR}/CLAUDE.md.${ts}"
+  done
   cp "${target}" "${backup_path}" 2>/dev/null || return 1
   echo "${backup_path}"
 }
