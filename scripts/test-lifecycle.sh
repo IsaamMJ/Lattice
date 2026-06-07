@@ -955,7 +955,7 @@ note "Test 67: lattice install-hooks is idempotent (v0.8.2)"
 new_fixture t67
 "${LATTICE}" install-hooks >/dev/null
 out="$("${LATTICE}" install-hooks 2>&1)"
-if echo "${out}" | grep -q "already installed"; then
+if echo "${out}" | grep -q "already Lattice-managed"; then
   ok "install-hooks detects existing Lattice hook and no-ops"
 else
   fail "install-hooks did not detect prior install: ${out}"
@@ -1538,6 +1538,11 @@ export HOME="${ROOT_TMP}/t122-home"
 mkdir -p "${HOME}/.claude"
 printf 'x\n' > "${HOME}/.claude/CLAUDE.md"
 "${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
+# Backups are stamped at second granularity (YYYYMMDDTHHMMSSZ). In fast CI both
+# applies can land in the same second, collide on filename, and leave only one
+# backup. Sleep guarantees a distinct timestamp so the two-backup assertion is
+# deterministic rather than timing-dependent.
+sleep 1
 "${LATTICE}" claude-md-tune --apply >/dev/null 2>&1
 out="$("${LATTICE}" claude-md-restore --list 2>&1)"
 if echo "${out}" | grep -qE 'TIMESTAMP' && [ "$(echo "${out}" | grep -cE '^[0-9]{8}T[0-9]{6}Z')" -ge 2 ]; then
