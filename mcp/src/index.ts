@@ -40,6 +40,35 @@ function latticeBin(): string {
 
 type RunResult = { ok: boolean; stdout: string; stderr: string; code: number };
 
+// #150: On Windows a bare `bash` is unsafe to spawn. C:\Windows\System32 is
+// always on PATH and ships its own `bash.exe` — the WSL launcher — which
+// shadows Git Bash and cannot execute a `C:/Users/...` Windows path, so the
+// lattice script fails to start. Worse, Claude Code spawns MCP servers with a
+// PATH that frequently lacks Git's bin dir entirely, so `bash` may not resolve
+// at all. Either way the startup probe fails and the server exits before the
+// transport connects ("Connection closed"). Resolve Git Bash to an ABSOLUTE
+// path instead of trusting PATH lookup. Override with LATTICE_BASH.
+function resolveBash(): string {
+  if (process.platform !== "win32") return "bash";
+  const override = process.env.LATTICE_BASH;
+  if (override && existsSync(override)) return override;
+  const localApp =
+    process.env["LOCALAPPDATA"] || join(homedir(), "AppData", "Local");
+  const candidates = [
+    join(process.env["ProgramW6432"] || "C:\\Program Files", "Git", "bin", "bash.exe"),
+    join(process.env["ProgramFiles"] || "C:\\Program Files", "Git", "bin", "bash.exe"),
+    join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Git", "bin", "bash.exe"),
+    join(localApp, "Programs", "Git", "bin", "bash.exe"),
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  // Last resort: bare `bash`. May hit WSL and fail, but on a non-Git Windows
+  // box there is nothing better; on Unix this branch is never reached.
+  return "bash";
+}
+
 // #16: prefer running the bash script directly with shell:false. With no shell,
 // nothing parses the argv, so a free-text `--rationale` (or any input) can never
 // be interpreted as a shell command — closing the injection vector that
@@ -49,7 +78,7 @@ function resolveInvocation(args: string[]): { cmd: string; argv: string[]; shell
   const scriptCandidates = [bin, join(homedir(), ".claude", "lattice", "scripts", "lattice")]
     .filter((c): c is string => !!c);
   for (const c of scriptCandidates) {
-    if (existsSync(c)) return { cmd: "bash", argv: [c, ...args], shell: false };
+    if (existsSync(c)) return { cmd: resolveBash(), argv: [c, ...args], shell: false };
   }
   // Fallback: bare `lattice` on PATH. Real binary on Unix (shell:false fine);
   // on Windows without a resolvable script the .cmd shim needs a shell.
@@ -331,7 +360,13 @@ async function main() {
   const probe = runLattice(["version"], { timeoutMs: 5000 });
   if (!probe.ok) {
     console.error(
-      `[lattice-mcp] ERROR: cannot find \`${latticeBin()}\` on PATH. Set LATTICE_BIN to the full path of the lattice script.\n${probe.stderr}`
+      `[lattice-mcp] ERROR: probe \`lattice version\` failed (exit ${probe.code}).\n` +
+        `  lattice script: ${latticeBin()}\n` +
+        `  bash used:      ${resolveBash()}\n` +
+        `  On Windows, the server runs the lattice bash script via Git Bash. If\n` +
+        `  bash above is "bash" or a System32/WSL path, install Git for Windows or\n` +
+        `  set LATTICE_BASH to the full path of Git's bash.exe. Set LATTICE_BIN to\n` +
+        `  the full path of the lattice script if that is wrong.\n${probe.stderr}`
     );
     process.exit(1);
   }
