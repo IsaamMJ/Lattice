@@ -9314,6 +9314,7 @@ catch (e) { console.log('STATUS=malformed'); console.log('JSON parse error: ' + 
 
 cfg.mcpServers ??= {};
 const entry = {
+  type: 'stdio',
   command: 'node',
   args: [distPath],
   env: { LATTICE_BIN: latticeBinValue },
@@ -9383,6 +9384,7 @@ const [,, settingsPath, distPath, latticeBinValue] = process.argv;
 const cfg = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
 cfg.mcpServers ??= {};
 cfg.mcpServers.lattice = {
+  type: 'stdio',
   command: 'node',
   args: [distPath],
   env: { LATTICE_BIN: latticeBinValue },
