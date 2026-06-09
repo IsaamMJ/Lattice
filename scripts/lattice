@@ -321,10 +321,13 @@ latest_remote_version() {
     return 0
   fi
   local raw="https://raw.githubusercontent.com/IsaamMJ/Lattice/main/.claude-plugin/plugin.json"
+  # --max-time / --timeout bound the call so it can never hang. This matters
+  # most for the detached background refresh in maybe_update_check: an unbounded
+  # curl there could outlive its parent as an orphan (the v0.9.15 failure mode).
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${raw}" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/'
+    curl -fsSL --max-time 10 "${raw}" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/'
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "${raw}" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/'
+    wget -qO- --timeout=10 "${raw}" 2>/dev/null | grep -oE '"version"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/'
   else
     return 1
   fi
@@ -369,27 +372,60 @@ maybe_update_check() {
   cache=".lattice/cache/update-check.env"
   now="$(date +%s)"
   last=0
+  # Loads checked_at + latest_version + current_version from the last check.
   [ -f "${cache}" ] && . "${cache}" 2>/dev/null || true
   last="${checked_at:-0}"
+
+  # Fast path: within the interval there is nothing to do — no notice, no
+  # network, no background spawn. This is what the overwhelming majority of
+  # commands hit, so the update subsystem adds ~zero cost per command.
   if [ $((now - last)) -lt $((interval * 3600)) ]; then
     return 0
   fi
+
   current="$(current_version)"
-  latest="$(latest_remote_version || true)"
-  [ -z "${latest}" ] && return 0
+
+  # Interval elapsed. Two steps, neither of which blocks on the network:
+  #
+  # (1) #134: act on the LAST cached result. The notice / auto-update decision
+  #     uses cached data only, so this command never waits on a curl. Gating it
+  #     by the interval (not every command) preserves the original once-per-day
+  #     cadence — no nagging banner on every invocation.
+  if [ -n "${latest_version:-}" ] && version_newer "${latest_version}" "${current}"; then
+    if [ "${mode}" = "auto" ]; then
+      # #130: side-channel notices go to stderr so scriptable stdout stays clean.
+      echo "[${PROG}] update: ${current} -> ${latest_version} (auto mode)" >&2
+      if cmd_update --self; then
+        # #142: an auto-update swaps the on-disk script + skills, but Claude Code
+        # has already loaded the old ones for this session — tell the user.
+        echo "[${PROG}] updated to ${latest_version} — restart Claude Code to load the new version + skills" >&2
+      fi
+    else
+      echo "[${PROG}] update available: ${current} -> ${latest_version}. Run: lattice update --self" >&2
+    fi
+  fi
+
+  # (2) Refresh the cache in a DETACHED background process so the current
+  #     command returns immediately. checked_at is bumped synchronously first so
+  #     we don't re-spawn a refresh on every following command until this lands.
+  #     Interval-gated (default 24h) and never on the tick-invoked
+  #     statusline/sessions/review commands (excluded above) — so this is NOT
+  #     the every-2s hot-path network call that caused the v0.9.15 orphan pile.
   {
     printf "checked_at=%s\n" "${now}"
     printf "current_version=%q\n" "${current}"
-    printf "latest_version=%q\n" "${latest}"
+    printf "latest_version=%q\n" "${latest_version:-}"
   } > "${cache}" 2>/dev/null || true
-  if version_newer "${latest}" "${current}"; then
-    if [ "${mode}" = "auto" ]; then
-      echo "[${PROG}] update: ${current} -> ${latest} (auto mode)"
-      cmd_update --self || true
-    else
-      echo "[${PROG}] update available: ${current} -> ${latest}. Run: lattice update --self" >&2
-    fi
-  fi
+  (
+    fresh="$(latest_remote_version || true)"
+    [ -z "${fresh}" ] && exit 0
+    {
+      printf "checked_at=%s\n" "${now}"
+      printf "current_version=%q\n" "${current}"
+      printf "latest_version=%q\n" "${fresh}"
+    } > "${cache}" 2>/dev/null || true
+  ) >/dev/null 2>&1 </dev/null &
+  disown 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
