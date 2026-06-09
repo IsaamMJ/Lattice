@@ -38,7 +38,16 @@ function latticeBin(): string {
   return process.env.LATTICE_BIN || "lattice";
 }
 
-type RunResult = { ok: boolean; stdout: string; stderr: string; code: number };
+type RunResult = {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  code: number;
+  // #154: when code is -1 (r.status was null), explain WHY — timeout,
+  // buffer overflow, or signal — so the caller can emit an actionable error
+  // instead of a bare "exit -1".
+  failReason?: string;
+};
 
 // #150: On Windows a bare `bash` is unsafe to spawn. C:\Windows\System32 is
 // always on PATH and ships its own `bash.exe` — the WSL launcher — which
@@ -88,18 +97,53 @@ function resolveInvocation(args: string[]): { cmd: string; argv: string[]; shell
 function runLattice(args: string[], opts: { timeoutMs?: number } = {}): RunResult {
   const cwd = projectDir();
   const { cmd, argv, shell } = resolveInvocation(args);
+  // #154: `lattice list` in a repo with many findings is slow on Windows+Git
+  // Bash (per-finding fork storm) and its output is larger than `context`.
+  // The old 15s timeout + default 1MB maxBuffer made spawnSync set r.status
+  // to null (with r.error), which the caller surfaced as a useless "exit -1".
+  // Generous buffer (64MB) + 60s default timeout fix both failure modes.
+  const timeoutMs = opts.timeoutMs ?? 60000;
   const r = spawnSync(cmd, argv, {
     cwd,
     encoding: "utf8",
-    timeout: opts.timeoutMs ?? 15000,
+    timeout: timeoutMs,
+    maxBuffer: 64 * 1024 * 1024,
     shell,
   });
+  // r.status is null when the process was terminated by a signal (timeout
+  // kills with SIGTERM) or spawn failed (r.error: ENOBUFS on buffer overflow,
+  // ENOENT, etc.). Capture the real cause so the -1 is explained.
+  let failReason: string | undefined;
+  if (r.status === null || r.status === undefined) {
+    if (r.error) {
+      const code = (r.error as NodeJS.ErrnoException).code;
+      if (code === "ENOBUFS") {
+        failReason = "output exceeded buffer (ENOBUFS)";
+      } else if (code === "ETIMEDOUT") {
+        failReason = `timed out after ${timeoutMs}ms`;
+      } else {
+        failReason = r.error.message;
+      }
+    } else if (r.signal === "SIGTERM") {
+      // spawnSync's own timeout kills the child with SIGTERM.
+      failReason = `timed out after ${timeoutMs}ms`;
+    } else if (r.signal) {
+      failReason = `killed by signal ${r.signal}`;
+    }
+  }
   return {
     ok: r.status === 0 && !r.error,
     stdout: r.stdout ?? "",
     stderr: r.stderr ?? "",
     code: r.status ?? -1,
+    failReason,
   };
+}
+
+// #154: build a "(exit N)" suffix that appends the underlying cause when the
+// exit code is the synthetic -1, so reports are actionable.
+function exitDetail(r: RunResult): string {
+  return r.failReason ? `exit ${r.code}: ${r.failReason}` : `exit ${r.code}`;
 }
 
 function asText(text: string) {
@@ -143,7 +187,7 @@ function createServer() {
       const r = runLattice(["context"]);
       if (!r.ok && !r.stdout) {
         return asError(
-          `lattice context failed (exit ${r.code}). cwd=${projectDir()} bin=${latticeBin()}\n${r.stderr}`
+          `lattice context failed (${exitDetail(r)}). cwd=${projectDir()} bin=${latticeBin()}\n${r.stderr}`
         );
       }
       // If .lattice/ is missing, `lattice context` still exits 0 with a
@@ -226,7 +270,7 @@ function createServer() {
       const r = runLattice(args);
       if (!r.ok && !r.stdout) {
         return asError(
-          `lattice list failed (exit ${r.code}) cwd=${projectDir()}\n${r.stderr}`
+          `lattice list failed (${exitDetail(r)}) cwd=${projectDir()}\n${r.stderr}`
         );
       }
       return asText(r.stdout || "(no matching findings)");
@@ -259,7 +303,7 @@ function createServer() {
       const r = runLattice(["show", id]);
       if (!r.ok && !r.stdout) {
         return asError(
-          `lattice show ${id} failed (exit ${r.code}): ${r.stderr || "no match"}`
+          `lattice show ${id} failed (${exitDetail(r)}): ${r.stderr || "no match"}`
         );
       }
       return asText(r.stdout);
@@ -344,7 +388,7 @@ function createServer() {
       const r = runLattice(args);
       if (!r.ok) {
         return asError(
-          `lattice close failed (exit ${r.code}): ${r.stderr || r.stdout || "unknown error"}`
+          `lattice close failed (${exitDetail(r)}): ${r.stderr || r.stdout || "unknown error"}`
         );
       }
       return asText(r.stdout || `closed ${id} (${reason})`);
@@ -360,7 +404,7 @@ async function main() {
   const probe = runLattice(["version"], { timeoutMs: 5000 });
   if (!probe.ok) {
     console.error(
-      `[lattice-mcp] ERROR: probe \`lattice version\` failed (exit ${probe.code}).\n` +
+      `[lattice-mcp] ERROR: probe \`lattice version\` failed (${exitDetail(probe)}).\n` +
         `  lattice script: ${latticeBin()}\n` +
         `  bash used:      ${resolveBash()}\n` +
         `  On Windows, the server runs the lattice bash script via Git Bash. If\n` +
