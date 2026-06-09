@@ -23,7 +23,7 @@ sweep_id: <14-char: YYYYMMDD + 6-hex>
 auditor: claude-code/flow-audit
 exposure: production-critical | user-facing | admin-only | internal | test-only | dead-code
 # Required if tier in [CRITICAL, HIGH]:
-flow_impact: <one sentence — how customer experiences the gap>
+impact: <one sentence — how customer experiences the gap>
 example_failure: <one sentence — concrete user scenario that triggers it>
 # Required if tier=OK:
 intentional_citation: <CLAUDE.md/TTD line that documents the design choice>
@@ -34,8 +34,8 @@ notes: <only if needed>
 
 | Tier | Extra required |
 |---|---|
-| CRITICAL | flow_impact + example_failure |
-| HIGH | flow_impact + example_failure |
+| CRITICAL | impact + example_failure |
+| HIGH | impact + example_failure |
 | MEDIUM | (none beyond base) |
 | LOW | (none beyond base) |
 | OK | intentional_citation |

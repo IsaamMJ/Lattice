@@ -116,7 +116,11 @@ function scanTargets(target) {
 // Bounded to LOOKAHEAD lines. This scoping is the key precision guard: it stops
 // the `where:` search from leaking into a following statement or a trailing
 // comment line (both caused false positives in early self-tests).
-const LOOKAHEAD = 8;
+// Wide enough that a realistically long multi-line `where` (nested AND/OR
+// arrays, drizzle `and(...)` spanning many `eq()` lines) closes inside the
+// window. If it doesn't close we report `complete:false` and fail SAFE (skip),
+// so erring large only costs a little scan text, never precision.
+const LOOKAHEAD = 24;
 function extractCallArgs(lines, i, parenAbs) {
   const window = lines.slice(i, i + 1 + LOOKAHEAD).join("\n");
   let depth = 0;
@@ -132,23 +136,40 @@ function extractCallArgs(lines, i, parenAbs) {
   return { complete: false, args: window.slice(parenAbs + 1) };
 }
 
-// Within a call's argument text, find the `where: { ... }` object and return it.
-// Searches only the supplied (already call-scoped) text.
+// Within a call's argument text, find the `where:` clause and return its FULL
+// value text. The value may be an object literal (`{ ... }`), an array, or a
+// function-call expression such as drizzle's `and(eq(t.tenantId, x), ...)` /
+// `or(...)`. We balance `{}`, `[]` AND `()` together so the span covers nested
+// AND/OR arrays and `and(...)`/`eq(...)` calls at any depth, and stop at the
+// value's top-level terminator (a sibling-option `,`, or the end of args).
+// Balancing `()` here is what fixes #141: an `and(...)` where whose tenant key
+// lived inside the parens was previously skipped over by an object-only scan,
+// which then latched onto an unrelated later `{ ... }` option (e.g. `with:`)
+// and reported a false "missing tenant filter".
 function extractWhere(args) {
-  const wIdx = args.search(/\bwhere\s*:/);
-  if (wIdx === -1) return { found: false, whereText: "" };
-  const braceStart = args.indexOf("{", wIdx);
-  if (braceStart === -1) return { found: false, whereText: "" };
-  let depth = 0;
-  for (let j = braceStart; j < args.length; j++) {
+  const wm = args.match(/\bwhere\s*:/);
+  if (!wm) return { found: false, whereText: "" };
+  // Start at the first non-whitespace char of the value.
+  let start = wm.index + wm[0].length;
+  while (start < args.length && /\s/.test(args[start])) start++;
+  if (start >= args.length) return { found: false, whereText: "" };
+  let curly = 0, square = 0, round = 0;
+  for (let j = start; j < args.length; j++) {
     const c = args[j];
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) return { found: true, whereText: args.slice(braceStart, j + 1) };
+    if (c === "{") curly++;
+    else if (c === "}") { if (curly === 0) break; curly--; }
+    else if (c === "[") square++;
+    else if (c === "]") { if (square === 0) break; square--; }
+    else if (c === "(") round++;
+    else if (c === ")") { if (round === 0) break; round--; }
+    else if (c === "," && curly === 0 && square === 0 && round === 0) {
+      // Top-level comma → end of the `where` value (next sibling option).
+      return { found: true, whereText: args.slice(start, j) };
     }
   }
-  return { found: false, whereText: "" };
+  // Hit a closing bracket that belongs to the enclosing args, or ran out of
+  // text — the value runs to here. Return whatever we balanced.
+  return { found: true, whereText: args.slice(start) };
 }
 
 let count = 0;
