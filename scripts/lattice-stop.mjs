@@ -62,18 +62,24 @@ if (!existsSync(latticeBin)) {
 
 // ---- Fire review --file --yes against today's log ----
 // Run via bash with explicit cwd; capture nothing (hook output goes nowhere).
-// Exit 0 regardless — never block session close on review failure.
+//
+// MUST be detached + unref'd: the CLI takes 20s+ to start while this hook's
+// budget is 2s. The old detached:false version meant the harness killed the
+// child with the parent's process tree at the 2s exit — review NEVER
+// completed, so candidates silently accumulated unfiled (observed on
+// Windows, 2026-06-10: 4 candidates from 35 events survived multiple
+// session ends). detached:true + unref lets the parent exit instantly while
+// the review finishes on its own; the run is idempotent so a killed attempt
+// is retried harmlessly at the next session end.
 const child = spawn('bash', [latticeBin, 'review', '--file', '--yes', '--quiet'], {
   cwd,
   stdio: ['ignore', 'ignore', 'ignore'],
-  detached: false,
+  detached: true,
   windowsHide: true,
 });
 
 child.on('error', () => {});
-child.on('exit', () => {
-  clearTimeout(HARD_TIMEOUT);
-  process.exit(0);
-});
+child.unref();
 
-// Hard backstop — if child somehow hangs, hard timeout fires.
+clearTimeout(HARD_TIMEOUT);
+process.exit(0);
