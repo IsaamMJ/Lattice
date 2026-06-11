@@ -3638,11 +3638,13 @@ cmd_doctor() {
         # WSL stub C:\Windows\System32\bash.exe ahead of Git Bash → from
         # PowerShell, `lattice` dies with `execvpe(/bin/bash) failed` (or
         # silently returns NOTHING with exit 0) on machines without a WSL
-        # distro. Detect the stale shim by its `where bash` line.
+        # distro. Detect the stale shim by its functional `('where bash`
+        # invocation — NOT a bare 'where bash' grep, which false-positives on
+        # the new shim's own "do NOT use where bash" warning comment.
         # WARN, not FAIL: this is a machine-level environment advisory about a
         # shim outside the project — doctor's exit code gates *project* setup
         # (tests assert exit 0 on a clean project regardless of host state).
-        if grep -q 'where bash' "${cmd_found}" 2>/dev/null; then
+        if grep -q "('where bash" "${cmd_found}" 2>/dev/null; then
           _check_warn "lattice.cmd resolves bash via \`where bash\` — routes to WSL, not Git Bash (#165)" "this is the pre-v2.3.2 shim; from PowerShell it hits the WSL stub (execvpe(/bin/bash) error or silent empty output). Re-run install.sh (or update.sh) to regenerate the shim with explicit Git Bash resolution"
         else
           _check_pass "lattice.cmd resolves Git Bash explicitly (no WSL fallthrough — #165)"
