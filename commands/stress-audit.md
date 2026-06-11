@@ -188,6 +188,14 @@ After all return:
 - Final output = aggregated findings file path + tier-grouped count + top-3 todo
 - Manifest is the summary
 
+## Tool usage
+
+- **Agent** — one dispatch per attack surface (the core of the skill); sub-agents get Bash + Read + Write per their surface brief
+- **Bash** — `lattice context` / `lattice file --from` for import, scratch-project bootstrap for dynamic surfaces
+- **Read** — aggregating sub-agent YAML output before import
+- **Write** — the multi-doc findings file handed to `lattice file --from`
+- Never used: Edit (this skill files findings; it does not modify the host project)
+
 ---
 
 After running: `lattice list --tier CRITICAL,HIGH` to triage. `/lattice-fix <id>` for one-shot PATCH_DOC fixes. `lattice next --unblocked-only` for the highest-leverage actionable finding.

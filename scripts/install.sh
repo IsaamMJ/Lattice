@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO="https://github.com/IsaamMJ/Lattice"
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
-COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close")
+COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close" "stress-audit")
 # #100/#101: skills reference `references/<file>.md` (relative to command dir);
 # keep in sync with commands/references/*.md.
 REFERENCES=("audit-abuse-rules" "audit-cli-tool-rules" "audit-contract-format" "audit-finding-schema" "audit-sweep-manifest" "audit-sweep-module-dispatch" "audit-verify-subagent-prompt" "flow-audit-finding-schema" "flow-audit-subagent-prompt" "scale-audit-finding-schema" "scale-audit-subagent-prompt" "security-audit-finding-schema" "security-audit-subagent-prompt")
@@ -204,90 +204,147 @@ else
   echo "[lattice]   alias lattice=\"${SCRIPT_DEST}/lattice\""
 fi
 
-# v1.0.1 (#46): on Windows, also drop a .cmd wrapper so `lattice` works in
-# PowerShell + cmd.exe (not just Git Bash). Detect Windows via uname output;
-# msys/mingw/cygwin all match. The .cmd resolves bash.exe at runtime via
-# `where bash` so it works whether the user installed Git for Windows in the
-# default location or a custom one.
+# v1.0.1 (#46), rewritten for #165: on Windows, also drop a .cmd wrapper so
+# `lattice` works in PowerShell + cmd.exe (not just Git Bash). Detect Windows
+# via uname output; msys/mingw/cygwin all match.
+#
+# #165: the shim must NEVER resolve bash via `where bash` — on most Windows
+# boxes that picks the WSL stub C:\Windows\System32\bash.exe first, which dies
+# with `execvpe(/bin/bash) failed: No such file or directory` when no WSL
+# distro is configured (and can return EMPTY output with exit 0 — silent
+# failure). We resolve Git Bash explicitly: known install dirs first, then
+# derive from git.exe's own location. If none found: one clear stderr line,
+# exit 1 — never fall through to WSL.
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*)
     CMD_SHIM="${SHIM_DIR}/lattice.cmd"
     cat > "${CMD_SHIM}" <<'CMDWRAPPER'
 @echo off
+rem lattice.cmd — Windows-native shim. Routes to GIT BASH, never WSL (#165).
+rem Do NOT "fix" this to use `where bash`: that resolves the WSL stub
+rem C:\Windows\System32\bash.exe first and breaks on machines without a
+rem WSL distro (execvpe(/bin/bash) failed / silent empty output).
 setlocal
 set "BASH_EXE="
-for /f "delims=" %%i in ('where bash 2^>nul') do (
-  if not defined BASH_EXE set "BASH_EXE=%%i"
+if exist "%ProgramFiles%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles%\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "%ProgramFiles(x86)%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles(x86)%\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "%LOCALAPPDATA%\Programs\Git\bin\bash.exe" set "BASH_EXE=%LOCALAPPDATA%\Programs\Git\bin\bash.exe"
+if defined BASH_EXE goto :run
+rem Custom install dir: derive bash.exe from git.exe's location.
+rem git.exe lives in GITROOT\cmd\, GITROOT\bin\, or GITROOT\mingw64\bin\.
+rem NB: no redirection chars in rem lines - cmd.exe parses them even here.
+for /f "delims=" %%i in ('where git 2^>nul') do (
+  if not defined BASH_EXE if exist "%%~dpi..\bin\bash.exe" set "BASH_EXE=%%~dpi..\bin\bash.exe"
+  if not defined BASH_EXE if exist "%%~dpi..\..\bin\bash.exe" set "BASH_EXE=%%~dpi..\..\bin\bash.exe"
 )
-if not defined BASH_EXE if exist "C:\Program Files\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files\Git\bin\bash.exe"
-if not defined BASH_EXE if exist "C:\Program Files (x86)\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files (x86)\Git\bin\bash.exe"
-if not defined BASH_EXE (
-  echo [lattice] ERROR: bash.exe not found. Install Git for Windows.>&2
-  exit /b 1
-)
+if not defined BASH_EXE goto :nobash
+:run
 "%BASH_EXE%" "__SCRIPT_DEST__/lattice" %*
-endlocal
+exit /b %ERRORLEVEL%
+:nobash
+echo [lattice] ERROR: Git Bash bash.exe not found - checked Program Files, LocalAppData\Programs\Git, and git.exe's location. Install Git for Windows: https://gitforwindows.org 1>&2
+exit /b 1
 CMDWRAPPER
-    # Patch the SCRIPT_DEST path into the .cmd (sed -i for portability).
-    sed -i.bak "s#__SCRIPT_DEST__#${SCRIPT_DEST}#g" "${CMD_SHIM}" 2>/dev/null || true
+    # Patch the SCRIPT_DEST path into the .cmd. Use a mixed-style Windows path
+    # (C:/Users/...) — unambiguous for bash.exe started fresh from cmd.exe,
+    # unlike the MSYS /c/... form which Cygwin's bash doesn't map.
+    # Also force CRLF line endings: cmd.exe's goto/label scanner is flaky on
+    # LF-only batch files, and this shim uses labels.
+    WIN_SCRIPT_DEST="$(cygpath -m "${SCRIPT_DEST}" 2>/dev/null || echo "${SCRIPT_DEST}")"
+    sed -i.bak -e "s#__SCRIPT_DEST__#${WIN_SCRIPT_DEST}#g" -e 's/\r$//' -e 's/$/\r/' "${CMD_SHIM}" 2>/dev/null || true
     rm -f "${CMD_SHIM}.bak" 2>/dev/null || true
-    echo "[lattice] Windows .cmd wrapper installed at ${CMD_SHIM} (#46)"
+    echo "[lattice] Windows .cmd wrapper installed at ${CMD_SHIM} (#46/#165 — Git Bash only, no WSL)"
 
-    # Check if SHIM_DIR is on the Windows-side User PATH. PowerShell + cmd.exe
-    # read $env:PATH from the Windows registry, NOT from Git Bash's $PATH.
-    # Translate /c/Users/Jahir/bin -> C:\Users\Jahir\bin for comparison.
+    # Check if SHIM_DIR is on the Windows-side PATH (User or Machine scope).
+    # PowerShell + cmd.exe read PATH from the registry, NOT from Git Bash's
+    # $PATH. We only DIAGNOSE here — mutating the Windows PATH is the user's
+    # call, so print the exact command instead of running setx ourselves.
     win_shim_dir="$(cygpath -w "${SHIM_DIR}" 2>/dev/null || echo "${SHIM_DIR}")"
-    win_user_path="$(powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'User')" 2>/dev/null | tr -d '\r')"
-    case ";${win_user_path};" in
+    win_path="$(powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')" 2>/dev/null | tr -d '\r')"
+    case ";${win_path};" in
       *";${win_shim_dir};"*|*";${win_shim_dir}\\;"*)
-        echo "[lattice] ${win_shim_dir} already on Windows User PATH — \`lattice\` resolves in PowerShell"
+        echo "[lattice] ${win_shim_dir} already on Windows PATH — \`lattice\` resolves in PowerShell"
         ;;
       *)
-        echo "[lattice] note: ${win_shim_dir} is NOT on your Windows User PATH"
-        echo "[lattice] adding it via setx (one-time; takes effect in NEW PowerShell windows)..."
-        new_path="${win_shim_dir}"
-        [ -n "${win_user_path}" ] && new_path="${win_user_path};${win_shim_dir}"
-        if powershell.exe -NoProfile -Command "[Environment]::SetEnvironmentVariable('Path', \"${new_path}\", 'User')" >/dev/null 2>&1; then
-          echo "[lattice]   ok: open a NEW PowerShell window, then \`lattice doctor\` will work"
-        else
-          echo "[lattice]   WARN: could not update Windows PATH automatically. Run this in PowerShell:"
-          echo "[lattice]   [Environment]::SetEnvironmentVariable('Path', \$env:Path + ';${win_shim_dir}', 'User')"
-        fi
+        echo "[lattice] note: ${win_shim_dir} is NOT on your Windows PATH — PowerShell/cmd won't find \`lattice\`."
+        echo "[lattice] to fix, run this ONCE in PowerShell (takes effect in NEW windows):"
+        echo "[lattice]   [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';${win_shim_dir}', 'User')"
         ;;
     esac
     ;;
 esac
 
-# PATH check: is the chosen SHIM_DIR actually on PATH right now? If not, write
-# a one-line guard into the user's shell rc so the next shell picks it up.
+# PATH check (bash side, #170): is the chosen SHIM_DIR actually on PATH?
+#
+# #170: writing the guard into ONE rc file is not enough. Git Bash terminals
+# open LOGIN shells, which read ~/.bash_profile and SKIP ~/.bashrc — and many
+# setups have a .bash_profile that never sources .bashrc (or vice versa). The
+# result: the guard "exists" but half the user's shells (incl. Claude Code
+# sessions) never see it, so every invocation falls back to the full
+# ~/.claude/lattice/scripts/lattice path. Wire BOTH files, idempotently
+# (grep before append), whenever the shim lives in ~/.local/bin.
+_append_path_guard() {
+  # $1 = rc file. Appends the guard unless the file already wires .local/bin.
+  # Returns 0 if appended, 1 if already covered.
+  if [ -f "$1" ] && grep -q '\.local/bin' "$1" 2>/dev/null; then
+    return 1
+  fi
+  {
+    echo ""
+    echo "# Added by lattice install.sh — ensures ~/.local/bin is on PATH"
+    echo 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+  } >> "$1"
+  return 0
+}
+
 case ":${PATH}:" in
   *":${SHIM_DIR}:"*)
     echo "[lattice] ${SHIM_DIR} on PATH — \`lattice\` resolves in this shell already"
     ;;
   *)
     echo "[lattice] note: ${SHIM_DIR} is NOT on your current PATH"
-    rc_target=""
-    if [ -n "${ZSH_VERSION:-}" ] || [ -n "${BASH_VERSION:-}" ]; then
-      # Prefer the rc file the user actually has.
-      for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.profile"; do
-        if [ -f "${rc}" ]; then rc_target="${rc}"; break; fi
-      done
-    fi
-    # If we found one and it doesn't already mention .local/bin, append the guard line.
-    if [ -n "${rc_target}" ] && ! grep -q '\.local/bin' "${rc_target}" 2>/dev/null; then
-      {
-        echo ""
-        echo "# Added by lattice install.sh — ensures ~/.local/bin is on PATH"
-        echo 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
-      } >> "${rc_target}"
-      echo "[lattice] added PATH guard to ${rc_target}"
-      echo "[lattice] open a new shell (or: source ${rc_target}) and \`lattice help\` will work"
-    else
-      echo "[lattice] add manually to your shell rc:"
-      echo "[lattice]   export PATH=\"\$HOME/.local/bin:\$PATH\""
-    fi
     ;;
 esac
+
+if [ "${SHIM_DIR}" = "${HOME}/.local/bin" ]; then
+  guard_wrote=0
+  # zsh users: .zshrc covers both login + interactive on macOS terminals.
+  if [ -f "${HOME}/.zshrc" ]; then
+    if _append_path_guard "${HOME}/.zshrc"; then
+      echo "[lattice] added PATH guard to ${HOME}/.zshrc"; guard_wrote=1
+    fi
+  fi
+  # bash: interactive non-login shells read .bashrc...
+  if _append_path_guard "${HOME}/.bashrc"; then
+    echo "[lattice] added PATH guard to ${HOME}/.bashrc"; guard_wrote=1
+  fi
+  # ...login shells (Git Bash terminals, ssh) read .bash_profile — or fall
+  # back to .profile when .bash_profile doesn't exist. Cover whichever path
+  # bash will actually take; if neither file exists, create a .bash_profile
+  # that chains .bashrc (where the guard already lives).
+  if [ -f "${HOME}/.bash_profile" ]; then
+    if _append_path_guard "${HOME}/.bash_profile"; then
+      echo "[lattice] added PATH guard to ${HOME}/.bash_profile"; guard_wrote=1
+    fi
+  elif [ -f "${HOME}/.profile" ]; then
+    if _append_path_guard "${HOME}/.profile"; then
+      echo "[lattice] added PATH guard to ${HOME}/.profile"; guard_wrote=1
+    fi
+  else
+    {
+      echo "# Created by lattice install.sh — login shells chain ~/.bashrc"
+      echo '[ -f ~/.bashrc ] && . ~/.bashrc'
+      echo "# Belt-and-braces: guard here too so re-runs see it (~/.local/bin)"
+      echo 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+    } > "${HOME}/.bash_profile"
+    echo "[lattice] created ${HOME}/.bash_profile (sources ~/.bashrc + PATH guard)"; guard_wrote=1
+  fi
+  if [ "${guard_wrote}" -eq 1 ]; then
+    echo "[lattice] open a new shell (or: source ~/.bashrc) and \`lattice help\` will work"
+  else
+    echo "[lattice] PATH guard already present in rc files — nothing to do"
+  fi
+fi
 echo ""
 echo "[lattice] verify: lattice doctor"
 echo ""

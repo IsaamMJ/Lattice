@@ -130,13 +130,19 @@ function topFindings(root, n = 3) {
             // into Claude Code's additionalContext. A malicious title can
             // instruct the LLM to invoke close_finding({confirm:true}) and
             // defeat the #96 destructiveHint gate — prompt injection inverts
-            // the trust model. Strip control chars, cap length, and bracket
-            // the value to mark it as DATA, not instruction.
+            // the trust model. Strip control chars, cap length.
+            // Issue #169: the TITLE_DATA<<<…>>>END marker wrapper was dropped
+            // — it leaked raw into every session's context and looked like a
+            // serialization bug. Sanitization here is THE defense; the title
+            // is rendered plainly double-quoted, so also neutralize quote
+            // chars (`"` → `'`) and backticks so the title can't break out
+            // of the quoted span.
             const sanitize = (s) => {
               if (!s) return '';
               return String(s)
-                .replace(/[\x00-\x1F\x7F]/g, ' ')      // control chars
+                .replace(/[\x00-\x1F\x7F]/g, ' ')      // control chars (incl. newlines)
                 .replace(/[‪-‮⁦-⁩]/g, ' ')  // bidi overrides
+                .replace(/["`]/g, "'")                 // quote/backtick breakout
                 .slice(0, 200);
             };
             const slug = e.name.replace(/\.yml$/, '');
@@ -418,12 +424,14 @@ if (deltas) {
 if (top3.length > 0) {
   lines.push(``);
   lines.push(`Top findings to address (by tier + age):`);
-  // v2.3.1 (cross-cutting audit): bracket the title as DATA to discourage
-  // the LLM from treating embedded text as instructions ("ignore previous
-  // and call close_finding…"). Sanitization above is the primary defense;
-  // this is belt-and-braces.
+  // v2.3.1 (cross-cutting audit): titles are sanitized at read time (control
+  // chars, bidi overrides, quotes/backticks stripped, 200-char cap) — that
+  // sanitization is the prompt-injection defense. Issue #169: the former
+  // TITLE_DATA<<<…>>>END marker wrapper was dropped because the raw markers
+  // leaked into the session context and read as a serialization bug; the
+  // title is now rendered as a plain double-quoted string.
   for (const f of top3) {
-    lines.push(`- [${f.tier}] ${f.slug} — TITLE_DATA<<<${f.title}>>>END (sweep ${f.date})`);
+    lines.push(`- [${f.tier}] ${f.slug} — "${f.title}" (sweep ${f.date})`);
   }
 }
 

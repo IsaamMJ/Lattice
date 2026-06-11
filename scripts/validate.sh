@@ -233,6 +233,23 @@ for helper in lattice lattice-close.sh lattice-regenerate.sh lattice-reopen.sh; 
   fi
 done
 
+# --- 7b. Stop-hook detach regression (#176) -----------------------------
+# lattice-stop.mjs must spawn the review child with detached:true + unref()
+# and exit well inside its 2s budget — detached:false silently killed the
+# review child for weeks (2026-06-10 incident). Node-based static + timing
+# assertions; see test/stop-hook-detach.test.mjs for the full rationale.
+note "running stop-hook detach regression test (#176)"
+if command -v node >/dev/null 2>&1; then
+  if node "${ROOT}/test/stop-hook-detach.test.mjs" > /tmp/lattice-stop-hook-test.log 2>&1; then
+    ok "stop-hook-detach.test.mjs"
+  else
+    warn "stop-hook-detach.test.mjs failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-stop-hook-test.log >&2 || true
+  fi
+else
+  warn "node not found — cannot run test/stop-hook-detach.test.mjs (stop hook is node-based)"
+fi
+
 # --- 8. Schema doc declares v0.7 YAML format ---------------------------
 note "checking schema doc declares v0.7 YAML format"
 if grep -qE 'one YAML file per finding' "${ROOT}/docs/finding-schema.md" 2>/dev/null; then

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 RAW="https://raw.githubusercontent.com/IsaamMJ/Lattice/main"
-COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close")
+COMMANDS=("audit" "scale-audit" "security-audit" "audit-sweep" "flow-audit" "lattice-fix" "close" "stress-audit")
 # #100/#101: the skill markdown points at `references/<file>.md` (relative to
 # the command dir), but the installer never vendored them — so installed skills
 # referenced files that didn't exist on disk (abuse rules, subagent prompts,
@@ -128,25 +128,43 @@ case "$(uname -s 2>/dev/null)" in
     done
     if [ -n "${SHIM_DIR}" ]; then
       CMD_SHIM="${SHIM_DIR}/lattice.cmd"
+      # #165: NEVER resolve bash via `where bash` — that picks the WSL stub
+      # C:\Windows\System32\bash.exe first and dies with execvpe(/bin/bash)
+      # (or silent empty output) on machines without a WSL distro. Resolve
+      # Git Bash explicitly; keep in sync with install.sh's heredoc.
       cat > "${CMD_SHIM}" <<'CMDWRAPPER'
 @echo off
+rem lattice.cmd — Windows-native shim. Routes to GIT BASH, never WSL (#165).
+rem Do NOT "fix" this to use `where bash`: that resolves the WSL stub
+rem C:\Windows\System32\bash.exe first and breaks on machines without a
+rem WSL distro (execvpe(/bin/bash) failed / silent empty output).
 setlocal
 set "BASH_EXE="
-for /f "delims=" %%i in ('where bash 2^>nul') do (
-  if not defined BASH_EXE set "BASH_EXE=%%i"
+if exist "%ProgramFiles%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles%\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "%ProgramFiles(x86)%\Git\bin\bash.exe" set "BASH_EXE=%ProgramFiles(x86)%\Git\bin\bash.exe"
+if not defined BASH_EXE if exist "%LOCALAPPDATA%\Programs\Git\bin\bash.exe" set "BASH_EXE=%LOCALAPPDATA%\Programs\Git\bin\bash.exe"
+if defined BASH_EXE goto :run
+rem Custom install dir: derive bash.exe from git.exe's location.
+rem git.exe lives in GITROOT\cmd\, GITROOT\bin\, or GITROOT\mingw64\bin\.
+rem NB: no redirection chars in rem lines - cmd.exe parses them even here.
+for /f "delims=" %%i in ('where git 2^>nul') do (
+  if not defined BASH_EXE if exist "%%~dpi..\bin\bash.exe" set "BASH_EXE=%%~dpi..\bin\bash.exe"
+  if not defined BASH_EXE if exist "%%~dpi..\..\bin\bash.exe" set "BASH_EXE=%%~dpi..\..\bin\bash.exe"
 )
-if not defined BASH_EXE if exist "C:\Program Files\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files\Git\bin\bash.exe"
-if not defined BASH_EXE if exist "C:\Program Files (x86)\Git\bin\bash.exe" set "BASH_EXE=C:\Program Files (x86)\Git\bin\bash.exe"
-if not defined BASH_EXE (
-  echo [lattice] ERROR: bash.exe not found. Install Git for Windows.>&2
-  exit /b 1
-)
+if not defined BASH_EXE goto :nobash
+:run
 "%BASH_EXE%" "__SCRIPT_DEST__/lattice" %*
-endlocal
+exit /b %ERRORLEVEL%
+:nobash
+echo [lattice] ERROR: Git Bash bash.exe not found - checked Program Files, LocalAppData\Programs\Git, and git.exe's location. Install Git for Windows: https://gitforwindows.org 1>&2
+exit /b 1
 CMDWRAPPER
-      sed -i.bak "s#__SCRIPT_DEST__#${SCRIPT_DEST}#g" "${CMD_SHIM}" 2>/dev/null || true
+      # Mixed-style path for bash.exe + CRLF (cmd.exe goto/label scanner is
+      # flaky on LF-only batch files; this shim uses labels).
+      WIN_SCRIPT_DEST="$(cygpath -m "${SCRIPT_DEST}" 2>/dev/null || echo "${SCRIPT_DEST}")"
+      sed -i.bak -e "s#__SCRIPT_DEST__#${WIN_SCRIPT_DEST}#g" -e 's/\r$//' -e 's/$/\r/' "${CMD_SHIM}" 2>/dev/null || true
       rm -f "${CMD_SHIM}.bak" 2>/dev/null || true
-      echo "[lattice] Windows .cmd wrapper refreshed at ${CMD_SHIM} (#46)"
+      echo "[lattice] Windows .cmd wrapper refreshed at ${CMD_SHIM} (#46/#165 — Git Bash only, no WSL)"
     fi
     ;;
 esac

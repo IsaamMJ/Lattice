@@ -2,7 +2,7 @@
 
 > **Audit framework for keeping docs aligned with code.** Doc-vs-code drift, scale risks, security exposures — every finding grounded in a `file:line` citation.
 
-Lattice ships six slash commands for Claude Code:
+Lattice ships seven slash commands for Claude Code:
 
 | Command | Does |
 |---|---|
@@ -10,8 +10,9 @@ Lattice ships six slash commands for Claude Code:
 | `/scale-audit <module-path>` | Horizontal-scaling killers (in-memory state, `setInterval` crons, in-process rate limiters) |
 | `/security-audit <module-path>` | Auth gaps, signature bypass, secret leaks, IDOR, OWASP Top 10 |
 | `/flow-audit <module-path>` | Customer-flow gaps for conversational AI and multi-step request flows |
-| `/audit-sweep <project-root>` | Runs the in-scope dimensions across every module via one dispatch per module; aggregates into one manifest |
-| `/lattice-fix <finding-id>` | Auto-fixes one low-risk PATCH_DOC finding by dispatching a Haiku subagent, verifying, closing — gated against CRITICAL/HIGH/BLOCKER, security, and cluster findings |
+| `/audit-sweep <project-root>` | Runs the in-scope dimensions (audit + scale + security + env-contract by default) across every module via one dispatch per module; aggregates into one manifest |
+| `/lattice-fix <finding-id>` | Auto-fixes one low-risk finding by dispatching a Haiku subagent, verifying, closing — gated against CRITICAL/HIGH/BLOCKER, security, and cluster findings |
+| `/close <finding-id>` | Interactive close skill — gathers the close reason + commit + rationale and invokes `lattice close` |
 
 Every finding cites a file and line. Every verdict requires evidence. Audits stop at human-approval gates — Lattice never auto-applies fixes or auto-commits.
 
@@ -53,15 +54,16 @@ curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/instal
 
 # 3. Findings land in .lattice/findings/open/<TIER>-<module>-<rule>.yml
 
-# 4. Triage with the lattice CLI:
-~/.claude/lattice/scripts/lattice list                    # see open findings
-~/.claude/lattice/scripts/lattice show <id>               # inspect one
-~/.claude/lattice/scripts/lattice close <id> --reason fixed --commit HEAD
-~/.claude/lattice/scripts/lattice defer <id> --until 2026-07-01 --reason "blocked on backend"
-~/.claude/lattice/scripts/lattice sync                    # regenerate CLAUDE.md from YAML
-~/.claude/lattice/scripts/lattice usage                   # see local feature usage
-
-# (alias `lattice=~/.claude/lattice/scripts/lattice` in your shell rc to drop the path)
+# 4. Triage with the lattice CLI (installer drops a `lattice` shim on PATH):
+lattice list                    # see open findings
+lattice next                    # the single highest-priority one
+lattice show <id>               # inspect one
+lattice close <id> [<id> ...] --reason fixed --commit HEAD   # multi-id: one startup, shared flags
+lattice defer <id> --until 2026-07-01 --reason "blocked on backend"
+lattice undefer <id>            # un-defer: status back to open, defer fields removed
+lattice sync                    # regenerate CLAUDE.md from YAML
+lattice context                 # session-start snapshot (mode, ADRs, top findings)
+lattice usage                   # see local feature usage
 ```
 
 Expected output:
@@ -117,7 +119,12 @@ curl -fsSL https://raw.githubusercontent.com/IsaamMJ/Lattice/main/scripts/update
 
 ### Windows note (PowerShell users)
 
-When writing finding YAMLs from PowerShell 5.1, `Set-Content -Encoding UTF8` prepends a UTF-8 BOM that older Lattice parsers (pre-v0.6.6.3) rejected. v0.6.6.3+ strips the BOM automatically, so this is no longer an issue. If you're on an older Lattice and seeing `malformed YAML at line 1`, either update or write files BOM-less:
+**Running `lattice` from PowerShell / cmd.exe.** The installer drops a `lattice.cmd` shim next to the bash shim (usually `~/.local/bin/`). It locates Git Bash's `bash.exe` explicitly (Program Files → `%LOCALAPPDATA%\Programs\Git` → derived from `git.exe`'s location) and never falls through to WSL.
+
+- **If you see `WSL ... execvpe(/bin/bash) failed: No such file or directory`** (or `lattice` prints *nothing* and exits 0 from PowerShell): you have a pre-v2.3.2 shim that resolved bash via `where bash`, which picks the WSL stub `C:\Windows\System32\bash.exe` ahead of Git Bash. Re-run install.sh (or `lattice update --self`) to regenerate the shim, then run `lattice doctor` — it flags the stale shim explicitly.
+- **If PowerShell says `lattice` is not recognized:** the shim dir isn't on the *Windows* PATH (the bash rc guard only fixes bash shells). `lattice doctor` prints the exact one-line `[Environment]::SetEnvironmentVariable(...)` command to run; PATH mutation is left to you, never auto-applied.
+
+**Writing finding YAMLs from PowerShell 5.1.** `Set-Content -Encoding UTF8` prepends a UTF-8 BOM that older Lattice parsers (pre-v0.6.6.3) rejected. v0.6.6.3+ strips the BOM automatically, so this is no longer an issue. If you're on an older Lattice and seeing `malformed YAML at line 1`, either update or write files BOM-less:
 
 ```powershell
 [System.IO.File]::WriteAllText($path, $content, [System.Text.UTF8Encoding]::new($false))
@@ -131,19 +138,34 @@ bash scripts/migrate.sh   # moves legacy findings to .lattice/findings/
 
 ---
 
-## Architecture (v0.7)
+## Architecture (v2.2)
 
-**Findings as a structured YAML database.** Each finding is one file:
-- Open: `.lattice/findings/open/<TIER>-<module>-<rule>.yml`
-- Closed: `.lattice/findings/closed/<TIER>-<module>-<rule>.yml`
+> For the full, code-grounded architecture document see [`ARCHITECTURE.md`](ARCHITECTURE.md). This section is the short tour.
 
-Open/closed lives in the path; triage status and lifecycle details live in YAML fields. Operate via the `lattice` CLI: `lattice close <id> --reason fixed --commit <sha>`, `lattice reopen <id> --reason <text>`, `lattice defer <id> --until <date>`, `lattice list`, `lattice show <id>`, `lattice sync`. Run `lattice help` for the full surface. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
+**Findings as a YAML-per-file database.** Each finding is one file under `.lattice/findings/{open,closed}/<TIER>-<module>-<rule>.yml`. Open/closed lives in the path; triage status and lifecycle details live in YAML fields. The CLAUDE.md checklist is regenerated from YAML truth between `<!-- lattice:checklist:start -->` markers — never edited by hand inside the markers.
 
-**Module-scoped dispatch (from v0.5).** `/audit-sweep` sends one Sonnet sub-agent per module that runs all in-scope dimensions inline. A 5-module sweep = 5 dispatches (not 15). Anthropic prompt caching reuses the methodology library across module dispatches at ~90% discount.
+**Two interfaces, one substrate.** Slash commands (run inside Claude Code) **produce** findings by reasoning about code. The `lattice` bash CLI **manages their lifecycle** (`list`, `show`, `next`, `close`, `reopen`, `defer`, `verify`, `sync`, `ci-check`, …). The CLI is plain bash — works in CI, cron, editor terminals, no model token cost.
 
-**Standalone.** Works without `oh-my-claudecode` — same methodology, same verdict quality, slightly more tokens.
+**Visibility layers** keep state present to every future agent:
 
-See `docs/finding-schema.md` for the YAML schema every skill conforms to.
+- **SessionStart hook** (`scripts/lattice-session-start.mjs`) — pure-Node, ≤1.5s hard timeout. Reads `.lattice/` and injects mode + top findings + ADRs + telemetry status into every Claude Code session.
+- **statusLine** (`scripts/lattice-statusline.mjs`) — pure-Node, ~50-150 ms per tick, lock + cache to prevent orphan processes. Renders findings counts, friction count, mode badge alongside Claude Code's native rate-limit info.
+- **MCP server** (`mcp/dist/index.js`, v1.0.0) — exposes `get_context`, `list_findings`, `show_finding`, `close_finding` as MCP tools. Thin TypeScript wrapper that shells out to the bash CLI for zero behavior drift. Wire in via `lattice mcp setup`.
+- **MAT log** (`.lattice/sessions/<YYYYMMDD>.jsonl`) — every `lattice <cmd>` invocation is recorded (cmd, args, exit, duration). Substrate for `lattice usage`, `lattice review`, and the friction-reporting channel that auto-files GitHub issues for workarounds and silent bugs.
+
+**Module-scoped dispatch.** `/audit-sweep` sends one Sonnet sub-agent per module that runs all in-scope dimensions (audit + scale + security + env-contract by default; flow + coverage opt-in) inline. A 5-module sweep = 5 dispatches (not 15). Anthropic prompt caching reuses the methodology across modules at ~90% discount.
+
+**Substrate mode (optional, `lattice mode substrate`).** Adds Architecture Decision Records (`lattice decide`, `lattice decisions list/show`), derived invariants (`lattice invariants derive`), and a richer `lattice context`. Classic mode keeps the v0.x finding-only behavior.
+
+**Grow / hypothesis lifecycle (optional, v2.x).** Parallel to findings — forward-looking experiments live under `.lattice/hypotheses/{open,running,closed,rolled-back}/`. `lattice grow propose → run → measure → check → close|rollback` with HTTP/file/cmd source schemes (cmd: is default-deny since v2.2.0), `combine: sum|max|min|weighted-avg` for bundled changes, and `lattice grow schedule install` for a closed-loop weekly Telegram digest.
+
+**Audit dimensions.** `audit` (doc-vs-code drift), `scale`, `security`, `env-contract` (silent `process.env.X || 'literal'` fallbacks across Node/TS/Python/Dart), `flow`, `coverage`, `audit-infra` (missing hooks/MCPs based on detected stack), plus free-form `configuration` / `quality` / `product`.
+
+**Self-installation.** `lattice setup` bootstraps `.lattice/`. `lattice wire-hooks` idempotently merges SessionStart + statusLine + Stop hooks into `~/.claude/settings.json` (dry-run default, automatic backup). `lattice mcp setup` wires the MCP server into `~/.claude.json`. `lattice update --self` keeps the install current; `lattice doctor` repairs drift; `lattice uninstall` cleans up.
+
+**Standalone.** No daemon, no DB, no external dependencies at runtime. Works without `oh-my-claudecode`. The Cloudflare Worker (`worker/lattice-telemetry.js`) is used **only** when you opt into telemetry or run `lattice report` — outbound HTTPS to a public, audit-trail-by-design GitHub-issue sink.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full system diagram, [`docs/finding-schema.md`](docs/finding-schema.md) for the YAML schema, [`docs/telemetry-protocol.md`](docs/telemetry-protocol.md) for the wire format.
 
 ---
 
@@ -207,11 +229,13 @@ Successful commands never trigger telemetry. `help`, `--version`, `doctor`, `con
 - Not an auto-fixer (every change is human-approved)
 - Not a code reviewer (use `oh-my-claudecode:code-reviewer` or your team for that)
 - Not a multi-language linter (NestJS/TypeScript-tuned out of the box; patterns generalize)
-- Not yet recommended for public adoption — currently being hardened on real projects
 
 ---
 
-## Roadmap
+## Release history
+
+Reverse chronological. Forward-looking work is tracked in [`docs/v2.2-design.md`](docs/v2.2-design.md) and the open backlog on GitHub.
+
 
 - **v0.5** — module-scoped dispatch, prompt-cache-aware, output schema contract, sequential echo-back guard, validate.sh cross-skill checks
 - **v0.6** — YAML-per-finding lifecycle (open/closed in path), CLAUDE.md regenerated from YAML truth via markers, `lattice-close.sh` + `lattice-regenerate.sh` helpers
@@ -225,7 +249,9 @@ Successful commands never trigger telemetry. `help`, `--version`, `doctor`, `con
 - **v0.6.6.2** — regenerated CLAUDE.md hint comment now points at the `lattice` CLI (`lattice help`) instead of the non-existent `scripts/lattice-close.sh` path. Distribution-bug fix from a flow-audit debrief.
 - **v0.6.6.3** — parser robustness from a heavy-use review. Strips leading UTF-8 BOM (PowerShell 5.1 cause), tolerates `---` document separator, line-1 errors include a fix hint. New `lattice validate` subcommand collects all per-file parse/schema errors instead of fail-fast.
 - **v0.6.7** — audit-skill rewrite. Killed the `.lattice/findings/sweep-<ts>.md` markdown summary (dual source of truth was the bug). New sweep manifest at `.lattice/findings/sweeps/<sweep_id>.yml` with `auditor_model` / `duration_ms` / `skipped` / `runtime_warnings[]`. New `lattice sweep-id` generates deterministic `<YYYYMMDD><6-hex>` IDs. `/flow-audit --scope a,b,c` for multi-module flows. New optional `relates_to: [slug, ...]` finding field. TTD-silent → code is ground truth; DRIFT only on explicit contradictions; OK-finding emission required.
-- **v2.1.4** (current) — hot-fix for #76: `grow check --json` was emitting invalid JSON (stray `{}` appended after each hypothesis from `|| echo "{}"` fallback firing when measure returned 1 on fetch-fail). Closed-loop autonomous Telegram digest now actually works end-to-end on the first cron fire.
+- **v2.2.1** — agent platform (Slice F of the v2.2 design doc). New `lattice agent` subsystem: registry + per-agent feedback log + iteration dispatch. `lattice agent new <slug> --kind <kind> --description "..."` registers an agent spec at `.lattice/agents/<slug>.yml`; `lattice agent list` / `show` inspect them. Closes the v2.2 design's last open slice in the same session as v2.2.0.
+- **v2.2.0** — autonomous loop closure + multi-project setup collapse. 7 of 8 design-doc slices shipped. **Security (HIGH):** `cmd:` source scheme in grow hypotheses is now **default-deny** — opt in via `.lattice/config.yml` `security.allow_cmd_sources: true` or `LATTICE_ALLOW_CMD_SOURCES=1`. Closes the loop on action (close / rollback) and collapses per-project setup from ~3h to ~30s.
+- **v2.1.4** — hot-fix for #76: `grow check --json` was emitting invalid JSON (stray `{}` appended after each hypothesis from `|| echo "{}"` fallback firing when measure returned 1 on fetch-fail). Closed-loop autonomous Telegram digest now actually works end-to-end on the first cron fire.
 - **v2.1.3** — three real-use bugs + Part A origin tracking. Closes #75 (generated workflow's `if: secrets.X` was rejected by GH Actions — now always runs + short-circuits internally), #67 (audit-env-contract excludes node_modules + vendored deps), #71 (literal-copy shim drift now detected via `lattice version` output comparison, catches ALL shim forms). New: `lattice report` tags each GH issue with `project:<basename>` label + adds `**Project:**` line in body, so `gh issue list --label project:X` surfaces per-project bug pressure.
 - **v2.1.2** — TIER-1 fixes from morning audit-sweep on Lattice itself + overnight dogfood. Closes #68 (env-contract YAML filename-too-long from regex pollution), #69 (`lattice triage` advertised-but-unimplemented in 4 sources of truth), #70 (HIGH: helper-path resolution fails on subsequent close calls), #72 (audit-sweep dispatch missing per-tier required fields cheatsheet), #73 (`--severity MEDIUM` alias). MCP zod schemas synced to bash CLI vocab. usage() now lists the full grow/profile/normalize/diff/audit-infra/release-notes surface (was missing v2.0+). Architectural work (cmd: RCE, drift-detection rewrite, scale-fork-tax) held for v2.2.
 - **v2.1.1** — trial-1 v2.1 patch. `grow schedule install --time` now interprets as user-local TZ (auto-detected via `date +%z`) and converts to UTC for the cron expression (#62). `update.sh` detects shim drift explicitly and emits remediation hint (#63). Generated workflow pins `actions/setup-node@v4` + Node 22 to dodge 2026-06-02 Node 20 deprecation (#64). `grow schedule status` renders last-run human-readably; `trigger` captures + prints concrete run ID (#65).
@@ -282,10 +308,8 @@ Successful commands never trigger telemetry. `help`, `--version`, `doctor`, `con
 - **v0.7.2** — self-audit pass. `/audit` run against Lattice's own README + scripts surfaced 2 P0 and 2 HIGH bugs; all fixed before tag. P0: `lattice close ""` no longer silently destroys data; `close → reopen → close` cycle no longer corrupts YAML (awk-based block-scalar continuation strip in both close.sh and reopen.sh). HIGH: `--commit HEAD` now resolves through `git rev-parse`; reopen strips `close_reason`/`closure_rationale` too. New: `lattice usage --global` reads `~/.claude/lattice/usage/global.jsonl` aggregated across every project — maintainer dashboard, never surfaced into client Claude sessions. Test suite 11 → 15.
 - **v0.7.1** — repo-local usage analytics (`lattice usage`), project config (`lattice config init|show`), and update checks/auto-update controls (`lattice update --check|--self|--enable-auto|--disable-auto`). Usage events stay local in `.lattice/usage/events.jsonl` and record command/flag shape, not finding slugs or file paths.
 - **v0.7.0** — major release from real-use feedback (36 findings / 29 closed / 8 commits on jiive Lumi). Flat layout (`open/<slug>.yml`, `closed/<slug>.yml`); stable `id:` algorithm SHA1(dim:rule:file:ctx)[:12] surviving line shifts; `close_reason:` enum + `closure_rationale:`; `cluster_root:` + `lattice cluster` BFS walk; `module_owner:` + `related_files:` fields; `lattice sync` groups CLAUDE.md by owner when set. Six new CLI commands: `handoff`, `next`, `timeline`, `verify`, `ci-check`, `pr-body`. Fuzzy match with interactive disambiguation; `show` prints all matches. Bash + zsh tab completion. `prepare-commit-msg` hook warns on open blockers. One-shot `migrate-v0.7.sh` migration script.
-- **v0.8** — cross-dimension dedupe by fingerprint + rule (one finding, one report); `Closes-Lattice: <id>` commit-message convention; bundle/related-finding linking; JSON Schema for finding YAML validation
-- **v1.0** — pre-push hook blocking on open CRITICAL, spec written after v0.8 real usage
 
-See `CHANGELOG.md` for full version history.
+See [`CHANGELOG.md`](CHANGELOG.md) for full version history (every patch since v0.1, ~188 KB).
 
 ---
 

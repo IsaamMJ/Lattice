@@ -383,6 +383,83 @@ else
   ok "reopen requires --reason"
 fi
 
+# ---------------------------------------------------------------------------
+# undefer (#162) + multi-id close (#166) — lifecycle additions
+# ---------------------------------------------------------------------------
+
+note "Test 145: undefer reverts a deferred finding to status open and strips defer fields (#162)"
+new_fixture t145
+write_yaml .lattice/findings/open/MEDIUM-ud.yml ud MEDIUM
+"${LATTICE}" defer MEDIUM-ud --until 2026-12-01 --reason "vendor blocked" >/dev/null
+if "${LATTICE}" undefer MEDIUM-ud --reason "vendor shipped" >/tmp/lattice-t145.out 2>&1; then
+  if grep -q "^status: open$" .lattice/findings/open/MEDIUM-ud.yml \
+     && ! grep -qE '^(defer_until|deferred_at|defer_reason)[[:space:]]*:' .lattice/findings/open/MEDIUM-ud.yml \
+     && grep -q "undeferred MEDIUM-ud" /tmp/lattice-t145.out; then
+    ok "undefer sets status open and removes defer_until/deferred_at/defer_reason"
+  else
+    fail "undefer left wrong YAML state: $(grep -E '^(status|defer_)' .lattice/findings/open/MEDIUM-ud.yml)"
+  fi
+else
+  fail "undefer failed: $(cat /tmp/lattice-t145.out)"
+fi
+
+note "Test 146: undefer on a non-deferred finding fails with status named (#162)"
+new_fixture t146
+write_yaml .lattice/findings/open/LOW-notdef.yml notdef LOW
+if "${LATTICE}" undefer LOW-notdef >/tmp/lattice-t146.out 2>&1; then
+  fail "undefer on non-deferred finding should fail"
+else
+  grep -q "not deferred" /tmp/lattice-t146.out && ok "undefer rejects non-deferred finding" || fail "undefer error unclear: $(cat /tmp/lattice-t146.out)"
+fi
+
+note "Test 147: reopen on a deferred finding points at undefer (#162)"
+new_fixture t147
+write_yaml .lattice/findings/open/HIGH-rdef.yml rdef HIGH
+"${LATTICE}" defer HIGH-rdef --until 2026-12-01 --reason "later" >/dev/null
+if "${LATTICE}" reopen HIGH-rdef --reason "want it back" >/tmp/lattice-t147.out 2>&1; then
+  fail "reopen on deferred finding should fail with pointer"
+else
+  if grep -q "is deferred" /tmp/lattice-t147.out && grep -q "lattice undefer HIGH-rdef" /tmp/lattice-t147.out; then
+    ok "reopen names the deferred state and suggests undefer"
+  else
+    fail "reopen deferred pointer unclear: $(cat /tmp/lattice-t147.out)"
+  fi
+fi
+
+note "Test 148: multi-id close closes every id with shared flags (#166)"
+new_fixture t148
+write_yaml .lattice/findings/open/LOW-mc1.yml mc1 LOW
+write_yaml .lattice/findings/open/LOW-mc2.yml mc2 LOW
+write_yaml .lattice/findings/open/LOW-mc3.yml mc3 LOW
+if "${LATTICE}" close LOW-mc1 LOW-mc2 LOW-mc3 --reason fixed --commit HEAD --rationale "one fix" >/tmp/lattice-t148.out 2>&1; then
+  if [ -f .lattice/findings/closed/LOW-mc1.yml ] && [ -f .lattice/findings/closed/LOW-mc2.yml ] \
+     && [ -f .lattice/findings/closed/LOW-mc3.yml ] \
+     && grep -q "closed 3/3" /tmp/lattice-t148.out \
+     && grep -q '^closure_rationale: "one fix"$' .lattice/findings/closed/LOW-mc2.yml; then
+    ok "multi-id close moves all YAMLs with shared reason/commit/rationale"
+  else
+    fail "multi-id close incomplete: $(cat /tmp/lattice-t148.out)"
+  fi
+else
+  fail "multi-id close failed: $(cat /tmp/lattice-t148.out)"
+fi
+
+note "Test 149: multi-id close continues past a bad id and exits non-zero with summary (#166)"
+new_fixture t149
+write_yaml .lattice/findings/open/LOW-mp1.yml mp1 LOW
+write_yaml .lattice/findings/open/LOW-mp2.yml mp2 LOW
+if "${LATTICE}" close LOW-mp1 LOW-bogus LOW-mp2 --reason fixed --commit HEAD >/tmp/lattice-t149.out 2>&1; then
+  fail "multi-id close with a bogus id should exit non-zero"
+else
+  if [ -f .lattice/findings/closed/LOW-mp1.yml ] && [ -f .lattice/findings/closed/LOW-mp2.yml ] \
+     && grep -q "closed 2/3" /tmp/lattice-t149.out \
+     && grep -q "LOW-bogus (not found)" /tmp/lattice-t149.out; then
+    ok "multi-id close: good ids closed, bad id reported in summary"
+  else
+    fail "multi-id partial-failure output wrong: $(cat /tmp/lattice-t149.out)"
+  fi
+fi
+
 note "Test 27: lattice handoff produces brief with file/line"
 new_fixture t27
 write_yaml .lattice/findings/open/LOW-h.yml h LOW

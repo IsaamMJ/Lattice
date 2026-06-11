@@ -741,7 +741,7 @@ Lattice has been silently shipping fake updates whenever a user's shim points at
 - **`--help` for the subcommand** — full flag matrix in one place.
 
 ### Trigger logic
-- **Release trigger:** `_ver_int(current) - _ver_int(last_tune) >= 3` patch steps. Versions parse as `MAJ*10000 + MIN*100 + PAT`. Pre-release suffixes (`-rc1`) are stripped.
+- **Release trigger:** `_ver_int(current_version) - _ver_int(last_tune) >= 3` patch steps. Versions parse as `MAJ*10000 + MIN*100 + PAT`. Pre-release suffixes (`-rc1`) are stripped.
 - **Friction trigger:** count of `unknown_subcommand` events in `~/.claude/lattice/usage/global.jsonl` since `last-tune-timestamp` >= 5. Reads the JSONL line-by-line via Node; ignores malformed lines.
 - Either trigger alone fires.
 
