@@ -9,9 +9,13 @@
 //
 // Output: one `file|line|tier|key|snippet` per hit on stdout; a count on stderr.
 // One pass over the tree — no per-line fork (cf. the yaml-field-fork WATCH).
+//
+// The scan set (walk vs. LATTICE_SCAN_FILES, node_modules, .gitignore) is not
+// this rule's business — it comes from the shared decision in
+// lattice-scan-ignore.mjs (#132).
 
 import fs from "fs";
-import path from "path";
+import { scanTargets } from "./lattice-scan-ignore.mjs";
 
 const root = process.argv[2] || ".";
 
@@ -55,10 +59,6 @@ const DETECTORS = [
   { re: RE_DART_DIO, key: "dio" },
 ];
 
-const EXCLUDE_DIRS = new Set([
-  "node_modules", ".git", "dist", "build", ".next", "coverage", "vendor",
-  ".lattice", "__pycache__", ".venv", "venv", ".dart_tool", ".netlify",
-]);
 const EXTS = new Set([".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".dart", ".py"]);
 const TEST_RE = /(\.spec\.|\.test\.|_test\.|\/tests?\/|\/__tests__\/)/;
 // Scanner fixtures (intentional sample files) live under a `fixtures/` dir that
@@ -66,31 +66,8 @@ const TEST_RE = /(\.spec\.|\.test\.|_test\.|\/tests?\/|\/__tests__\/)/;
 // segment overrides the test-skip above.
 const FIXTURE_RE = /\/fixtures\//;
 
-function* walk(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) {
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) { if (!EXCLUDE_DIRS.has(e.name)) yield* walk(p); }
-    else if (EXTS.has(path.extname(e.name))) yield p;
-  }
-}
-
-// Diff-scoped mode: LATTICE_SCAN_FILES (newline-separated) → scan only those.
-function* targets(r) {
-  const env = process.env.LATTICE_SCAN_FILES;
-  if (env && env.trim()) {
-    for (const raw of env.split(/\r?\n/)) {
-      const t = raw.trim();
-      if (t && EXTS.has(path.extname(t))) { try { if (fs.statSync(t).isFile()) yield t; } catch {} }
-    }
-    return;
-  }
-  yield* walk(r);
-}
-
 let count = 0;
-for (const file of targets(root)) {
+for (const file of scanTargets(root, EXTS)) {
   const norm = file.replace(/\\/g, "/");
   if (TEST_RE.test(norm) && !FIXTURE_RE.test(norm)) continue;
   let text;

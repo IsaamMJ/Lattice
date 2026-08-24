@@ -419,6 +419,9 @@ function manualIssueBody(payload) {
     `- **OS:** ${payload.os}`,
     `- **Project:** \`${payload.project || "(unknown)"}\``,
     `- **Filed:** ${payload.timestamp}`,
+    // v2.3.2 (#200): rendered mirror of the lattice-occurrences marker, kept in
+    // sync by writeOccurrences when the same report is filed again.
+    "- **Occurrences:** 1",
     "",
     "### Report",
     "",
@@ -490,13 +493,19 @@ async function findIssueByFingerprint(env, fingerprint, label) {
   return { number: hit.number, state: hit.state };
 }
 
+// Returns null rather than throwing on 404 / malformed response: every caller
+// treats "cannot read the issue" as "do not touch the issue".
 async function getIssue(env, issueNumber) {
   const res = await githubFetch(
     env,
     `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/issues/${issueNumber}`
   );
   if (!res.ok) return null;
-  return await res.json();
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 async function patchIssue(env, issueNumber, patch) {
@@ -549,9 +558,16 @@ function writeOccurrences(body, count) {
 // reopen if the fingerprint came back after a close, then comment.
 async function recordOccurrence(env, issueNumber, payload) {
   const issue = await getIssue(env, issueNumber);
-  const wasClosed = !!issue && issue.state === "closed";
-  const count = readOccurrences(issue && issue.body) + 1;
-  const patch = { body: writeOccurrences(issue && issue.body, count) };
+  // If the issue can't be read back (deleted, transferred, token scope changed)
+  // do NOT patch: writing a body we never read would wipe the whole report.
+  // Comment only, with the same count=2 estimate the pre-v2.3.2 race path used.
+  if (!issue) {
+    await commentOnIssue(env, issueNumber, payload, 2, false);
+    return { count: 2, reopened: false };
+  }
+  const wasClosed = issue.state === "closed";
+  const count = readOccurrences(issue.body) + 1;
+  const patch = { body: writeOccurrences(issue.body, count) };
   if (wasClosed) {
     patch.state = "open";
     patch.state_reason = "reopened";

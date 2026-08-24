@@ -238,6 +238,7 @@ function stubGitHub({ issues = {}, searchHits = [] } = {}) {
     const m = /^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)$/.exec(path);
     if (m) {
       const n = Number(m[1]);
+      if (!issues[n]) return new Response('{"message":"Not Found"}', { status: 404 });
       if (method === 'PATCH') { Object.assign(issues[n], JSON.parse(init.body)); return json(issues[n]); }
       return json(issues[n]);
     }
@@ -314,6 +315,15 @@ try {
     const second = await T.manualHandle(g2.env, MP);
     eq('identical manual report is deduped', second.action, 'commented');
     eq('identical manual report bumps the count', second.count, 2);
+  }
+
+  // (d2) an unreadable issue must never have its body overwritten.
+  {
+    const g = stubGitHub({ searchHits: [{ number: 777, state: 'open' }] }); // issue 777 not in the store
+    const r = await T.dedupHandle(g.env, TP);
+    eq('unreadable issue still comments', r.count, 2);
+    if (g.calls.some((c) => c.startsWith('PATCH '))) bad('patched an issue whose body was never read');
+    else ok('no PATCH issued when the issue body could not be read');
   }
 
   // (e) read-back mismatch is reported, not swallowed.
