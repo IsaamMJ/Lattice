@@ -1,9 +1,14 @@
-// Fixture: MUST be 0 hits — every access is properly tenant-scoped, global,
-// commented, or a test. The same call SHAPES as bad.ts but done correctly.
+// Fixture: MUST be 0 hits — every access is properly tenant-scoped, keyed by
+// a primary key, global, commented, or a test. The same call SHAPES as bad.ts
+// but done correctly.
+//
+// No schema.prisma exists above this directory, so the key-scoped cases here
+// are decided by the no-schema FALLBACK (#195): `id` / `<model>Id` only.
 
 import { prisma } from "../db";
 
 declare const id: string;
+declare const commentId: string;
 declare const tenantId: string;
 declare const data: any;
 declare const ctx: { db: typeof prisma };
@@ -13,24 +18,34 @@ export async function editInvoice() {
   return prisma.invoice.update({ where: { id, tenantId }, data });
 }
 
-// Tenant-scoped delete — safe.
-export async function removeUser() {
-  return prisma.user.delete({ where: { id, tenantId } });
-}
-
-// Tenant-scoped updateMany — safe.
-export async function publishAll() {
-  return prisma.post.updateMany({ where: { status: "draft", tenantId }, data: { status: "live" } });
-}
-
 // Tenant-scoped deleteMany — safe.
 export async function purge() {
   return prisma.session.deleteMany({ where: { expired: true, tenantId } });
 }
 
-// Tenant-scoped findUnique via compound key — safe.
+// Key-scoped write (#195): the primary key IS the scope — a tenant filter here
+// would be strictly redundant, so this must NOT flag.
+export async function removeUser() {
+  return prisma.user.delete({ where: { id } });
+}
+
+// Key-scoped read — findUnique by primary key.
 export async function getOrder() {
-  return prisma.order.findUnique({ where: { id, tenantId } });
+  return prisma.order.findUnique({ where: { id } });
+}
+
+// `<model>Id` spelling of the same key (#195 fallback).
+export async function hideComment() {
+  return prisma.comment.updateMany({ where: { commentId }, data: { hidden: true } });
+}
+
+// Key PLUS an extra guard — the exactly-once CAS shape from #195. A narrower
+// where cannot be broader, so it is still keyed.
+export async function claimBooking() {
+  return prisma.booking.updateMany({
+    where: { id, resultDeliveredAt: null },
+    data: { resultDeliveredAt: new Date() },
+  });
 }
 
 // Multi-line where with tenantId — safe.
@@ -43,6 +58,11 @@ export async function editBilling() {
     },
     data,
   });
+}
+
+// Accessor via ctx.db, keyed by primary key — safe.
+export async function editViaCtx() {
+  return ctx.db.ticket.update({ where: { id }, data });
 }
 
 // Global / system model — a missing tenant key here is expected, not a leak.
@@ -61,8 +81,8 @@ export async function listAll() {
 }
 
 // Commented-out dangerous call — must be ignored.
-// return prisma.invoice.update({ where: { id }, data });
-// prisma.user.delete({ where: { id } });
+// return prisma.post.updateMany({ where: { status: "draft" }, data });
+// prisma.session.deleteMany({ where: { expired: true } });
 
 // A non-Prisma .update on an array — must not match the accessor shape.
 export function bump(arr: number[]) {

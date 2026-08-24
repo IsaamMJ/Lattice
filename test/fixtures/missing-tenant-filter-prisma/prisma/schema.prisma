@@ -1,0 +1,49 @@
+// Fixture schema for core/missing-tenant-filter (#195).
+// Mirrors the shapes in the report: a uuid @id primary key, a @unique column,
+// a named @@unique composite and an @@id composite. The scanner must read THIS
+// file (walking up from src/) instead of guessing from identifier names.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")   // "//" inside a string must survive comment-stripping
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Booking {
+  id                String    @id @default(uuid())
+  tenantId          String
+  userId            String
+  slug              String
+  status            String    @default("pending")
+  resultDeliveredAt DateTime?
+  result            Result?
+
+  @@unique([tenantId, slug])
+}
+
+model Result {
+  id                        String  @id @default(uuid())
+  bookingId                 String  @unique
+  tenantId                  String
+  narrative                 String?
+  suggestionsDeliveryStatus String?
+  booking                   Booking @relation(fields: [bookingId], references: [id])
+}
+
+model Session {
+  token     String   @unique
+  userId    String
+  expired   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Enrollment {
+  userId   String
+  courseId String
+  role     String
+
+  @@id([userId, courseId])
+}

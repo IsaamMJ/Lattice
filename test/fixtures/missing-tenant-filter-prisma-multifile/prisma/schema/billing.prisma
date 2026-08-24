@@ -1,0 +1,9 @@
+model Invoice {
+  id         String @id @default(cuid())
+  tenantId   String
+  customerId String
+  number     String
+  status     String
+
+  @@unique([customerId, number], name: "invoiceRef")
+}

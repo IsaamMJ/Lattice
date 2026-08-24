@@ -1,54 +1,52 @@
 // Fixture: SHOULD flag — multi-tenant data access missing the tenant scope.
 // Every non-comment Prisma call below is a true positive.
+//
+// There is no schema.prisma anywhere above this directory, so this tree also
+// exercises the no-schema FALLBACK path (#195): only `id` / `<model>Id` count
+// as keys, and none of the wheres below pins one.
 
 import { prisma } from "../db";
 
-declare const id: string;
 declare const data: any;
+declare const authorId: string;
 declare const ctx: { db: typeof prisma };
 
-// HIGH — update by primary key only, no tenant key → cross-tenant write / IDOR.
-export async function editInvoice() {
-  return prisma.invoice.update({ where: { id }, data });
-}
-
-// HIGH — delete by id only, no tenant key → cross-tenant delete / IDOR.
-export async function removeUser() {
-  return prisma.user.delete({ where: { id } });
-}
-
-// HIGH — updateMany scoped only by status, no tenant key → mass cross-tenant write.
+// HIGH — updateMany scoped only by status, no key and no tenant key → mass
+// cross-tenant write.
 export async function publishAll() {
   return prisma.post.updateMany({ where: { status: "draft" }, data: { status: "live" } });
 }
 
-// HIGH — deleteMany with no tenant key → mass cross-tenant delete.
+// HIGH — `authorId` is somebody else's id, not this model's → still unscoped.
+export async function retireAuthorPosts() {
+  return prisma.post.updateMany({ where: { authorId }, data: { status: "archived" } });
+}
+
+// HIGH — deleteMany with no key and no tenant key → mass cross-tenant delete.
 export async function purge() {
   return prisma.session.deleteMany({ where: { expired: true } });
 }
 
-// MEDIUM — findUnique by id only, no tenant key → possible IDOR read.
-export async function getOrder() {
-  return prisma.order.findUnique({ where: { id } });
-}
-
-// MEDIUM — findFirst by id only, no tenant key.
-export async function firstDoc() {
-  return prisma.document.findFirst({ where: { id } });
-}
-
-// MEDIUM — findMany filtered but missing tenant key (where IS visible).
+// MEDIUM — findMany filtered but missing both key and tenant key.
 export async function listProjects() {
   return prisma.project.findMany({ where: { archived: false } });
 }
 
-// HIGH — multi-line where, no tenant key.
-export async function editBilling() {
-  return prisma.billing.update({
+// HIGH — multi-line where, no key, no tenant key.
+export async function reopenBillings() {
+  return prisma.billing.updateMany({
     where: {
-      id,
-      status: "open",
+      status: "closed",
+      dunning: false,
     },
+    data,
+  });
+}
+
+// HIGH — an OR whose keyed branch does not scope the other branch (#195).
+export async function reopenTickets() {
+  return ctx.db.ticket.updateMany({
+    where: { OR: [{ id: "t1" }, { status: "open" }] },
     data,
   });
 }
@@ -56,9 +54,4 @@ export async function editBilling() {
 // HIGH — delete with NO where at all (delete-all shape).
 export async function nukeNotes() {
   return prisma.note.delete({});
-}
-
-// HIGH — accessor via ctx.db, update by id only.
-export async function editViaCtx() {
-  return ctx.db.ticket.update({ where: { id }, data });
 }

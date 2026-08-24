@@ -250,6 +250,41 @@ else
   warn "node not found — cannot run test/stop-hook-detach.test.mjs (stop hook is node-based)"
 fi
 
+# --- 7c. Telemetry sanitiser regression (#199, #200) --------------------
+# Titles must survive the Worker intact: #194-#198 were all filed with an
+# em dash turned into U+FFFD and "0/8" turned into "0[path]", and recurring
+# fingerprints were filed as fresh issues instead of bumping a count.
+# See test/telemetry-sanitize.test.mjs for the full rationale.
+note "running telemetry sanitiser regression test (#199, #200)"
+if command -v node >/dev/null 2>&1; then
+  if node "${ROOT}/test/telemetry-sanitize.test.mjs" > /tmp/lattice-telemetry-test.log 2>&1; then
+    ok "telemetry-sanitize.test.mjs"
+  else
+    warn "telemetry-sanitize.test.mjs failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-telemetry-test.log >&2 || true
+  fi
+else
+  warn "node not found — cannot run test/telemetry-sanitize.test.mjs (Worker is node-based)"
+fi
+
+# --- 7d. Tenant-scan schema awareness (#195) ----------------------------
+# core/missing-tenant-filter must read the project's Prisma schema and stay
+# silent on key-scoped writes (`where: { id }` — the key IS the scope) while
+# still flagging an unkeyed updateMany/deleteMany/findMany. Fixture trees under
+# test/fixtures/ cover single-file schema, multi-file schema folder, and the
+# no-schema fallback; see test/tenant-scan-schema.test.mjs.
+note "running tenant-scan schema-awareness test (#195)"
+if command -v node >/dev/null 2>&1; then
+  if node "${ROOT}/test/tenant-scan-schema.test.mjs" > /tmp/lattice-tenant-scan-test.log 2>&1; then
+    ok "tenant-scan-schema.test.mjs"
+  else
+    warn "tenant-scan-schema.test.mjs failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-tenant-scan-test.log >&2 || true
+  fi
+else
+  warn "node not found — cannot run test/tenant-scan-schema.test.mjs"
+fi
+
 # --- 8. Schema doc declares v0.7 YAML format ---------------------------
 note "checking schema doc declares v0.7 YAML format"
 if grep -qE 'one YAML file per finding' "${ROOT}/docs/finding-schema.md" 2>/dev/null; then

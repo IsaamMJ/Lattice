@@ -1,0 +1,11 @@
+// Multi-file schema fixture (#195): Prisma 6+ splits the schema across
+// `prisma/schema/*.prisma`. The scanner must union every file in the folder.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}

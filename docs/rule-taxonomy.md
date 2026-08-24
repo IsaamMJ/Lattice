@@ -49,7 +49,7 @@ drop a scanner + one row in the `CORE_RULES` table in `scripts/lattice`.
 | `unbounded-external-call` | scale | RISK | `fetch`/`axios`/`openai`/`requests`/`httpx`/`http`/`dio` with no `timeout`/`signal`/`AbortSignal`/deadline on the call | `lattice-timeout-scan.mjs` |
 | `missing-rate-limit` | scale | HIGH/MEDIUM/RISK | public NestJS/Next/Express handlers on `webhook|auth|payment` paths with no throttle; LLM call-paths with no per-user budget; in-memory limiters (cluster-unsafe) | `lattice-ratelimit-scan.mjs` |
 | `in-mem-state-no-cluster` | scale | RISK | module-level mutable Map/Set/counter that is mutated; in-process LRU/NodeCache; module-scope `setInterval` cron | `lattice-inmem-scan.mjs` |
-| `missing-tenant-filter` | security | HIGH (writes) / MEDIUM (reads) | Prisma/ORM `update`/`delete`/`find*` whose `where` omits the tenant key (`tenantId`/`orgId`/… — configurable via `LATTICE_TENANT_KEYS` or `.lattice/config.yml: tenant_keys:`) | `lattice-tenant-scan.mjs` |
+| `missing-tenant-filter` | security | HIGH (writes) / MEDIUM (reads) | Prisma/ORM `update`/`delete`/`find*` whose `where` omits the tenant key (`tenantId`/`orgId`/… — configurable via `LATTICE_TENANT_KEYS` or `.lattice/config.yml: tenant_keys:`) **and** pins no primary/unique key. Keys are read from the project's own `prisma/schema.prisma` (or a `prisma/schema/` folder; override with `LATTICE_PRISMA_SCHEMA`): `@id`/`@unique` fields and whole `@@id`/`@@unique` composites scope a statement by themselves, so `where: { id }` is never a finding (#195). With no schema present, only `id`/`<model>Id` count as keys. | `lattice-tenant-scan.mjs` |
 
 All scanners: precision over recall (a noisy detector is worse than none),
 skip comments + test files, suppress dev-guarded lines (`kDebugMode`,
