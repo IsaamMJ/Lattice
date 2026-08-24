@@ -55,6 +55,20 @@ All scanners: precision over recall (a noisy detector is worse than none),
 skip comments + test files, suppress dev-guarded lines (`kDebugMode`,
 `__DEV__`, `NODE_ENV` checks), and never report `test/`/`fixtures/` code.
 
+**What gets scanned is one shared decision, not a per-rule one** (#132).
+Every scanner imports `scripts/lattice-scan-ignore.mjs`, which drops a path
+when either: (a) it sits under `node_modules`/`.git` or a build-output
+directory (`dist`, `build`, `.next`, `coverage`, `vendor`, `.lattice`,
+`__pycache__`, `.venv`, `venv`, `.dart_tool`, `.netlify`) — true in any
+project, git or not; or (b) git considers it ignored. Case (b) asks git
+itself via one batched `git check-ignore -z --stdin` per scan (never one call
+per file), so nested `.gitignore` files, negations, `**`, `.git/info/exclude`
+and the global excludesFile all apply — and a file that is *tracked* despite
+matching an ignore pattern is still scanned. Outside a git work tree, or with
+no `git` binary, (a) stands alone. The same filter applies to the diff-scoped
+`LATTICE_SCAN_FILES` list: an explicit file list is still a list of
+candidates, so a gitignored or vendored path in it produces no findings.
+
 ## Planned (not yet deterministic)
 
 | `core/*` id | dim | status |

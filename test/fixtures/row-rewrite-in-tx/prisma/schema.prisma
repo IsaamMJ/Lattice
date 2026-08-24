@@ -1,0 +1,75 @@
+// Fixture schema for core/row-rewrite-in-tx (#196).
+// Modelled on the repo the incident came from: `ResultToken` and `Result` are
+// DURABLE (their relations declare no referential action, so a parent delete
+// cannot remove them — they have to be hand-deleted, which is the signature),
+// while `BiomarkerValue` and `AiSuggestion` declare `onDelete: Cascade` and are
+// therefore transient by design. The scanner must read THIS file rather than
+// guess from identifier names.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")   // "//" inside a string must survive comment-stripping
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Booking {
+  id        String   @id @default(uuid())
+  tenantId  String
+  createdAt DateTime @default(now())
+  result    Result?
+}
+
+model Result {
+  id                        String    @id @default(uuid())
+  bookingId                 String    @unique
+  narrative                 String
+  retestReminderOptIn       Boolean   @default(false)
+  retestReminderSentAt      DateTime?
+  suggestionsDeliveryStatus String?
+  resultDeliveredAt         DateTime?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  booking                   Booking   @relation(fields: [bookingId], references: [id])
+  token                     ResultToken?
+  biomarkers                BiomarkerValue[]
+  suggestions               AiSuggestion[]
+}
+
+model ResultToken {
+  id        String    @id @default(uuid())
+  token     String    @unique @default(uuid())
+  resultId  String    @unique
+  viewCount Int       @default(0)
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  result    Result    @relation(fields: [resultId], references: [id])
+}
+
+model BiomarkerValue {
+  id       String @id @default(uuid())
+  resultId String
+  code     String
+  value    Float
+  flagged  Boolean @default(false)
+  result   Result  @relation(fields: [resultId], references: [id], onDelete: Cascade)
+}
+
+model AiSuggestion {
+  id       String @id @default(uuid())
+  resultId String
+  body     String
+  rank     Int    @default(0)
+  result   Result @relation(fields: [resultId], references: [id], onDelete: Cascade)
+}
+
+// Durable (no cascade) but nothing is lost by a rewrite: every column is
+// required with no default, so the create has to restore all of them.
+model DailyMetric {
+  day       String  @id
+  bookingId String
+  total     Int
+  booking   Booking @relation(fields: [bookingId], references: [id])
+}

@@ -1,0 +1,50 @@
+// Fixture schema for core/select-shape-drift (#196).
+// Modelled on the repo the incident came from. The scanner reads THIS file to
+// decide which accessor is a model, which key is a relation (so a nested
+// select can be attributed to the model it is actually on), and which keys are
+// projectable at all — none of that is guessed from identifier spelling.
+//
+// The `bad/` fixtures project Result and ResultToken; the `good/` fixtures
+// project Booking only. Keeping the two on disjoint models is deliberate: the
+// comparison corpus is the whole scan set, so a walk of the fixture root has
+// to be able to report exactly the bad/ hits and nothing else.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")   // "//" inside a string must survive comment-stripping
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Booking {
+  id           String   @id @default(uuid())
+  reference    String   @unique
+  customerName String
+  scheduledAt  DateTime
+  phone        String
+  email        String
+  createdAt    DateTime @default(now())
+  result       Result?
+}
+
+model Result {
+  id          String   @id @default(uuid())
+  bookingId   String   @unique
+  narrative   String
+  summary     String
+  status      String
+  createdAt   DateTime @default(now())
+  booking     Booking  @relation(fields: [bookingId], references: [id])
+  token       ResultToken?
+}
+
+model ResultToken {
+  id        String    @id @default(uuid())
+  token     String    @unique @default(uuid())
+  resultId  String    @unique
+  viewCount Int       @default(0)
+  expiresAt DateTime?
+  result    Result    @relation(fields: [resultId], references: [id])
+}

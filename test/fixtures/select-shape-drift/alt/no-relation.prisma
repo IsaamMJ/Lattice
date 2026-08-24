@@ -1,0 +1,44 @@
+// Alternate fixture schema for core/select-shape-drift (#196).
+// Identical to prisma/schema.prisma except that ResultToken declares NO
+// `result` relation. The nested `select:` in bad/share-route.ts then has no
+// model to be attributed to, so the block is undecided and its finding
+// disappears — which is how the test proves nested attribution is READ from
+// the schema rather than guessed from the key's spelling.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")   // "//" inside a string must survive comment-stripping
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Booking {
+  id           String   @id @default(uuid())
+  reference    String   @unique
+  customerName String
+  scheduledAt  DateTime
+  phone        String
+  email        String
+  createdAt    DateTime @default(now())
+  result       Result?
+}
+
+model Result {
+  id          String   @id @default(uuid())
+  bookingId   String   @unique
+  narrative   String
+  summary     String
+  status      String
+  createdAt   DateTime @default(now())
+  booking     Booking  @relation(fields: [bookingId], references: [id])
+}
+
+model ResultToken {
+  id        String    @id @default(uuid())
+  token     String    @unique @default(uuid())
+  resultId  String    @unique
+  viewCount Int       @default(0)
+  expiresAt DateTime?
+}

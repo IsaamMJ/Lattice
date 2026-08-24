@@ -285,6 +285,25 @@ else
   warn "node not found — cannot run test/tenant-scan-schema.test.mjs"
 fi
 
+# --- 7e. Row-rewrite detector (#196) ------------------------------------
+# core/row-rewrite-in-tx must flag a durable row deleted and recreated inside
+# one transaction (the dead /r/:token incident) and stay silent on a child the
+# schema declares transient with `onDelete: Cascade`. The cascade verdict has
+# to come from prisma/schema.prisma, not from the model name; the fixture tree
+# under test/fixtures/row-rewrite-in-tx/ proves it by re-running the same
+# source against a schema where the child cascades.
+note "running row-rewrite detector test (#196)"
+if command -v node >/dev/null 2>&1; then
+  if node "${ROOT}/test/rowrewrite-scan.test.mjs" > /tmp/lattice-rowrewrite-test.log 2>&1; then
+    ok "rowrewrite-scan.test.mjs"
+  else
+    warn "rowrewrite-scan.test.mjs failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-rowrewrite-test.log >&2 || true
+  fi
+else
+  warn "node not found — cannot run test/rowrewrite-scan.test.mjs"
+fi
+
 # --- 8. Schema doc declares v0.7 YAML format ---------------------------
 note "checking schema doc declares v0.7 YAML format"
 if grep -qE 'one YAML file per finding' "${ROOT}/docs/finding-schema.md" 2>/dev/null; then

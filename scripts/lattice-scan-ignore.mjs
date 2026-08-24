@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Shared scan-ignore decision for every audit dimension — core scanners (#132).
 //
 // Before this module each scanner carried its own hardcoded `EXCLUDE_DIRS`
@@ -45,15 +44,16 @@ export const DEFAULT_IGNORE_DIRS = new Set([
   ".lattice", "__pycache__", ".venv", "venv", ".dart_tool", ".netlify",
 ]);
 
-// Per-root memo of the git resolution, so a scanner that filters more than once
-// (walk mode plus an explicit list) probes `git rev-parse` at most once.
-const gitRootCache = new Map();
+// Memo of the last git resolution, so a scanner that filters more than once
+// (walk mode plus an explicit list) probes `git rev-parse` at most once. A
+// single slot, not a Map: a scanner process resolves exactly one scan root.
+let gitTopMemo = null; // { key, top } once resolved
 
 // Resolve the git work tree containing `root`. Returns null when git is not
 // installed or `root` is not inside a repository — the fallback path.
 function gitToplevel(root) {
   const key = path.resolve(root);
-  if (gitRootCache.has(key)) return gitRootCache.get(key);
+  if (gitTopMemo && gitTopMemo.key === key) return gitTopMemo.top;
   let top = null;
   try {
     const dir = fs.existsSync(key) && fs.statSync(key).isDirectory() ? key : path.dirname(key);
@@ -63,7 +63,7 @@ function gitToplevel(root) {
     });
     if (!r.error && r.status === 0 && r.stdout.trim()) top = path.resolve(r.stdout.trim());
   } catch { /* git missing → fallback denylist */ }
-  gitRootCache.set(key, top);
+  gitTopMemo = { key, top };
   return top;
 }
 

@@ -1,0 +1,36 @@
+// Override schema for the LATTICE_PRISMA_SCHEMA leg of the #196 test.
+// Identical to ../prisma/schema.prisma except that ResultToken's relation now
+// declares `onDelete: Cascade` — the schema says the token is transient. The
+// same bad.ts must therefore stop reporting the ResultToken rewrites and keep
+// reporting the Result one, which is only possible if the cascade decision
+// really comes from the schema rather than from the identifier.
+
+model Booking {
+  id       String  @id @default(uuid())
+  tenantId String
+  result   Result?
+}
+
+model Result {
+  id                        String    @id @default(uuid())
+  bookingId                 String    @unique
+  narrative                 String
+  retestReminderOptIn       Boolean   @default(false)
+  retestReminderSentAt      DateTime?
+  suggestionsDeliveryStatus String?
+  resultDeliveredAt         DateTime?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+  booking                   Booking   @relation(fields: [bookingId], references: [id])
+  token                     ResultToken?
+}
+
+model ResultToken {
+  id        String    @id @default(uuid())
+  token     String    @unique @default(uuid())
+  resultId  String    @unique
+  viewCount Int       @default(0)
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  result    Result    @relation(fields: [resultId], references: [id], onDelete: Cascade)
+}
