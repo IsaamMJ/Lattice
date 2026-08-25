@@ -48,6 +48,8 @@ Split `$ARGUMENTS` on whitespace. Classify each token:
 - Auditing typical web-app codebases — usually NOT needed; `security` already covers OWASP-shaped patterns. Add only if the codebase has install/update scripts of its own.
 - Self-audit (Lattice on Lattice, claude-code-setup on itself, similar) — ALWAYS include both. See #99 for rationale: the default web-app rule library misses bugs unique to developer tools.
 
+**When to add `flow` (v2.8.0, #129 #135):** a `crud-rbac` profile with a non-empty scope lattice — role/tenant/department scoping, UI-vs-server permission parity and state-machine ordering live in the `flow` dimension's crud-rbac pack, and nothing else in the default set hunts them. Step 1b resolves the profile and prints the recommendation; the tokens the operator typed still decide.
+
 **Module filtering**: If one or more `src/modules/X` paths given, audit ONLY those. Else auto-discover via `Glob src/modules/*/`.
 
 Print the resolved plan upfront: `Sweep plan: dimensions=[...], modules=[...], auto=true|false, mode=SEQUENTIAL|PARALLEL`.
@@ -116,6 +118,22 @@ Runs the canonical `core/*` scanners (secret-in-logs, unbounded-external-call, m
 | 4 | Note **start time** (Bash `date +%s` or ms equivalent) — used for `duration_ms` in the manifest |
 | 5 | Print planned sweep: `Will audit N modules from <layout> layout: [list]. Mode: SEQUENTIAL. sweep_id: <id>` |
 
+### Step 1b — Resolve the stack profile (v2.8.0, #129 #135)
+
+Layout detection above answers *where the modules are*. It does not answer *what kind of application this is* — and that decides which rule pack each dimension hunts. A `flow` dispatch that hunts the conversational grid on a server-rendered CRUD app produces a grid the operator has to translate by hand, which is the whole complaint in #129.
+
+Load [references/stack-profiles.md](references/stack-profiles.md) and resolve the profile ONCE, here, before any dispatch:
+
+| # | Action |
+|---|---|
+| 1 | Run Probes 1-5 (manifest → framework set, route tree → render model + Server-Action set, role declaration → `ROLES`, schema FK graph → scope lattice + `SCOPE(M)`, status enum → `STATES(M)`). Operator `app_profile:` in `.lattice/config.yml` wins over every probe |
+| 2 | Resolve `app_type` **per module** where modules disagree (a SaaS with a support bot has both). Record one profile per module alongside its TTD path |
+| 3 | Use the profile → rule-pack table to pick the packs each dimension loads, and to *recommend* dimensions: `cli-tool`/`worker-api` profiles pull in `abuse` + `cli-tool`; a `crud-rbac` profile with a scope lattice makes `flow` worth turning on even though it is opt-in. Recommend, print, and proceed — never silently change the operator's dimension tokens |
+| 4 | Print: `Profile: <app_type>/<render_model>/<auth_model>/<tenancy> (confidence: <c>) — packs: flow=<A\|B>, security=<...>` |
+| 5 | Carry the profile + derived sets into every dispatch brief in Step 2 / Step 2b, and into `--warnings` at manifest time as `"stack-profile: <app_type>/<auth_model>/<tenancy> (confidence: <c>)"` |
+
+At `confidence: low`, or with no profile resolved, ask once. Do not fall back to the pack that used to be the default.
+
 ### Step 2 — Per-module sequential dispatch
 
 **Execution discipline (REQUIRED, not optional):**
@@ -151,7 +169,8 @@ When the user passes `cross-cutting` as a token, **skip Step 2 entirely** and di
 
 1. Do NOT enumerate modules. The whole-repo dispatch sees everything.
 2. Dispatch a single Sonnet sub-agent. Methodology block must include:
-   - The dimension rule libraries selected (load `references/audit-abuse-rules.md` and `references/audit-cli-tool-rules.md` content into the brief verbatim if `abuse` / `cli-tool` are in scope)
+   - The dimension rule libraries selected (load `references/audit-abuse-rules.md` and `references/audit-cli-tool-rules.md` content into the brief verbatim if `abuse` / `cli-tool` are in scope; `references/flow-audit-crud-rbac-rules.md` if `flow` is in scope on a `crud-rbac` profile)
+   - The Step 1b profile and its derived sets (`ROLES`, scope lattice, Server-Action set, `STATES`) — a whole-repo dispatch that re-derives them drifts from the parent
    - Instruction: "Reason about TRUST BOUNDARIES that span files. Where does data flow from one half of the codebase to another? Where does the install/update path hand control to runtime? Where does a YAML field reach across module lines into shell?"
    - The standard finding schema + output discipline.
 3. Output: same `.lattice/findings/open/<TIER-MODULE-RULE>.yml` files. `module:` field is derived from the file the bug LIVES IN, even if the bug spans modules.

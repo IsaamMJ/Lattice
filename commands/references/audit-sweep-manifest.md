@@ -38,7 +38,7 @@ This writes `.lattice/findings/sweeps/<sweep_id>.yml`.
 | `closed_since_last` | Slugs present in open/ at sweep start, now in closed/ |
 | `regressed` | Slugs present in closed/ at sweep start, this sweep created same slug in open/ |
 | `skipped` | YAMLs that failed to parse and were excluded from open/unchanged/closed |
-| `runtime_warnings` | Per-module dispatch warnings + cross-cutting bundle detections |
+| `runtime_warnings` | Per-module dispatch warnings + cross-cutting bundle detections + the Step 1b stack profile (v2.8.0, #135) |
 | `duration_ms` | `now_ms - step1_start_ms` |
 
 ## Manifest YAML shape (for reference)
@@ -78,6 +78,7 @@ skipped: <int>
 runtime_warnings:
   - "<auditor-emitted note that didn't qualify as a finding but should be queryable>"
   # examples:
+  # "stack-profile: crud-rbac/clerk-org-roles/org > department > user (confidence: high)"   # v2.8.0 (#135) — always emit one
   # "module thyrocare: TTD silent on REPORT_FULL semantics; treated code as ground truth"
   # "module payments: 2 setInterval hits inside try/catch — graceful-degrade, not flagged"
   # "cross-cutting: missing-rate-limit in modules [payments, auth, webhooks]"

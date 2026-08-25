@@ -13,6 +13,12 @@
  *   - Silent skip when .lattice/ doesn't exist (non-Lattice repos get nothing)
  *   - Pure fs reads, no subprocesses in the hot path
  *
+ * COUNTING (#181):
+ *   Open-finding counts come from scripts/lattice-findings.mjs, the single
+ *   module shared with the `lattice project-sync` CLAUDE.md block. This file
+ *   owns NO finding-walk or tier-parsing logic of its own — that duplication
+ *   is exactly what made the hook say 61 and the block say 51 for one tree.
+ *
  * Wire into ~/.claude/settings.json:
  *   "hooks": {
  *     "SessionStart": [
@@ -29,8 +35,8 @@
  *   LATTICE_SESSION_START_DISABLE=1   instant no-op
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { join, resolve } from 'path';
 
 // ---- Emergency kill switch ----
 if (process.env.LATTICE_SESSION_START_DISABLE === '1') process.exit(0);
@@ -45,6 +51,34 @@ const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
 // ---- Skip silently if not a Lattice repo ----
 if (!existsSync(join(cwd, '.lattice'))) {
+  clearTimeout(HARD_TIMEOUT);
+  process.exit(0);
+}
+
+// ---- Shared finding counter (#181) ----
+// The open-findings count MUST come from scripts/lattice-findings.mjs — the
+// same module `lattice project-sync` calls to build the CLAUDE.md block.
+// Before #181 this file walked findings/open itself with a `/^tier:\s*(\w+)/`
+// regex while the bash block globbed two directory levels through yaml_field;
+// nested findings showed up only here, quoted tiers and OK markers only there,
+// and the two numbers drifted 10 apart on the same tree. One module, one walk,
+// one set of tier rules — drift is now structurally impossible, not tuned away.
+//
+// Loaded dynamically so a partial install (hook updated, module not yet
+// copied) degrades to a short notice instead of throwing out of a SessionStart
+// hook — the post-v0.9.14 rule is that this file always exits 0.
+let lf = null;
+try {
+  lf = await import('./lattice-findings.mjs');
+} catch {
+  const msg = '# Lattice session context\n\nThis project has Lattice configured, but scripts/lattice-findings.mjs '
+    + 'could not be loaded, so open-finding counts are unavailable. Run `lattice doctor` (or re-run the installer) '
+    + 'and use `lattice list` for current state.';
+  process.stdout.write(JSON.stringify({
+    continue: true,
+    hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: msg },
+    additionalContext: msg,
+  }));
   clearTimeout(HARD_TIMEOUT);
   process.exit(0);
 }
@@ -81,86 +115,37 @@ function readTelemetry(root) {
   }
 }
 
-function countFindingsByTier(root) {
-  // v1.0.2: OK tier tracked separately. OK findings prove a check ran cleanly;
-  // they are NOT actionable and must not surface as "findings to address".
-  const tiers = { CRITICAL: 0, BLOCKER: 0, HIGH: 0, RISK: 0, DRIFT: 0, MEDIUM: 0, WATCH: 0, LOW: 0, OK: 0 };
-  const openDir = join(root, '.lattice', 'findings', 'open');
-  if (!existsSync(openDir)) return tiers;
+// #181: both of these are now projections over ONE shared walk. `openFindings`
+// is collected once per fire and reused — the old code walked findings/open
+// twice (once to count, once to rank) with two subtly different parsers.
+function collectOpen(root) {
   try {
-    const walk = (d) => {
-      for (const e of readdirSync(d, { withFileTypes: true })) {
-        const p = join(d, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.isFile() && e.name.endsWith('.yml')) {
-          try {
-            const content = readFileSync(p, 'utf8');
-            const m = content.match(/^tier:\s*(\w+)/m);
-            if (m && tiers[m[1]] !== undefined) tiers[m[1]]++;
-          } catch {}
-        }
-      }
-    };
-    walk(openDir);
-  } catch {}
-  return tiers;
+    return lf.collectOpenFindings(root);
+  } catch {
+    return [];
+  }
 }
 
-function topFindings(root, n = 3) {
-  // Read .lattice/findings/open/*.yml, sort by tier rank + sweep_date (oldest first).
-  const openDir = join(root, '.lattice', 'findings', 'open');
-  if (!existsSync(openDir)) return [];
-  const rank = { CRITICAL: 1, BLOCKER: 2, HIGH: 3, RISK: 4, DRIFT: 5, MEDIUM: 6, WATCH: 7, LOW: 8 };
-  const items = [];
+function countFindings(findings) {
   try {
-    const walk = (d) => {
-      for (const e of readdirSync(d, { withFileTypes: true })) {
-        const p = join(d, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.isFile() && e.name.endsWith('.yml')) {
-          try {
-            const content = readFileSync(p, 'utf8');
-            const tierM = content.match(/^tier:\s*(\w+)/m);
-            const titleM = content.match(/^title:\s*["']?(.+?)["']?$/m);
-            const dateM = content.match(/^sweep_date:\s*(\S+)/m);
-            const tier = tierM ? tierM[1] : 'UNKNOWN';
-            // v1.0.2: skip OK tier — they prove checks ran, they aren't "to address"
-            if (tier === 'OK') continue;
-            // v2.3.1 (cross-cutting audit): sanitize titles before injecting
-            // into Claude Code's additionalContext. A malicious title can
-            // instruct the LLM to invoke close_finding({confirm:true}) and
-            // defeat the #96 destructiveHint gate — prompt injection inverts
-            // the trust model. Strip control chars, cap length.
-            // Issue #169: the TITLE_DATA<<<…>>>END marker wrapper was dropped
-            // — it leaked raw into every session's context and looked like a
-            // serialization bug. Sanitization here is THE defense; the title
-            // is rendered plainly double-quoted, so also neutralize quote
-            // chars (`"` → `'`) and backticks so the title can't break out
-            // of the quoted span.
-            const sanitize = (s) => {
-              if (!s) return '';
-              return String(s)
-                .replace(/[\x00-\x1F\x7F]/g, ' ')      // control chars (incl. newlines)
-                .replace(/[‪-‮⁦-⁩]/g, ' ')  // bidi overrides
-                .replace(/["`]/g, "'")                 // quote/backtick breakout
-                .slice(0, 200);
-            };
-            const slug = e.name.replace(/\.yml$/, '');
-            items.push({
-              tier,
-              title: sanitize(titleM ? titleM[1] : slug),
-              date: dateM ? dateM[1] : '0000-00-00',
-              slug,
-              r: rank[tier] || 99,
-            });
-          } catch {}
-        }
-      }
-    };
-    walk(openDir);
-  } catch {}
-  items.sort((a, b) => a.r - b.r || a.date.localeCompare(b.date));
-  return items.slice(0, n);
+    return lf.countOpenFindings(findings);
+  } catch {
+    return { byTier: {}, total: 0, ok: 0, unknown: 0, deferred: 0, highPriority: 0, files: 0, findings: [] };
+  }
+}
+
+// Top-N by tier rank then oldest sweep_date. OK markers are excluded by the
+// shared module: they prove a check ran cleanly, they are not work to address.
+// Titles arrive already sanitized (control chars, bidi overrides, quote and
+// backtick breakout stripped, 200-char cap) — see sanitizeTitle() there.
+// v2.3.1 / #169: that sanitization IS the prompt-injection defense; the old
+// TITLE_DATA<<<...>>>END marker wrapper leaked raw into every session context.
+function topFindings(findings, n = 3) {
+  try {
+    return lf.topFindings(findings, n);
+  } catch {
+    return [];
+  }
 }
 
 function countActiveADRs(root) {
@@ -294,29 +279,15 @@ function readFleetStatus(currentRoot) {
     for (const proj of projects) {
       // Skip the current project — that's already covered above.
       try {
-        const a = require('node:path').resolve(proj.path);
-        const b = require('node:path').resolve(currentRoot);
-        if (a === b) continue;
+        if (resolve(proj.path) === resolve(currentRoot)) continue;
       } catch {}
-      const openDir = proj.path + '/.lattice/findings/open';
-      if (!existsSync(openDir)) continue;
-      let projCrit = 0, projHigh = 0;
-      const walk = (d) => {
-        for (const e of readdirSync(d, { withFileTypes: true })) {
-          const fp = d + '/' + e.name;
-          if (e.isDirectory()) walk(fp);
-          else if (e.isFile() && e.name.endsWith('.yml')) {
-            try {
-              const c = readFileSync(fp, 'utf8');
-              const m = c.match(/^tier:\s*(\w+)/m);
-              if (!m) continue;
-              if (m[1] === 'CRITICAL' || m[1] === 'BLOCKER') projCrit++;
-              else if (m[1] === 'HIGH') projHigh++;
-            } catch {}
-          }
-        }
-      };
-      try { walk(openDir); } catch {}
+      // #181: was a THIRD copy of the findings walk, with its own
+      // `/^tier:\s*(\w+)/` regex — so a sibling project's nested or
+      // quoted-tier findings were invisible to the fleet warning even when the
+      // local count saw them. Same module, same rules, every project.
+      const c = countFindings(collectOpen(proj.path));
+      const projCrit = (c.byTier.CRITICAL || 0) + (c.byTier.BLOCKER || 0);
+      const projHigh = c.byTier.HIGH || 0;
       critElsewhere += projCrit;
       highElsewhere += projHigh;
       if (projCrit > 0 || projHigh > 0) {
@@ -344,17 +315,22 @@ function countTodaysSessionEvents(root) {
 // ---- Gather state ----
 const mode = readMode(cwd);
 const telemetry = readTelemetry(cwd);
-const tiers = countFindingsByTier(cwd);
-const top3 = topFindings(cwd, 3);
+const openFindings = collectOpen(cwd);
+const counts = countFindings(openFindings);
+const tiers = counts.byTier;
+const top3 = topFindings(openFindings, 3);
 const adrs = countActiveADRs(cwd);
 const events = countTodaysSessionEvents(cwd);
 const deltas = readDeltas(cwd);
 const fleet = readFleetStatus(cwd);
 
-// v1.0.2: OK tier counted separately; not part of "actionable" total
-const okCount = tiers.OK || 0;
-const totalFindings = Object.values(tiers).reduce((a, b) => a + b, 0) - okCount;
-const highPriority = (tiers.CRITICAL || 0) + (tiers.BLOCKER || 0) + (tiers.HIGH || 0) + (tiers.RISK || 0);
+// v1.0.2: OK tier counted separately; not part of the "actionable" total.
+// #181: these are read off the shared counter rather than re-derived here, so
+// the hook and the `lattice project-sync` CLAUDE.md block cannot disagree.
+const okCount = counts.ok;
+const totalFindings = counts.total;
+const highPriority = counts.highPriority;
+const unknownTier = counts.unknown;
 
 // ---- Build compact summary ----
 // Keep tight — this gets injected into EVERY LLM call after session start.
@@ -371,13 +347,15 @@ const lines = [
 
 // Findings summary line — OK markers shown as "X checks verified" not findings
 if (totalFindings > 0) {
-  const parts = [];
-  for (const t of ['CRITICAL', 'BLOCKER', 'HIGH', 'RISK', 'DRIFT', 'MEDIUM', 'WATCH', 'LOW']) {
-    if (tiers[t] > 0) parts.push(`${t}: ${tiers[t]}`);
-  }
-  lines.push(`- Open findings: ${totalFindings} (${parts.join(', ')})`);
+  lines.push(`- Open findings: ${totalFindings} (${lf.tierSummary(tiers)})`);
   if (highPriority > 0) {
     lines.push(`- ⚠️ ${highPriority} need attention soon (CRITICAL/BLOCKER/HIGH/RISK)`);
+  }
+  // #181: a finding whose tier won't parse used to be dropped here and counted
+  // there. It is now counted in the total and named, so the data problem is
+  // visible instead of showing up as a mismatched number.
+  if (unknownTier > 0) {
+    lines.push(`- ${unknownTier} open finding${unknownTier === 1 ? ' has' : 's have'} an unreadable \`tier:\` — run \`lattice validate\``);
   }
 } else {
   lines.push(`- Open findings: 0 (clean${okCount > 0 ? `; ${okCount} OK check${okCount === 1 ? '' : 's'} verified` : ''})`);
@@ -431,7 +409,7 @@ if (top3.length > 0) {
   // leaked into the session context and read as a serialization bug; the
   // title is now rendered as a plain double-quoted string.
   for (const f of top3) {
-    lines.push(`- [${f.tier}] ${f.slug} — "${f.title}" (sweep ${f.date})`);
+    lines.push(`- [${f.tier}] ${f.slug} — "${f.title}" (sweep ${f.sweepDate})`);
   }
 }
 

@@ -25,7 +25,17 @@ For each dimension in scope, follow the methodology referenced in:
 | audit | commands/audit.md Steps 1-7 | Skip Step 4 executor dispatch (run inline); skip Steps 9-10 contract rewrite (orchestrator only on demand) |
 | scale | commands/scale-audit.md Steps 1-5 | Skip Step 3 executor dispatch (run inline) |
 | security | commands/security-audit.md Steps 1-5 | Skip Step 3 executor dispatch (run inline) |
-| flow | commands/flow-audit.md Steps 1-5 | Skip Step 3 executor dispatch (run inline) |
+| flow | commands/flow-audit.md Steps 1-5 | Skip Step 0 (the orchestrator resolved the profile — use the one in this brief); skip Step 3 executor dispatch (run inline) |
+
+Rule pack per dimension (v2.8.0, #129 #135) — the orchestrator resolved the
+stack profile in Step 1b and it is given below. Do NOT re-derive it, and do NOT
+hunt a pack it did not select:
+
+| Profile `app_type` | flow pack |
+|---|---|
+| crud-rbac | commands/references/flow-audit-crud-rbac-rules.md (19 rules: scoping, UI-vs-server parity, state machine, derived state, route states) |
+| conversational | the grid in commands/flow-audit.md |
+| worker-api / cli-tool | that grid's error-handling + state rows only |
 
 Verdict tiers:
 - Audit: OK | DRIFT | INTENTIONAL | UNVERIFIABLE (every INTENTIONAL needs commit hash or CLAUDE.md citation)
@@ -78,7 +88,20 @@ Dimensions in scope: <comma-separated subset of audit,scale,security,flow>
 Project root: <root>
 sweep_id: <id from Step 1>           # MUST embed this in every YAML you write
 sweep_date: <YYYY-MM-DD>             # MUST embed this in every YAML you write
+Stack profile (from Step 1b — use as given, do not re-derive):
+  app_type: <crud-rbac|conversational|worker-api|cli-tool|mobile-client>
+  render_model: <...>   auth_model: <...>   data_layer: <...>
+  ROLES: [<role>, ...]                 # with scope depth per role
+  scope lattice: <org > department > user | single-tenant>
+  SCOPE(model): <model> -> <fk chain>, ...
+  action set: <file:line>, ...         # exported server actions / route handlers
+  STATES(model): [<state>, ...]  terminals: [<state>, ...]
+  confidence: <high|medium|low>
 ```
+
+The profile block is module-specific, so it belongs here — AFTER the cached
+methodology block. Putting it inside the cached block would break the prompt
+cache on every module whose profile differs.
 
 ## Discipline notes for orchestrator
 

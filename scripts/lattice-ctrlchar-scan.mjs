@@ -213,7 +213,9 @@ function lex(text) {
       continue;
     }
     if (c === "/" && !prevOperand && canStartRegex(text[i + 1])) {
-      emitCode(i);
+      // Scan the candidate BEFORE closing the code region: a `/` that turns out
+      // not to open a regex has to stay part of the surrounding code, and an
+      // early emitCode would leave two overlapping regions behind.
       let j = i + 1;
       let inClass = false;
       let closed = false;
@@ -227,6 +229,7 @@ function lex(text) {
         j++;
       }
       if (closed) {
+        emitCode(i);
         while (j < n && /[a-z]/.test(text[j])) j++;   // flags
         regions.push({ start: i, end: j, kind: REGEX });
         i = j;
@@ -234,8 +237,7 @@ function lex(text) {
         prevOperand = true;
         continue;
       }
-      // Not a regex after all — fall through and treat `/` as an operator.
-      codeStart = Math.min(codeStart, i);
+      // Not a regex after all — treat `/` as the operator it is.
       prevOperand = false;
       i += 1;
       continue;
@@ -561,10 +563,26 @@ function diagnoseStrayBacktick(text, templates) {
 
 // ---- Scan -------------------------------------------------------------------
 
+// An explicit single FILE argument is scanned as-is; a directory goes through
+// the shared scan-set decision. That affordance matters for this rule in
+// particular: the stray-backtick diagnosis is something you run on the one file
+// the compiler is complaining about. Path-based skips only apply to the
+// directory walk, so a fixture can be checked directly.
+function targets(target) {
+  const env = process.env.LATTICE_SCAN_FILES;
+  if (!env || !env.trim()) {
+    try { if (fs.statSync(target).isFile()) return { files: [target], explicit: true }; }
+    catch { /* not a path we can stat — treat as a walk root */ }
+  }
+  return { files: scanTargets(target, EXTS), explicit: false };
+}
+
+const { files: TARGETS, explicit } = targets(root);
+
 let count = 0;
-for (const file of scanTargets(root, EXTS)) {
+for (const file of TARGETS) {
   const norm = file.replace(/\\/g, "/");
-  if (TEST_RE.test(norm) && !FIXTURE_RE.test(norm)) continue;
+  if (!explicit && TEST_RE.test(norm) && !FIXTURE_RE.test(norm)) continue;
   let text;
   try {
     if (fs.statSync(file).size > MAX_BYTES) continue;

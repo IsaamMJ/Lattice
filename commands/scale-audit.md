@@ -38,6 +38,19 @@ Code that "works in dev" often has hidden single-instance assumptions: in-memory
 
 ## Methodology
 
+### Step 0 — Resolve the stack profile (v2.8.0, #135)
+
+Load [references/stack-profiles.md](references/stack-profiles.md) and resolve the profile before hunting. The grid above assumes a long-lived Node process; several rows change meaning without one.
+
+| Profile | Adjustment |
+|---|---|
+| `render_model: server-components+actions` | Per-request server rendering, not a resident process — module-level state is per-instance-per-lambda, and an N+1 inside a server component costs a round trip per render, not per request. Weight the query-shape rows over the in-memory-state rows |
+| `worker-api` (Cloudflare / edge) | No `setInterval` semantics, no shared process memory, hard CPU budget per request. `in-mem-state-no-cluster` is a certainty, not a risk |
+| `crud-rbac` with a scope lattice | Scoped list queries are the hot path — check that the scope chain is indexed (`@@index` on the FK chain from Probe 4), not just present |
+| `cli-tool` | Also load [references/audit-cli-tool-rules.md](references/audit-cli-tool-rules.md) — fork tax and unbounded file reads are the scale story there, not clustering |
+
+Invoked from `/audit-sweep`, the profile arrives in the dispatch brief — use it as given rather than re-deriving.
+
 ### Step 1 — Read living truth
 
 | Source | Why |

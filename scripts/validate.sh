@@ -304,6 +304,47 @@ else
   warn "node not found — cannot run test/rowrewrite-scan.test.mjs"
 fi
 
+# --- 7f. Select-drift detector (#196) -----------------------------------
+# core/select-shape-drift must flag near-identical `select: { … }` projections
+# of the same Prisma model (the hand-copied endpoints whose drift shipped an
+# invisible button) and stay silent on identical copies, unrelated
+# projections, and blocks whose shape is not statically decidable. The model a
+# nested relation select belongs to comes from prisma/schema.prisma, not from
+# the key's spelling; the fixture tree under test/fixtures/select-shape-drift/
+# proves it by re-running the same source against a schema with no relation.
+note "running select-drift detector test (#196)"
+if command -v node >/dev/null 2>&1; then
+  if node "${ROOT}/test/selectdrift-scan.test.mjs" > /tmp/lattice-selectdrift-test.log 2>&1; then
+    ok "selectdrift-scan.test.mjs"
+  else
+    warn "selectdrift-scan.test.mjs failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-selectdrift-test.log >&2 || true
+  fi
+else
+  warn "node not found — cannot run test/selectdrift-scan.test.mjs"
+fi
+
+# --- 7g. Control-character detector (#196) ------------------------------
+# core/control-char-in-output must flag a literal C0/C1 byte in a rendered
+# payload (the #199 sanitiser regex whose range bounds were literal 0x00 and
+# 0x1F, which made that file report as binary to git) and a truncated CSS
+# escape inside a template literal (the `\2013\0a0` that shipped four control
+# characters to a medical results page). "Inside a template literal" is a
+# lexical fact, so the scanner lexes rather than matching lines; the fixture
+# tree under test/fixtures/control-char-in-output/ proves it by moving the
+# same bytes between constructs and checking the verdicts diverge.
+note "running control-character detector test (#196)"
+if command -v node >/dev/null 2>&1; then
+  if node "${ROOT}/test/ctrlchar-scan.test.mjs" > /tmp/lattice-ctrlchar-test.log 2>&1; then
+    ok "ctrlchar-scan.test.mjs"
+  else
+    warn "ctrlchar-scan.test.mjs failed (output below):"
+    sed 's/^/[validate]   /' /tmp/lattice-ctrlchar-test.log >&2 || true
+  fi
+else
+  warn "node not found — cannot run test/ctrlchar-scan.test.mjs"
+fi
+
 # --- 8. Schema doc declares v0.7 YAML format ---------------------------
 note "checking schema doc declares v0.7 YAML format"
 if grep -qE 'one YAML file per finding' "${ROOT}/docs/finding-schema.md" 2>/dev/null; then

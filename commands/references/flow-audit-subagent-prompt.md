@@ -1,6 +1,8 @@
-# flow-audit: Step 3 — pattern-hunt subagent prompt
+# flow-audit: Step 3 — pattern-hunt subagent prompt (conversational pack)
 
 Load when running the full 10-pattern customer-flow audit. Saves ~60% of audit tokens.
+
+This is **Pack A** — calibrated for conversational / multi-turn surfaces (message handlers, LLM turn loops). When Step 0 resolves `app_type: crud-rbac`, load [flow-audit-crud-rbac-subagent-prompt.md](flow-audit-crud-rbac-subagent-prompt.md) instead; the rows below have no referent in a server-rendered CRUD app (#129).
 
 ## Subagent dispatch
 

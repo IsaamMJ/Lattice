@@ -213,6 +213,26 @@ related_files:
 # Walk the full cluster via `lattice cluster <slug>`.
 cluster_root: true   # optional; omit for leaf/symptom findings
 
+# Rule pack (v2.8.0, optional everywhere — #129 #135)
+# Which stack-calibrated rule pack produced this finding. Audit skills resolve a
+# stack profile before hunting (commands/references/stack-profiles.md) and the
+# profile selects the pack; recording it lets one dimension's findings be split
+# by pack during triage and grouped across repos by `lattice projects findings`.
+# Values are pack names, not dimensions: conversational | crud-rbac | cli-tool | abuse
+rule_pack: crud-rbac
+
+# Pack-specific evidence (v2.8.0, optional — emitted by the crud-rbac pack)
+# affected_roles: roles the gap is reachable for, from the parsed role universe
+#                 (a schema enum / TS union — never a grep for "admin").
+# scope_path:     the scope chain the query should have pinned, derived from the
+#                 schema FK graph.
+# transition:     the state-machine edge the finding is about.
+affected_roles:
+  - MEMBER
+  - VIEWER
+scope_path: org > department
+transition: SUBMITTED -> APPROVED
+
 # Optional everywhere
 notes: <free text, only if needed>
 ```

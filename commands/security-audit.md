@@ -67,6 +67,18 @@ Scale audits catch what breaks under load. Security audits catch what an attacke
 
 ## Methodology
 
+### Step 0 — Resolve the stack profile (v2.8.0, #135)
+
+Load [references/stack-profiles.md](references/stack-profiles.md) and resolve the profile before hunting. The grid above is calibrated for a guarded HTTP backend; the profile says which rows apply and what else to load.
+
+| Profile | Adjustment |
+|---|---|
+| `crud-rbac` | Roles and scope are **derived sets**, not greps: parse the role declaration (Probe 3) and the schema FK graph (Probe 4) first. IDOR is then a scope-chain comparison, not a hunch. Group A of [references/flow-audit-crud-rbac-rules.md](references/flow-audit-crud-rbac-rules.md) is the calibrated grid for it, and Server Actions are public POST endpoints — audit them as routes |
+| `cli-tool` / `worker-api` | Also load [references/audit-abuse-rules.md](references/audit-abuse-rules.md) and [references/audit-cli-tool-rules.md](references/audit-cli-tool-rules.md) — the web-app grid misses the fetch-and-exec, indirect-expansion and atomicity classes (#99) |
+| `conversational` | Prompt-injection and LLM cost-abuse rows carry the weight; scope rules mostly do not apply |
+
+Invoked from `/audit-sweep`, the profile arrives in the dispatch brief — use it as given rather than re-deriving.
+
 ### Step 1 — Load living truth
 
 | Source | Why |

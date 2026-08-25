@@ -9,7 +9,7 @@ Lattice ships seven slash commands for Claude Code:
 | `/audit <doc-path>` | Doc-vs-code drift; rewrites docs in contract format |
 | `/scale-audit <module-path>` | Horizontal-scaling killers (in-memory state, `setInterval` crons, in-process rate limiters) |
 | `/security-audit <module-path>` | Auth gaps, signature bypass, secret leaks, IDOR, OWASP Top 10 |
-| `/flow-audit <module-path>` | Customer-flow gaps for conversational AI and multi-step request flows |
+| `/flow-audit <module-path>` | Flow gaps, hunted with the rule pack the stack calls for — CRUD/RBAC scoping, UI-vs-server permission parity, state-machine ordering and route states for server-rendered SaaS; happy path, abandonment and multi-turn context for conversational apps |
 | `/audit-sweep <project-root>` | Runs the in-scope dimensions (audit + scale + security + env-contract by default) across every module via one dispatch per module; aggregates into one manifest |
 | `/lattice-fix <finding-id>` | Auto-fixes one low-risk finding by dispatching a Haiku subagent, verifying, closing — gated against CRITICAL/HIGH/BLOCKER, security, and cluster findings |
 | `/close <finding-id>` | Interactive close skill — gathers the close reason + commit + rationale and invokes `lattice close` |
@@ -160,6 +160,8 @@ bash scripts/migrate.sh   # moves legacy findings to .lattice/findings/
 **Grow / hypothesis lifecycle (optional, v2.x).** Parallel to findings — forward-looking experiments live under `.lattice/hypotheses/{open,running,closed,rolled-back}/`. `lattice grow propose → run → measure → check → close|rollback` with HTTP/file/cmd source schemes (cmd: is default-deny since v2.2.0), `combine: sum|max|min|weighted-avg` for bundled changes, and `lattice grow schedule install` for a closed-loop weekly Telegram digest.
 
 **Audit dimensions.** `audit` (doc-vs-code drift), `scale`, `security`, `env-contract` (silent `process.env.X || 'literal'` fallbacks across Node/TS/Python/Dart), `flow`, `coverage`, `audit-infra` (missing hooks/MCPs based on detected stack), plus free-form `configuration` / `quality` / `product`.
+
+**Stack-aware rule packs (v2.8.0).** Every audit skill resolves a *stack profile* before it hunts — app type, render model, auth model, role universe, scope lattice, data layer, state universe — each field derived from an artifact on disk (the dependency manifest, the route tree, the role enum, the Prisma FK graph) rather than from identifier spelling. The profile selects the rule pack: a server-rendered CRUD app with role-based access gets scoping, UI-vs-server parity, state-machine and route-state rules; a conversational app gets the multi-turn grid. See [`commands/references/stack-profiles.md`](commands/references/stack-profiles.md) for the detection procedure and [`commands/references/flow-audit-crud-rbac-rules.md`](commands/references/flow-audit-crud-rbac-rules.md) for the CRUD/RBAC pack.
 
 **Self-installation.** `lattice setup` bootstraps `.lattice/`. `lattice wire-hooks` idempotently merges SessionStart + statusLine + Stop hooks into `~/.claude/settings.json` (dry-run default, automatic backup). `lattice mcp setup` wires the MCP server into `~/.claude.json`. `lattice update --self` keeps the install current; `lattice doctor` repairs drift; `lattice uninstall` cleans up.
 

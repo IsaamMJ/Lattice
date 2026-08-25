@@ -23,14 +23,30 @@ Split user input on whitespace. Tokens:
 | Token | Meaning |
 |---|---|
 | `.` or any absolute path | Project root (default `.`) |
-| `--surfaces=<csv>` | Comma-separated subset of: `yaml-fuzz,shell-inject,concurrency,windows-edge,artifact-validity` (default = all 5) |
+| `--surfaces=<csv>` | Comma-separated subset of the surfaces the profile selects (see "Surface selection by stack profile"). Default = every surface in the selected set |
 | `--auto-import` | Pipe each sub-agent's findings file through `lattice file --from --no-confirm-dup` at the end |
 | `--max-parallel=N` | Cap concurrent agent count (default 5; lower if rate-limited) |
 
 Print resolved plan upfront:
 `stress-audit plan: surfaces=[...], project=<path>, auto-import=true/false, parallel=N`
 
-## The 5 surfaces
+## Surface selection by stack profile (v2.8.0, #135)
+
+Attack surfaces are a property of the application, not a constant. The five below are calibrated for the `cli-tool` profile (Lattice on Lattice, MCP servers, install scripts) — fanning them out at a server-rendered SaaS produces four empty reports and one about YAML nobody writes.
+
+Resolve the profile first ([references/stack-profiles.md](references/stack-profiles.md)), then dispatch its surface set:
+
+| Profile | Surfaces |
+|---|---|
+| `cli-tool` / `worker-api` | `yaml-fuzz`, `shell-inject`, `concurrency`, `windows-edge`, `artifact-validity` (the briefs below) |
+| `crud-rbac` | `rbac-scope`, `action-parity`, `state-machine`, `route-states`, `concurrency` |
+| `conversational` | `prompt-inject`, `turn-context`, `abandonment`, `concurrency`, `artifact-validity` |
+
+For the `crud-rbac` set, each sub-agent's brief is one rule group of [references/flow-audit-crud-rbac-rules.md](references/flow-audit-crud-rbac-rules.md) — Group A → `rbac-scope`, Group B → `action-parity`, Group C+D → `state-machine`, Group E → `route-states` — plus the derived sets (`ROLES`, scope lattice, action set, `STATES`) from the profile probes. Same dispatch protocol, same multi-doc YAML output schema, same `--auto-import` path. `concurrency` is profile-independent and keeps its brief below.
+
+Do not invent a surface with no rule library behind it: a surface whose brief you cannot ground in a rule group produces exactly the "could be vulnerable" output the anti-pattern table refuses.
+
+## The 5 cli-tool surfaces
 
 Each surface gets its own sub-agent dispatched in a single message (parallel). Each agent must produce `/tmp/stress-<surface>.findings.yml` as multi-doc YAML matching this schema:
 
@@ -179,7 +195,7 @@ After all return:
 | Asking the user permission per agent | Dispatch them all upfront, then check in once at the end |
 | Re-reporting findings already in `.lattice/findings/closed/` | Stale; check before filing |
 | Synthesizing findings without evidence | If sub-agent says "could be vulnerable", refuse to file. Need a concrete code line + failure mode |
-| Running on a non-Lattice repo without warning | Stress dimension is calibrated for the Lattice codebase shape; on other repos warn and continue |
+| Dispatching the cli-tool surfaces at a repo whose profile is not `cli-tool` | The five below are calibrated for the Lattice codebase shape — resolve the profile and dispatch its surface set instead (#135). If the profile is unresolved, warn and continue with the default set |
 
 ## Output discipline
 
